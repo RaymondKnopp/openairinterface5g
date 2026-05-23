@@ -156,7 +156,11 @@ add_boolean_option(GFNI ${AUTODETECT_GFNI} "Whether GFNI intrinsics is available
 
 message(STATUS "CPU architecture is ${CMAKE_SYSTEM_PROCESSOR}")
 if (CROSS_COMPILE)
-  message(STATUS "setting as aarch64")
+  if (QUALCOMM_DRAGONWING)
+    message(STATUS "Target: Qualcomm DragonWing IQ-9/X (Cortex-A78 / ARMv8.2-A)")
+  else()
+    message(STATUS "setting as aarch64")
+  endif()
   set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -gdwarf-2 -lgcc -lrt")
 elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
   # The following intrinsics are assumed to be available on any x86 system
@@ -219,7 +223,12 @@ if (NOT CROSS_COMPILE)
     set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -march=native")
   endif()
 else ()
-  set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -march=armv8.2-a")
+  if (QUALCOMM_DRAGONWING)
+    # DragonWing IQ-9/X: Kryo 780 Gold = Cortex-A78 (ARMv8.2-A + fp16 + dotprod)
+    set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -mcpu=cortex-a78")
+  else()
+    set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -march=armv8.2-a")
+  endif()
 endif()
 
 # we need -rdynamic to incorporate all symbols in shared objects, see man page
