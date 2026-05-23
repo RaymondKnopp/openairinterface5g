@@ -43,10 +43,16 @@ set(CMAKE_C_COMPILER   "${_DW_TC}-gcc")
 set(CMAKE_CXX_COMPILER "${_DW_TC}-g++")
 set(CMAKE_AR           "${_DW_TC}-ar")
 
-# The SDK GCC's built-in sysroot is minimal.  Append Ubuntu arm64 multiarch
-# paths so that libraries installed via "apt-get install pkg:arm64" are found.
-set(CMAKE_C_FLAGS_INIT            "-I/usr/include/aarch64-linux-gnu")
-set(CMAKE_CXX_FLAGS_INIT          "-I/usr/include/aarch64-linux-gnu")
+# The SDK GCC's built-in sysroot has an incomplete glibc (missing L_tmpnam and
+# similar symbols in stdio.h).  Override with the Ubuntu system headers by
+# prepending them via -I, which takes priority over the compiler's sysroot
+# search paths.  /usr/include is the host glibc (architecture-neutral API);
+# /usr/include/aarch64-linux-gnu has the arm64-specific bits/ and sys/ headers.
+set(CMAKE_C_FLAGS_INIT   "-I/usr/include/aarch64-linux-gnu -I/usr/include")
+set(CMAKE_CXX_FLAGS_INIT "-I/usr/include/aarch64-linux-gnu -I/usr/include")
+
+# Linker: search the arm64 multiarch directory so arm64 .so files are found
+# before any host x86 libraries.
 set(CMAKE_EXE_LINKER_FLAGS_INIT    "-L/usr/lib/aarch64-linux-gnu")
 set(CMAKE_SHARED_LINKER_FLAGS_INIT "-L/usr/lib/aarch64-linux-gnu")
 set(CMAKE_MODULE_LINKER_FLAGS_INIT "-L/usr/lib/aarch64-linux-gnu")
@@ -54,12 +60,8 @@ set(CMAKE_MODULE_LINKER_FLAGS_INIT "-L/usr/lib/aarch64-linux-gnu")
 # Direct pkg-config at the arm64 multiarch .pc files
 set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/aarch64-linux-gnu/pkgconfig")
 
-# cmake find_* commands: search Ubuntu arm64 root; never use host binaries
-set(CMAKE_FIND_ROOT_PATH "/usr/aarch64-linux-gnu")
-set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+# Tell cmake's find_library() where Ubuntu multiarch arm64 libs live
+set(CMAKE_LIBRARY_PATH "/usr/lib/aarch64-linux-gnu")
 
 set(CROSS_COMPILE 1)
 set(QUALCOMM_DRAGONWING 1)
