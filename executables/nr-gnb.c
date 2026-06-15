@@ -305,14 +305,17 @@ static void rx_func(processingData_L1_t *info)
     gNB->if_inst->NR_UL_indication(&UL_INFO);
     STOP_MEAS_FULL_SLOT(&gNB->ul_indication_stats, rx_slot_type, NR_UPLINK_SLOT);
 
-    notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->L1_rx_out, NULL);
-    processingData_L1_t *syncMsg = NotifiedFifoData(res);
-    syncMsg->gNB = gNB;
-    syncMsg->frame_rx = frame_rx;
-    syncMsg->slot_rx = slot_rx;
-    res->key = slot_rx;
-    LOG_D(NR_PHY, "Signaling completion for %d.%d (mod_slot %d) on L1_rx_out\n", frame_rx, slot_rx, slot_rx % RU_RX_SLOT_DEPTH);
-    pushNotifiedFIFO(&gNB->L1_rx_out, res);
+    if (IS_SOFTMODEM_RFSIM) {
+      // see wait_free_rx_tti() for why this is necessary
+      notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->L1_rx_out, NULL);
+      processingData_L1_t *syncMsg = NotifiedFifoData(res);
+      syncMsg->gNB = gNB;
+      syncMsg->frame_rx = frame_rx;
+      syncMsg->slot_rx = slot_rx;
+      res->key = slot_rx;
+      LOG_D(NR_PHY, "Signaling completion for %d.%d (mod_slot %d) on L1_rx_out\n", frame_rx, slot_rx, slot_rx % RU_RX_SLOT_DEPTH);
+      pushNotifiedFIFO(&gNB->L1_rx_out, res);
+    }
   }
 
 }
