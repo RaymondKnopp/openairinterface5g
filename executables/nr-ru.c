@@ -591,6 +591,8 @@ void ru_tx_func(void *param)
  */
 static bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_SLOT_DEPTH], int frame_rx, int slot_rx)
 {
+  if (!IS_SOFTMODEM_RFSIM)
+    return true;
   int idx = slot_rx % RU_RX_SLOT_DEPTH;
   if (rx_tti_busy[idx]) {
     bool not_done = true;
