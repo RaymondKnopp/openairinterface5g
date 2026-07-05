@@ -786,6 +786,14 @@ static bool set_fh_init(void *mplane_api, struct xran_fh_init *fh_init, enum xra
 // this is a hack
 int g_kbar;
 
+static int g_vlan_tag[XRAN_PORTS_NUM];
+
+int oran_get_vlan_tag(int ru_idx)
+{
+  DevAssert(ru_idx >= 0 && ru_idx < XRAN_PORTS_NUM);
+  return g_vlan_tag[ru_idx];
+}
+
 static bool set_fh_prach_config(void *mplane_api,
                                 const openair0_config_t *oai0,
                                 const uint32_t max_num_ant,
@@ -996,6 +1004,10 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
     return false;
   }
   paramdef_t *fhp = FH_ConfigList.paramarray[ru_idx];
+
+  // Store VLAN tag for DPDK port configuration after xran_open()
+  const paramdef_t *vlan_pd = gpd(fhp, nfh, ORAN_CONFIG_VLAN_TAG);
+  g_vlan_tag[ru_idx] = vlan_pd->iptr ? *vlan_pd->iptr : 0;
 
   paramdef_t rup[] = ORAN_RU_DESC;
   int nru = sizeofArray(rup);

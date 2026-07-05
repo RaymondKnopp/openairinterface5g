@@ -20,4 +20,6 @@ void print_fh_config(const struct xran_fh_config *fh_config);
 // hack to workaround LiteOn limitation
 extern int g_kbar;
 
+int oran_get_vlan_tag(int ru_idx);
+
 #endif /* ORAN_CONFIG_H */

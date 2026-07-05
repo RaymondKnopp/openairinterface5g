@@ -105,6 +105,7 @@
   {ORAN_FH_CONFIG_T1A_CP_UL,            "T1a_cp_ul" ORAN_FH_HLP_CPLT,  PARAMFLAG_MANDATORY, .uptr=NULL, .defintarrayval=0, TYPE_UINTARRAY, 0}, \
   {ORAN_FH_CONFIG_T1A_UP,               "T1a_up" ORAN_FH_HLP_CPLT,     PARAMFLAG_MANDATORY, .uptr=NULL, .defintarrayval=0, TYPE_UINTARRAY, 0}, \
   {ORAN_FH_CONFIG_TA4,                  "Ta4" ORAN_FH_HLP_CPLT,        PARAMFLAG_MANDATORY, .uptr=NULL, .defintarrayval=0, TYPE_UINTARRAY, 0}, \
+  {ORAN_CONFIG_VLAN_TAG,                "VLAN tag for DPDK port\n",    0,                   .iptr=NULL, .defintval=0,      TYPE_INT,       0}, \
 }
 // clang-format on
 
