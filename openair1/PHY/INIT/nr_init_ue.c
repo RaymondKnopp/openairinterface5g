@@ -388,8 +388,7 @@ void free_nr_ue_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors)
       cudaFreeHost(buffers[i].llr_dev[c]);
 #else
       free_and_zero(buffers[i].llr[c]);
-#endif
-    }
+    free_and_zero(buffers[i].scramble);
   }
 }
 
@@ -519,8 +518,7 @@ void nr_init_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors, const NR_DL
       AssertFatal(err == cudaSuccess, "CUDA Error (pusch_llr_dev): %s\n", cudaGetErrorString(err));
 #else
       buffers[i].llr[c]              = malloc16(llr_buf_max * sizeof(int16_t));
-#endif
-    }
+    buffers[i].scramble              = malloc16(llr_buf_max * sizeof(int16_t));
   }
 }
 
