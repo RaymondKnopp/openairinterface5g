@@ -32,8 +32,7 @@ int nr_ml_llr_maxh_off(int mod_order)
     case 2:  return 0;  // QPSK
     case 4:  return 1;  // 16QAM
     case 6:  return -1; // 64QAM
-    case 8:  return -3; // 256QAM (with the antenna-gain term => effective -2, the prior gNB value)
-    default: return -2;
+    default: return -2; // 256QAM
   }
 }
 
