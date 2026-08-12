@@ -12,11 +12,6 @@
 #include "oran-init.h"
 #include "oaioran.h"
 
-/* From libxran's ethernet layer; set to non-zero to enable software VLAN
- * insertion/strip on TX/RX when the NIC PMD doesn't support HW VLAN offload
- * (e.g. r8169 PMD on RTL8127). */
-extern uint16_t xran_tx_vlan_tag;
-
 #include "common/utils/assertions.h"
 #include "common/utils/LOG/log.h"
 #include "common_lib.h"
@@ -390,46 +385,6 @@ static void oran_allocate_buffers(void *handle,
   xran_5g_prach_req(pi->instanceHandle, prachdst, prachdstdecomp, oai_xran_fh_rx_prach_callback, &portInstances->prach_tag, fh_config->nNumerology[0]);
 }
 
-static void oran_configure_vlan(const struct xran_fh_init *fh_init, int o_xu_id, int vlan_tag)
-{
-  if (vlan_tag == 0)
-    return;
-
-  // one_vf_cu_plane=1: one device per RU at dpdk_dev[o_xu_id]
-  // one_vf_cu_plane=0: two devices per RU at dpdk_dev[2*o_xu_id] (U) and dpdk_dev[2*o_xu_id+1] (C)
-  int num_devs = fh_init->io_cfg.one_vf_cu_plane ? 1 : 2;
-  int base_dev = fh_init->io_cfg.one_vf_cu_plane ? o_xu_id : 2 * o_xu_id;
-
-  for (int d = 0; d < num_devs; d++) {
-    const char *pci = fh_init->io_cfg.dpdk_dev[base_dev + d];
-    if (!pci)
-      continue;
-    uint16_t port_id;
-    if (rte_eth_dev_get_port_by_name(pci, &port_id) != 0) {
-      LOG_W(HW, "VLAN: cannot find DPDK port for %s, skipping\n", pci);
-      continue;
-    }
-    int strip_ret = rte_eth_dev_set_vlan_offload(port_id, RTE_ETH_VLAN_STRIP_OFFLOAD);
-    if (strip_ret != 0)
-      LOG_W(HW, "VLAN: strip offload failed for port %u (%s): %d\n", port_id, pci, strip_ret);
-    int pvid_ret = rte_eth_dev_set_vlan_pvid(port_id, (uint16_t)vlan_tag, 1);
-    if (pvid_ret != 0)
-      LOG_W(HW, "VLAN: PVID set failed for port %u (%s) vlan %d: %d\n", port_id, pci, vlan_tag, pvid_ret);
-    else
-      LOG_I(HW, "VLAN: port %u (%s) RX strip + TX PVID %d configured\n", port_id, pci, vlan_tag);
-
-    /* If either HW VLAN offload isn't available, enable xran's software
-     * fallback (inserts VLAN tag on TX in xran_add_eth_hdr_vlan, strips on
-     * RX in xran_ethdi_filter_packet).  Some NIC PMDs like r8169 for the
-     * RTL8127 return -ENOTSUP for both. */
-    if (strip_ret != 0 || pvid_ret != 0) {
-      xran_tx_vlan_tag = (uint16_t)vlan_tag;
-      LOG_I(HW, "VLAN: enabling xran software VLAN insertion/strip for tag %d "
-                "(HW offload unavailable)\n", vlan_tag);
-    }
-  }
-}
-
 void *oai_oran_initialize(struct xran_fh_init *xran_fh_init, struct xran_fh_config *xran_fh_config)
 {
   int32_t xret = 0;
@@ -460,8 +415,6 @@ void *oai_oran_initialize(struct xran_fh_init *xran_fh_init, struct xran_fh_conf
       printf("xran_open failed %d\n", xret);
       exit(-1);
     }
-
-    oran_configure_vlan(xran_fh_init, o_xu_id, oran_get_vlan_tag(o_xu_id));
 
     int sector = 0;
     printf("Initialize ORAN port instance %d (%d) sector %d\n", o_xu_id, xran_fh_init->xran_ports, sector);
