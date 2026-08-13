@@ -1005,13 +1005,9 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
   }
   paramdef_t *fhp = FH_ConfigList.paramarray[ru_idx];
 
-  // Parse VLAN tag from config and expose via fh_config (SW VLAN in libxran).
-  // libxran (since Sagar's DPAA2 patch) inserts on TX and strips on RX when
-  // cp_vlan_tag / up_vlan_tag are non-zero — no HW offload dependency.
+  // Parse VLAN tag from config; applied to fh_config AFTER the memset below.
   const paramdef_t *vlan_pd = gpd(fhp, nfh, ORAN_CONFIG_VLAN_TAG);
   g_vlan_tag[ru_idx] = vlan_pd->iptr ? *vlan_pd->iptr : 0;
-  fh_config->cp_vlan_tag = (uint16_t)g_vlan_tag[ru_idx];
-  fh_config->up_vlan_tag = (uint16_t)g_vlan_tag[ru_idx];
 
   paramdef_t rup[] = ORAN_RU_DESC;
   int nru = sizeofArray(rup);
@@ -1054,6 +1050,10 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
   fh_config->puschMaskEnable = 0; // enable PUSCH mask; only used if id = O_RU
   fh_config->puschMaskSlot = 0; // specific which slot PUSCH channel masked; only used if id = O_RU
   fh_config->csirsEnable = 0; // enable CSI-RS (Cat B specific)
+  // SW VLAN (libxran Sagar patch): applied on TX / stripped on RX when non-zero.
+  // Set AFTER the memset earlier in this function, which would otherwise wipe them.
+  fh_config->cp_vlan_tag = (uint16_t)g_vlan_tag[ru_idx];
+  fh_config->up_vlan_tag = (uint16_t)g_vlan_tag[ru_idx];
   fh_config->debugStop = 0; // enable auto stop; only used if id = O_RU
   fh_config->debugStopCount = 0; // enable auto stop after number of Tx packets; not used in xran
   fh_config->DynamicSectionEna = 0; // enable dynamic C-Plane section allocation
