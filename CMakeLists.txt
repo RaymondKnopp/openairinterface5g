@@ -225,7 +225,15 @@ if (NOT CROSS_COMPILE)
 else ()
   if (QUALCOMM_DRAGONWING)
     # DragonWing IQ-9/X: Kryo 780 Gold = Cortex-A78 (ARMv8.2-A + fp16 + dotprod)
-    set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -mcpu=cortex-a78")
+    #
+    # +crypto is required, not cosmetic: it defines __ARM_FEATURE_AES, which is what
+    # SIMDE tests (as SIMDE_ARCH_ARM_AES) before mapping _mm_clmulepi64_si128 onto
+    # vmull_p64.  Without it the CRC folding in openair1/PHY/CODING/crc_byte.c falls back
+    # to SIMDE's scalar emulation of carry-less multiply: measured DLSCH Outer CRC at
+    # 63.1 us/slot here versus 12.0 us on a slower RK3588 (built -march=native, so it gets
+    # crypto implicitly), while every other TX function was 1.7-2x FASTER on this part.
+    # libxran already builds with +crypto.
+    set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -mcpu=cortex-a78+crypto")
   else()
     set(C_FLAGS_PROCESSOR "${C_FLAGS_PROCESSOR} -march=armv8.2-a")
   endif()
