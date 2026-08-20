@@ -165,6 +165,28 @@ void nr_layer_precoder_simd(const int n_layers,
   @param[in]  re_cnt             Number of RE to write, should be multiple of 4.
   @param[out] txdataF_precoded_ant0/ant1  Precoded data for antenna ports 0 and 1.
 */
+/*! \brief Fused 2-layer / 4-port cross-polar precoder: writes the port pair (p, p+2) in
+   one pass, sharing the two complex multiplies between the polarisations. Halves the MAC
+   count versus calling nr_layer_precoder_simd() per port. Accurate to ~1 LSB of the
+   codebook weight, not bit-exact - see nr_modulation.c.
+  @param[in]  txdataF_res_mapped Tx data after resource mapping (2 layers).
+  @param[in]  weights            precoding weights [layer][port].
+  @param[in]  p                  low port of the pair; the high port is p+2.
+  @param[in]  phi_swap,phi_neg   the unit rotation phi relating the two polarisations.
+  @param[in]  re_cnt             Number of RE to write, must be a multiple of 4.
+  @param[out] out_lo, out_hi     Precoded data for ports p and p+2.
+*/
+void nr_layer_precoder_2x4_simd(const int symSz,
+                                const c16_t txdataF_res_mapped[2][symSz],
+                                c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
+                                const int p,
+                                const bool phi_swap,
+                                const bool phi_neg,
+                                const int sc_offset,
+                                const int re_cnt,
+                                c16_t *out_lo,
+                                c16_t *out_hi);
+
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],
                                 c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],

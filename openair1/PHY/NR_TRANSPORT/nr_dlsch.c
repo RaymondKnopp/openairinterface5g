@@ -499,6 +499,14 @@ static inline void do_txdataF(c16_t **txdataF,
 #define NR_PDSCH_2X2_FASTPATH 1
 #endif
 
+/* The 2x4 cross-polar fast path shares its two complex multiplies between the two
+   polarisations, so unlike the 2x2 butterfly its win is fewer MACs rather than cheaper
+   ones -- the QRDMX argument above does not apply to it. Measured on Cortex-A78C, where
+   precoding was 304.6 us of a 403 us PDSCH generation at 273 PRB / 2 layers / 4 ports. */
+#if defined(__aarch64__)
+#define NR_PDSCH_2X4_FASTPATH 1
+#endif
+
 #ifdef NR_PDSCH_2X2_FASTPATH
 /* Fast path of do_txdataF() for the 2 antenna-port / 2-layer case: fills both
    antenna ports in a single pass using the radix-2 butterfly precoder, sharing
@@ -547,6 +555,118 @@ static inline void do_txdataF_2x2(c16_t **txdataF,
   } // RB loop: while(rb < rb_size)
 }
 #endif // NR_PDSCH_2X2_FASTPATH
+
+/* Does the rank-2 4-port codebook entry have the cross-polar butterfly structure
+ *   W[0][p+2] = +phi*W[0][p]   and   W[1][p+2] = -phi*W[1][p],   phi in {1,-1,j,-j} ?
+ * The generated weights are each rounded to int16 independently, so compare with a small
+ * tolerance. Returns false if it does not hold, in which case the caller must use the
+ * generic per-port kernel - the fast path is an optimisation, never a requirement. */
+static inline bool nr_prec2x4_classify(const nfapi_nr_pm_pdu_t *pm, int p, bool *phi_swap, bool *phi_neg)
+{
+  const int TOL = 2; /* LSB; independent rounding of the two entries costs about 1 */
+  const c16_t a0 = pm->weights[0][p], a2 = pm->weights[0][p + 2];
+  const c16_t b0 = pm->weights[1][p], b2 = pm->weights[1][p + 2];
+  /* candidates: phi = +1, -1, +j, -j, expressed as (swap, neg) */
+  static const bool cand_swap[4] = {false, false, true, true};
+  static const bool cand_neg[4] = {false, true, false, true};
+  for (int c = 0; c < 4; c++) {
+    /* phi*(r,i): +1 -> (r,i); -1 -> (-r,-i); +j -> (-i,r); -j -> (i,-r) */
+    c16_t pa, pb;
+    if (!cand_swap[c]) {
+      pa = cand_neg[c] ? (c16_t){-a0.r, -a0.i} : a0;
+      pb = cand_neg[c] ? (c16_t){-b0.r, -b0.i} : b0;
+    } else {
+      pa = cand_neg[c] ? (c16_t){a0.i, -a0.r} : (c16_t){-a0.i, a0.r};
+      pb = cand_neg[c] ? (c16_t){b0.i, -b0.r} : (c16_t){-b0.i, b0.r};
+    }
+    /* layer 0 takes +phi, layer 1 takes -phi */
+    if (abs(pa.r - a2.r) <= TOL && abs(pa.i - a2.i) <= TOL && abs(-pb.r - b2.r) <= TOL
+        && abs(-pb.i - b2.i) <= TOL) {
+      *phi_swap = cand_swap[c];
+      *phi_neg = cand_neg[c];
+      return true;
+    }
+  }
+  return false;
+}
+
+/* Can the 2x4 fast path handle this PDU?  The scheduler sets prg_size = rbSize so there is
+   a single PMI for the whole allocation; check it once here rather than discovering a bad
+   one after part of the symbol has already been written. */
+static inline bool nr_pdsch_2x4_usable(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15)
+{
+  const nfapi_nr_tx_precoding_and_beamforming_t *pb = &rel15->precodingAndBeamforming;
+  if (pb->prg_size == 0)
+    return true; /* pmi 0 everywhere: the memcpy/memset path, always fine */
+  const int pmi = pb->prgs_list[0].pm_idx;
+  if (pmi == 0)
+    return true;
+  if (pmi - 1 >= gNB->gNB_config.pmi_list.num_pm_idx)
+    return false;
+  const nfapi_nr_pm_pdu_t *pm = &gNB->gNB_config.pmi_list.pmi_pdu[pmi - 1];
+  if (pmi != pm->pm_idx || pm->num_ant_ports != 4 || pm->numLayers != 2)
+    return false;
+  /* every RB of the allocation uses this one PMI, so one classification per pair suffices */
+  bool swap, neg;
+  return nr_prec2x4_classify(pm, 0, &swap, &neg) && nr_prec2x4_classify(pm, 1, &swap, &neg);
+}
+
+/* Fast path of do_txdataF() for 2 layers onto 4 antenna ports: fills the port pair
+   (p, p+2) in one pass. See nr_layer_precoder_2x4_simd(). */
+static inline bool do_txdataF_2x4(c16_t **txdataF,
+                                  int symbol_sz,
+                                  c16_t txdataF_precoding[][symbol_sz],
+                                  PHY_VARS_gNB *gNB,
+                                  const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15,
+                                  const uint16_t *ant_to_map,
+                                  int rb_start,
+                                  int rb_size,
+                                  int txdataF_offset_per_symbol)
+{
+  int rb = 0;
+  uint16_t subCarrier = get_block_start_sc(rb_start, rel15->BWPStart, symbol_sz);
+  const nfapi_nr_tx_precoding_and_beamforming_t *pb = &rel15->precodingAndBeamforming;
+  while (rb < rb_size) {
+    const int pmi = (pb->prg_size > 0) ? (pb->prgs_list[(int)rb / pb->prg_size].pm_idx) : 0;
+    const int pmi2 = (rb < (rb_size - 1) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 1) / pb->prg_size].pm_idx) : -1;
+    const int pmi3 = (rb < (rb_size - 2) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 2) / pb->prg_size].pm_idx) : -1;
+    const int pmi4 = (rb < (rb_size - 3) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 3) / pb->prg_size].pm_idx) : -1;
+    int rb_step0 = pmi == pmi2 ? 2 : 1;
+    const int rb_step = rb_step0 == 2 && pmi3 == pmi && pmi4 == pmi ? 4 : rb_step0;
+    const int re_cnt = NR_NB_SC_PER_RB * rb_step;
+    if (pmi == 0) { // unitary precoding: port i carries layer i, the others are silent
+      for (int a = 0; a < 4; a++) {
+        c16_t *dst = &txdataF[ant_to_map[a]][txdataF_offset_per_symbol + subCarrier];
+        if (a < rel15->nrOfLayers)
+          memcpy(dst, &txdataF_precoding[a][subCarrier], re_cnt * sizeof(**txdataF));
+        else
+          memset(dst, 0, re_cnt * sizeof(**txdataF));
+      }
+    } else {
+      nfapi_nr_pm_pdu_t *pmi_pdu = &gNB->gNB_config.pmi_list.pmi_pdu[pmi - 1];
+      if (pmi != pmi_pdu->pm_idx || pmi_pdu->num_ant_ports != 4 || pmi_pdu->numLayers != 2)
+        return false;
+      for (int p = 0; p < 2; p++) {
+        bool phi_swap, phi_neg;
+        if (!nr_prec2x4_classify(pmi_pdu, p, &phi_swap, &phi_neg))
+          return false; /* codebook is not of the expected form: caller falls back */
+        nr_layer_precoder_2x4_simd(symbol_sz,
+                                   txdataF_precoding,
+                                   pmi_pdu->weights,
+                                   p,
+                                   phi_swap,
+                                   phi_neg,
+                                   subCarrier,
+                                   re_cnt,
+                                   &txdataF[ant_to_map[p]][txdataF_offset_per_symbol],
+                                   &txdataF[ant_to_map[p + 2]][txdataF_offset_per_symbol]);
+      }
+    }
+    subCarrier += re_cnt;
+    rb += rb_step;
+  }
+  return true;
+}
 
 typedef struct pdschSymbolProc_s {
   PHY_VARS_gNB *gNB;
@@ -686,6 +806,70 @@ static void nr_pdsch_symbol_processing(void *arg)
       }
     } else
 #endif // NR_PDSCH_2X2_FASTPATH
+#ifdef NR_PDSCH_2X4_FASTPATH
+    /* 2 layers onto 4 ports: halve the complex MACs by sharing them between the two
+     * polarisations.  Decided once per symbol, never partway through: the scheduler sets
+     * prg_size = rbSize, so the whole allocation carries a single PMI, and if that PMI is
+     * not of the expected cross-polar form we simply use the generic kernel below. */
+    if (rel15->nrOfLayers == 2 && num_log_ports == 4 && nr_pdsch_2x4_usable(gNB, rel15)) {
+      int pos = 0;
+      int block_start, block_end;
+      while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
+#ifdef NR_PDSCH_2X4_VERIFY
+        /* Run the generic per-port kernel first, keep its output, then let the fused path
+         * overwrite it and report the largest deviation.  The two are NOT bit-exact: the
+         * codebook rounds W[l][p] and W[l][p+2] independently, so deriving one from the
+         * other costs ~1 LSB.  Anything beyond a couple of LSB is a real bug. */
+        {
+          const int nsc_v = (block_end - block_start + 1) * NR_NB_SC_PER_RB;
+          const int sc0_v = get_block_start_sc(block_start, rel15->BWPStart, symbol_sz);
+          c16_t ref[4][nsc_v];
+          for (int a = 0; a < 4; a++) {
+            do_txdataF(txdataF, symbol_sz, txdataF_precoding, gNB, rel15, rdata->ant_to_map[a],
+                       block_start, block_end - block_start + 1, txdataF_offset_per_symbol);
+            memcpy(ref[a], &txdataF[rdata->ant_to_map[a]][txdataF_offset_per_symbol + sc0_v],
+                   nsc_v * sizeof(c16_t));
+          }
+          do_txdataF_2x4(txdataF, symbol_sz, txdataF_precoding, gNB, rel15, rdata->ant_to_map,
+                         block_start, block_end - block_start + 1, txdataF_offset_per_symbol);
+          static int worst = 0;
+          for (int a = 0; a < 4; a++) {
+            const c16_t *got = &txdataF[rdata->ant_to_map[a]][txdataF_offset_per_symbol + sc0_v];
+            for (int i = 0; i < nsc_v; i++) {
+              int dr = abs(got[i].r - ref[a][i].r), di = abs(got[i].i - ref[a][i].i);
+              int d = dr > di ? dr : di;
+              if (d > worst) {
+                worst = d;
+                printf("2X4VERIFY worst deviation %d LSB (ant %d re %d: ref %d %d got %d %d)\n",
+                       worst, a, i, ref[a][i].r, ref[a][i].i, got[i].r, got[i].i);
+              }
+            }
+          }
+        }
+#endif
+        bool ok = do_txdataF_2x4(txdataF,
+                                 symbol_sz,
+                                 txdataF_precoding,
+                                 gNB,
+                                 rel15,
+                                 rdata->ant_to_map,
+                                 block_start,
+                                 block_end - block_start + 1,
+                                 txdataF_offset_per_symbol);
+        DevAssert(ok); /* nr_pdsch_2x4_usable() already vetted the PMI */
+        if (gNB->phase_comp) {
+          const int start_sc = get_block_start_sc(block_start, rel15->BWPStart, symbol_sz);
+          const int nsc = (block_end - block_start + 1) * NR_NB_SC_PER_RB;
+          const c16_t rot = frame_parms->symbol_rotation[0][symb_offset + l_symbol];
+          for (int a = 0; a < 4; a++) {
+            c16_t *psc = &txdataF[rdata->ant_to_map[a]][txdataF_offset_per_symbol + start_sc];
+            rotate_cpx_vector(psc, rot, psc, nsc, 15);
+          }
+          mark_prb_range(rdata->pdsch_phase_comp_prb_mask, rdata->prb_mask_words, l_symbol, block_start, block_end - block_start + 1);
+        }
+      }
+    } else
+#endif // NR_PDSCH_2X4_FASTPATH
     for (int ant = 0; ant < num_log_ports; ant++) {
       int pos = 0;
       int block_start, block_end;

@@ -1081,6 +1081,83 @@ static inline nr_prec2x2_rot_t nr_prec2x2_classify(const c16_t w)
   return r;
 }
 
+/* Fused cross-polar precoder for 2 layers onto 4 antenna ports.
+ *
+ * For 4 CSI ports with XP=2 (two polarisations of N1*N2=2 co-polar elements) the rank-2
+ * Type-I codebook satisfies, for the port pair (p, p+2) of the same co-polar element:
+ *
+ *     W[0][p+2] = +phi * W[0][p]        W[1][p+2] = -phi * W[1][p],     phi in {1, j}
+ *
+ * (verified against the weights this codebase actually generates). So with
+ * a = W[0][p]*x0 and b = W[1][p]*x1, the two polarisations are a butterfly:
+ *
+ *     y_p     = a + b
+ *     y_{p+2} = phi * (a - b)
+ *
+ * which costs 4 complex multiplies per RE instead of the 8 the generic per-port kernel
+ * does, because a and b are shared between the two polarisations. phi is a unit rotation,
+ * so applying it is a lane swap plus a negate, not a multiply. Measured on a DragonWing DU
+ * (273 PRB, 2 layers, 4 ports) precoding was 304.6 us of a 403 us PDSCH generation, so this
+ * is the dominant term in DL TX.
+ *
+ * NOT bit-exact against nr_layer_precoder_simd(): the stored W[l][p+2] is rounded to int16
+ * independently of W[l][p], so deriving one from the other differs by up to ~1 LSB on a
+ * weight of ~23170 (about -88 dB, far below the output quantisation). Validate with a
+ * tolerance, not memcmp.
+ *
+ * phi_swap/phi_neg describe phi: {false,false} = +1, {true,X} = +/-j. */
+void nr_layer_precoder_2x4_simd(const int symSz,
+                                const c16_t txdataF_res_mapped[2][symSz],
+                                c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
+                                const int p,
+                                const bool phi_swap,
+                                const bool phi_neg,
+                                const int sc_offset,
+                                const int re_cnt,
+                                c16_t *out_lo,
+                                c16_t *out_hi)
+{
+#ifdef __aarch64__
+  const c16_t w0 = weights[0][p], w1 = weights[1][p];
+  /* same operand form the generic kernel feeds cmac0_prec128(): real parts then imag */
+  const int16x8_t w0r = vdupq_n_s16(w0.r), w0i = vdupq_n_s16(w0.i);
+  const int16x8_t w1r = vdupq_n_s16(w1.r), w1i = vdupq_n_s16(w1.i);
+
+  const int16x8_t *in0 = (const int16x8_t *)(txdataF_res_mapped[0] + sc_offset);
+  const int16x8_t *in1 = (const int16x8_t *)(txdataF_res_mapped[1] + sc_offset);
+  c16_t *o_lo = out_lo + sc_offset;
+  c16_t *o_hi = out_hi + sc_offset;
+
+  int done = 0;
+  for (; done + 4 <= re_cnt; done += 4) {
+    const int16x8_t x0 = vld1q_s16((const int16_t *)in0++);
+    const int16x8_t x1 = vld1q_s16((const int16_t *)in1++);
+    const int16x8_t a = cmac0_prec128(x0, w0r, w0i);
+    const int16x8_t b = cmac0_prec128(x1, w1r, w1i);
+    /* saturating, to match the generic path's vqaddq_s16 accumulation */
+    const int16x8_t sum = vqaddq_s16(a, b);
+    int16x8_t dif = vqsubq_s16(a, b);
+    if (phi_swap) { /* multiply by +/-j: (r,i) -> (-i, r) or (i, -r) */
+      const int16x8_t sw = vrev32q_s16(dif);
+      const int16x8_t neg = vnegq_s16(sw);
+      /* +j: real = -i, imag = +r  => take neg on even lanes, sw on odd lanes */
+      const uint16x8_t even = {0xffff, 0, 0xffff, 0, 0xffff, 0, 0xffff, 0};
+      dif = phi_neg ? vbslq_s16(even, sw, neg) : vbslq_s16(even, neg, sw);
+    } else if (phi_neg) {
+      dif = vnegq_s16(dif);
+    }
+    vst1q_s16((int16_t *)(o_lo + done), sum);
+    vst1q_s16((int16_t *)(o_hi + done), dif);
+  }
+  /* re_cnt is always a multiple of NR_NB_SC_PER_RB = 12, so the SIMD loop is exact */
+  DevAssert(done == re_cnt);
+#else
+  (void)symSz; (void)txdataF_res_mapped; (void)weights; (void)p;
+  (void)phi_swap; (void)phi_neg; (void)sc_offset; (void)re_cnt; (void)out_lo; (void)out_hi;
+  AssertFatal(false, "nr_layer_precoder_2x4_simd: aarch64 only\n");
+#endif
+}
+
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],
                                 c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
