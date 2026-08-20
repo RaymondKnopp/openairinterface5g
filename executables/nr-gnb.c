@@ -303,6 +303,12 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->dlsch_scrambling_stats, "DLSCH scrambling", NULL, NULL, output, end-output);
   output += print_meas_log(&gNB->dlsch_modulation_stats, "DLSCH modulation", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->dlsch_pdsch_generation_stats, "PDSCH generation", NULL, NULL, output, end - output);
+  /* The two halves of PDSCH generation.  Both are already measured per symbol task and
+   * merged in nr_generate_pdsch_prepare(), they were just never printed -- so the largest
+   * stage of the TX budget had no visible breakdown. Sums over the symbol tasks, so they
+   * are CPU time and add up to more than the wall time of "PDSCH generation" above. */
+  output += print_meas_log(&gNB->dlsch_resource_mapping_stats, "  PDSCH RE mapping", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->dlsch_precoding_stats, "  PDSCH precoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->phy_proc_rx, "L1 Rx processing", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ts_deinterleave, "UL segment deinterleaving", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ts_rate_unmatch, "UL segment rate recovery", NULL, NULL, output, end - output);
@@ -392,6 +398,8 @@ void *nrL1_stats_thread(void *param) {
   reset_meas(&gNB->dlsch_scrambling_stats);
   reset_meas(&gNB->dlsch_modulation_stats);
   reset_meas(&gNB->dlsch_pdsch_generation_stats);
+  reset_meas(&gNB->dlsch_resource_mapping_stats);
+  reset_meas(&gNB->dlsch_precoding_stats);
   while (!oai_exit) {
     sleep(1);
     if (ftruncate(fileno(fd), 0) != 0 || fseek(fd, 0, SEEK_SET) != 0) {
