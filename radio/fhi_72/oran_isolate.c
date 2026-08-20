@@ -205,6 +205,10 @@ void oran_fh_if4p5_south_out(RU_t *ru, int frame, int slot, uint64_t timestamp)
       .nb_tx = ru->nb_tx,
       .txdataF_BF = ru->common.txdataF_BF,
       .beam_id = ru->common.beam_id,
+      /* xran_fh_tx_send_slot() spreads the per-antenna BFP compression over this pool;
+       * it falls back to running inline if the pool is NULL.  Size and pinning come from
+       * num_tp_cores/tp_cores in the RUs section (default: 2 unpinned threads). */
+      .threadPool = ru->threadPool,
   };
 
   // printf("south_out:\tframe=%d\tslot=%d\ttimestamp=%ld\n",frame,slot,timestamp);
