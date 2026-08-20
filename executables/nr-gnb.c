@@ -83,6 +83,62 @@ static void tx_split8(PHY_VARS_gNB *gNB, int slot_type, int frame_tx, int slot_t
     ru->fh_south_out(ru, frame_tx, slot_tx, timestamp_tx);
 }
 
+static void tx_overrun_alarm(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_request_t *DL_req, int frame_tx, int slot_tx)
+{
+  /* L1 TX overrun alarm.  A TX that misses its deadline still hands xran a buffer on
+   * time, so the O-RU reports nothing wrong (RX_LATE ~0, RX_CORRUPT 0) -- only the
+   * CONTENTS are stale, and the UE silently fails to decode the DCI.  The aggregate
+   * time_stats cannot show this: it reports a mean plus a max that start_meas() zeroes
+   * every 16384 trials, so an outlier is visible but its cause is not.  Report the
+   * configuration that produced the overrun instead. */
+  if (gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
+    const double us = (double)gNB->phy_proc_tx.p_time / 1000.0;
+    if (us > gNB->tx_overrun_us) {
+      gNB->tx_overrun_count++;
+      /* Rate limit: the first 10, then one in 100.  An overrun storm must not add
+       * logging to a thread that is already behind. */
+      if (gNB->tx_overrun_count <= 10 || (gNB->tx_overrun_count % 100) == 0) {
+        gNB->tx_overrun_logged++;
+        const nfapi_nr_dl_tti_request_body_t *b = &DL_req->dl_tti_request_body;
+        int n_pdsch = 0;
+        for (int i = 0; i < b->nPDUs; i++)
+          if (b->dl_tti_pdu_list[i].PDUType == NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
+            n_pdsch++;
+        /* Deferred, not logged: this runs on the TX thread at the moment it is already
+           past its deadline, and OAI's log path ends in a blocking write(2) on the
+           calling thread. Arming the alarm must not be able to make the overrun worse.
+           The stats thread drains the ring. One line per PDU rather than one packed
+           line, because a deferred line is RT_LOG_LINE bytes; each carries frame.slot
+           so the record stays readable if another producer interleaves. */
+        RT_LOG_DEFER("%4d.%2d L1 TX overrun: %.1f us > %d us (%llu total, %d PDSCH PDU%s)",
+                     frame_tx,
+                     slot_tx,
+                     us,
+                     gNB->tx_overrun_us,
+                     (unsigned long long)gNB->tx_overrun_count,
+                     n_pdsch,
+                     n_pdsch == 1 ? "" : "s");
+        for (int i = 0; i < b->nPDUs; i++) {
+          if (b->dl_tti_pdu_list[i].PDUType != NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
+            continue;
+          const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *p = &b->dl_tti_pdu_list[i].pdsch_pdu.pdsch_pdu_rel15;
+          RT_LOG_DEFER("%4d.%2d L1 TX overrun:   rnti %04x mcs %d rb %d+%d layers %d symb %d+%d tbs %u",
+                       frame_tx,
+                       slot_tx,
+                       p->rnti,
+                       p->mcsIndex[0],
+                       p->rbStart,
+                       p->rbSize,
+                       p->nrOfLayers,
+                       p->StartSymbolIndex,
+                       p->NrOfSymbols,
+                       p->TBSize[0]);
+        }
+      }
+    }
+  }
+}
+
 static void tx_func(processingData_L1tx_t *info)
 {
   int frame_tx = info->frame;
@@ -139,6 +195,8 @@ static void tx_func(processingData_L1tx_t *info)
     tx_split72(gNB, tx_slot_type, frame_tx, slot_tx);
   else
     tx_split8(gNB, tx_slot_type, frame_tx, slot_tx, info->timestamp_tx);
+  if (tx_slot_type & NR_DOWNLINK_SLOT)
+    tx_overrun_alarm(gNB, &sched_response.DL_req, frame_tx, slot_tx);
 }
 
 void *L1_rx_thread(void *arg) 
