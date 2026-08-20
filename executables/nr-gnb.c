@@ -115,6 +115,55 @@ static void tx_func(processingData_L1tx_t *info)
 
     STOP_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, tx_slot_type, NR_DOWNLINK_SLOT);
     STOP_MEAS_FULL_SLOT(&info->gNB->phy_proc_tx, tx_slot_type, NR_DOWNLINK_SLOT);
+
+    /* L1 TX overrun alarm.  A TX that misses its deadline still hands xran a buffer on
+     * time, so the O-RU reports nothing wrong (RX_LATE ~0, RX_CORRUPT 0) -- only the
+     * CONTENTS are stale, and the UE silently fails to decode the DCI.  The aggregate
+     * time_stats cannot show this: it reports a mean plus a max that start_meas() zeroes
+     * every 16384 trials, so an outlier is visible but its cause is not.  Report the
+     * configuration that produced the overrun instead. */
+    if (gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
+      const double us = (double)gNB->phy_proc_tx.p_time / (1000.0 * get_cpu_freq_GHz());
+      if (us > gNB->tx_overrun_us) {
+        gNB->tx_overrun_count++;
+        /* Rate limit: the first 10, then one in 100.  An overrun storm must not add
+         * logging to a thread that is already behind. */
+        if (gNB->tx_overrun_count <= 10 || (gNB->tx_overrun_count % 100) == 0) {
+          gNB->tx_overrun_logged++;
+          const nfapi_nr_dl_tti_request_body_t *b = &sched_response.DL_req.dl_tti_request_body;
+          int n_pdsch = 0;
+          char cfg[256];
+          int off = 0;
+          for (int i = 0; i < b->nPDUs && off < (int)sizeof(cfg) - 64; i++) {
+            if (b->dl_tti_pdu_list[i].PDUType != NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
+              continue;
+            const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *p = &b->dl_tti_pdu_list[i].pdsch_pdu.pdsch_pdu_rel15;
+            n_pdsch++;
+            off += snprintf(cfg + off,
+                            sizeof(cfg) - off,
+                            " [rnti %04x mcs %d rb %d+%d layers %d symb %d+%d tbs %u]",
+                            p->rnti,
+                            p->mcsIndex[0],
+                            p->rbStart,
+                            p->rbSize,
+                            p->nrOfLayers,
+                            p->StartSymbolIndex,
+                            p->NrOfSymbols,
+                            p->TBSize[0]);
+          }
+          LOG_W(NR_PHY,
+                "%4d.%2d L1 TX overrun: %.1f us > %d us (%llu total, %d PDSCH PDU%s)%s\n",
+                frame_tx,
+                slot_tx,
+                us,
+                gNB->tx_overrun_us,
+                (unsigned long long)gNB->tx_overrun_count,
+                n_pdsch,
+                n_pdsch == 1 ? "" : "s",
+                n_pdsch ? cfg : " none");
+        }
+      }
+    }
   }
 }
 

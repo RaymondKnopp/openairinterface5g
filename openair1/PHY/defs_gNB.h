@@ -480,6 +480,15 @@ typedef struct PHY_VARS_gNB_s {
   int num_pusch_symbols_per_thread;
   int num_pdsch_symbols_per_thread;
   int dmrs_num_antennas_per_thread;
+  /* L1 TX overrun alarm.  time_stats gives a mean and a windowed max, which tells you an
+   * outlier happened but nothing about the conditions that produced it.  When
+   * phy_proc_tx exceeds tx_overrun_us, log the slot and its PDSCH configuration instead.
+   * Logging is rate limited: an overrun storm must not add work to a thread that is
+   * already late (cf. drop_old_prach(), which logs LOG_E at ~200/s under overload).
+   * tx_overrun_count stays exact even when logging is throttled. */
+  int tx_overrun_us; /* threshold in us; 0 disables the alarm */
+  uint64_t tx_overrun_count; /* every overrun, whether logged or not */
+  uint64_t tx_overrun_logged; /* how many were actually printed */
   pthread_t L1_rx_thread;
   int L1_rx_thread_core;
   pthread_t L1_tx_thread;
