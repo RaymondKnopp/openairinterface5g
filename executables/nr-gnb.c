@@ -96,7 +96,12 @@ static void tx_func(processingData_L1tx_t *info)
   if (tx_slot_type == NR_DOWNLINK_SLOT || tx_slot_type == NR_MIXED_SLOT || get_softmodem_params()->continuous_tx
       || IS_SOFTMODEM_RFSIM || cfg->analog_beamforming_ve.analog_bf_vendor_ext.value) {
     start_meas(&info->gNB->phy_proc_tx);
+    /* Split the measured region so the overrun alarm can say WHICH half was slow: PDCCH/PDSCH
+     * generation, or the RU path (precoding + fronthaul BFP compression).  One aggregate
+     * number cannot distinguish them, and they have entirely different causes. */
+    const uint64_t t_gen_start = rdtsc_oai();
     phy_procedures_gNB_TX(info->gNB, &sched_response.DL_req, &sched_response.TX_req, &sched_response.UL_dci_req, frame_tx,slot_tx);
+    const uint64_t t_gen_end = rdtsc_oai();
 
     PHY_VARS_gNB *gNB = info->gNB;
     processingData_RU_t syncMsgRU;
@@ -106,6 +111,7 @@ static void tx_func(processingData_L1tx_t *info)
     syncMsgRU.timestamp_tx = info->timestamp_tx;
     LOG_D(PHY, "gNB: %d.%d : calling RU TX function\n", syncMsgRU.frame_tx, syncMsgRU.slot_tx);
     ru_tx_func((void *)&syncMsgRU);
+    const uint64_t t_ru_end = rdtsc_oai();
     stop_meas(&info->gNB->phy_proc_tx);
 
     /* L1 TX overrun alarm.  A TX that misses its deadline still hands xran a buffer on
@@ -114,13 +120,36 @@ static void tx_func(processingData_L1tx_t *info)
      * time_stats cannot show this: it reports a mean plus a max that start_meas() zeroes
      * every 16384 trials, so an outlier is visible but its cause is not.  Report the
      * configuration that produced the overrun instead. */
+    if (cpu_meas_enabled) {
+      const double ghz_ = 1000.0 * get_cpu_freq_GHz();
+      const double tot_ = (double)gNB->phy_proc_tx.p_time / ghz_;
+      const double gen_ = (double)(t_gen_end - t_gen_start) / ghz_;
+      AssertFatal(slot_tx < NR_MAX_SLOTS_PER_FRAME, "slot_tx %d out of range\n", slot_tx);
+      typeof(gNB->tx_slot_stats[0]) *st = &gNB->tx_slot_stats[slot_tx];
+      st->n++;
+      st->tot_us += (uint64_t)tot_;
+      st->gen_us += (uint64_t)gen_;
+      st->ru_us += (uint64_t)((double)(t_ru_end - t_gen_end) / ghz_);
+      if ((uint32_t)tot_ > st->max_us)
+        st->max_us = (uint32_t)tot_;
+      if ((uint32_t)gen_ > st->max_gen_us)
+        st->max_gen_us = (uint32_t)gen_;
+    }
+
     if (gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
       const double us = (double)gNB->phy_proc_tx.p_time / (1000.0 * get_cpu_freq_GHz());
       if (us > gNB->tx_overrun_us) {
         gNB->tx_overrun_count++;
-        /* Rate limit: the first 10, then one in 100.  An overrun storm must not add
-         * logging to a thread that is already behind. */
-        if (gNB->tx_overrun_count <= 10 || (gNB->tx_overrun_count % 100) == 0) {
+        /* Rate limit: the first 10, then one in 101.  An overrun storm must not add logging
+         * to a thread that is already behind.
+         *
+         * The modulus is prime on purpose.  With one-in-100 and a TDD pattern giving 16 TX
+         * slots per frame, gcd(100,16)=4, so the sampled slot phase-locks: a run at a 100 us
+         * threshold logged 16600 lines that were ALL slots 3/8/13/18 and never once visited
+         * the other twelve.  Anything read off these lines is then a property of the
+         * aliasing, not of the DU.  A prime cannot share a factor with the frame structure.
+         * For per-slot statistics use tx_slot_stats[] below, which counts every slot. */
+        if (gNB->tx_overrun_count <= 10 || (gNB->tx_overrun_count % 101) == 0) {
           gNB->tx_overrun_logged++;
           const nfapi_nr_dl_tti_request_body_t *b = &sched_response.DL_req.dl_tti_request_body;
           int n_pdsch = 0;
@@ -143,12 +172,21 @@ static void tx_func(processingData_L1tx_t *info)
                             p->NrOfSymbols,
                             p->TBSize[0]);
           }
+          /* precoding_stats and tx_fhaul carry p_time from THIS slot's call, so the RU half
+           * breaks down further without extra instrumentation. */
+          const double ghz = 1000.0 * get_cpu_freq_GHz();
+          const RU_t *ru = gNB->RU_list[0];
           LOG_W(NR_PHY,
-                "%4d.%2d L1 TX overrun: %.1f us > %d us (%llu total, %d PDSCH PDU%s)%s\n",
+                "%4d.%2d L1 TX overrun: %.1f us > %d us (gen %.1f, ru %.1f = prec %.1f + fhaul %.1f)"
+                " (%llu total, %d PDSCH PDU%s)%s\n",
                 frame_tx,
                 slot_tx,
                 us,
                 gNB->tx_overrun_us,
+                (double)(t_gen_end - t_gen_start) / ghz,
+                (double)(t_ru_end - t_gen_end) / ghz,
+                (double)ru->precoding_stats.p_time / ghz,
+                (double)ru->tx_fhaul.p_time / ghz,
                 (unsigned long long)gNB->tx_overrun_count,
                 n_pdsch,
                 n_pdsch == 1 ? "" : "s",
@@ -300,6 +338,31 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
 
   output += print_meas_log(&ru->tx_fhaul,"tx_fhaul",NULL,NULL, output, end - output);
 
+  /* Per-slot TX timing.  Only slots that actually carry TX appear (the UL slots of a TDD
+   * pattern never run tx_func), so the table is also a readable map of the pattern.
+   * Unlike the overrun alarm this counts every slot, so slots are directly comparable. */
+  bool any = false;
+  for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && !any; s++)
+    any = gNB->tx_slot_stats[s].n > 0;
+  if (any && output < end) {
+    output += snprintf(output, end - output, "TX per slot [slot: n avg(gen+ru) max maxgen]:\n");
+    for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && output < end; s++) {
+      const uint64_t n = gNB->tx_slot_stats[s].n;
+      if (n == 0)
+        continue;
+      output += snprintf(output,
+                         end - output,
+                         "  %3d: %8llu %6llu us (%5llu + %5llu) max %5u gen %5u\n",
+                         s,
+                         (unsigned long long)n,
+                         (unsigned long long)(gNB->tx_slot_stats[s].tot_us / n),
+                         (unsigned long long)(gNB->tx_slot_stats[s].gen_us / n),
+                         (unsigned long long)(gNB->tx_slot_stats[s].ru_us / n),
+                         gNB->tx_slot_stats[s].max_us,
+                         gNB->tx_slot_stats[s].max_gen_us);
+    }
+  }
+
   return output - begin;
 }
 
@@ -356,8 +419,18 @@ void init_gNB_Tpool(int inst)
   PHY_VARS_gNB *gNB;
   gNB = RC.gNB[inst];
   gNB_L1_proc_t *proc = &gNB->proc;
-  // ULSCH decoding threadpool
   initTpool(get_softmodem_params()->threadPoolConfig, &gNB->threadPool, cpumeas(CPUMEAS_GETSTATE));
+  /* UL work goes to its own pool when L1_rx_pool_cores says so, otherwise it shares the one
+   * above.  Sharing is the historical behaviour and stays the default, but it lets a UL slot
+   * -- which pushes one task per symbol -- fill the FIFO ahead of the next DL slot's TX
+   * dispatch, which then waits for the whole batch regardless of how many workers exist. */
+  if (gNB->rx_pool_cores != NULL && strlen(gNB->rx_pool_cores) > 0) {
+    LOG_I(NR_PHY, "separate L1 RX thread pool on cores %s\n", gNB->rx_pool_cores);
+    initTpool(gNB->rx_pool_cores, &gNB->threadPoolRxOwn, cpumeas(CPUMEAS_GETSTATE));
+    gNB->threadPoolRx = &gNB->threadPoolRxOwn;
+  } else {
+    gNB->threadPoolRx = &gNB->threadPool;
+  }
 
   // L1 RX result FIFO
   initNotifiedFIFO(&gNB->resp_L1);
@@ -381,6 +454,8 @@ void term_gNB_Tpool(int inst) {
   abortNotifiedFIFO(&gNB->L1_tx_out);
   pthread_join(gNB->L1_tx_thread, NULL);
 
+  if (gNB->threadPoolRx == &gNB->threadPoolRxOwn)
+    abortTpool(&gNB->threadPoolRxOwn);
   abortTpool(&gNB->threadPool);
   abortNotifiedFIFO(&gNB->L1_rx_out);
 

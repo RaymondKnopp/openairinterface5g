@@ -1017,6 +1017,8 @@ int main(int argc, char **argv)
   //NR_COMMON_channels_t *cc = RC.nrmac[0]->common_channels;
   int ret = 1;
   initNamedTpool(gNBthreads, &gNB->threadPool, true, "gNB-tpool");
+  /* simulators run both directions on the one pool */
+  gNB->threadPoolRx = &gNB->threadPool;
   initNotifiedFIFO(&gNB->L1_tx_out);
 
   // Buffers to store internal memory of slot process

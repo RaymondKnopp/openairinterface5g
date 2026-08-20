@@ -736,6 +736,8 @@ int main(int argc, char *argv[])
     initFloatingCoresTpool(threadCnt, &gNB->threadPool, false, "gNB-tpool");
   else
     initNamedTpool(gNBthreads, &gNB->threadPool, true, "gNB-tpool");
+    /* simulators run both directions on the one pool */
+    gNB->threadPoolRx = &gNB->threadPool;
 
   NR_UL_IND_t UL_INFO = {0};
   UL_INFO.crc_ind.crc_list = UL_INFO.crc_pdu_list;

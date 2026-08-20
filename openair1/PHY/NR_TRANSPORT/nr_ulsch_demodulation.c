@@ -883,7 +883,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
         nr_pusch_symbol_processing(rdata);
       } else {
         task_t t = {.func = &nr_pusch_symbol_processing, .args = rdata};
-        pushTpool(&gNB->threadPool, t);
+        pushTpool(gNB->threadPoolRx, t);
       }
 
       LOG_D(PHY, "%d.%d Added symbol %d to process, in pipe\n", frame, slot, symbol);
