@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "xran_fh_o_du.h"
+#include "common/utils/threadPool/thread-pool.h"
 #include "openair1/PHY/impl_defs_nr.h"
 #include "openair1/PHY/TOOLS/tools_defs.h"
 #include "openair1/PHY/defs_nr_common.h"
@@ -32,6 +33,10 @@ typedef struct ru_info_s {
   /// - first index: symbol index [0.. symbols_per_frame)
   /// - second index: beam_id [0..num_ports)
   uint16_t **beam_id;
+
+  /* RU thread pool, used to parallelise the per-antenna BFP compression in
+   * xran_fh_tx_send_slot().  NULL is valid and means "run inline". */
+  tpool_t *threadPool;
 
   // Needed for Prach
   c16_t (*prach_buf)[NUMBER_OF_NR_RU_PRACH_OCCASIONS_MAX][NR_PRACH_SEQ_LEN_L];

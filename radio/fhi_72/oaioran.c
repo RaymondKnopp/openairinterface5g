@@ -640,12 +640,28 @@ int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
 /** @details Write PDSCH IQ-data from OAI txdataF_BF buffer to xran buffers. If
  * I/Q compression (bitwidth < 16 bits) is configured, compresses the data
  * before writing. */
+/* Per-antenna DL work for one slot: BFP-compress every scheduled symbol of this antenna
+ * into the xran U-plane buffers.  Split out of xran_fh_tx_send_slot() so it can run on the
+ * RU thread pool.
+ *
+ * Antenna is the right granularity, not symbol: everything touched here is indexed by
+ * ant_id (the xran buffers, txdataF_BF, the PRB map), so antennas are independent, whereas
+ * two symbols of the SAME antenna both write p_prbMapElm->nBeamIndex and would race.  It
+ * also matches nr_feptx_tp(), which parallelises the split-8 OFDM the same way. */
+typedef struct {
+  ru_info_t *ru;
+  int slot;
+  int tti;
+  int ant_id;
+  int fftsize;
+  int nb_tx_per_ru;
+  task_ans_t *ans;
+} oran_txcomp_cmd_t;
+
+static void oran_tx_compress_ant(void *arg);
+
 int xran_fh_tx_send_slot(ru_info_t *ru, int frame, int slot, uint64_t timestamp)
 {
-  void *ptr = NULL;
-  int32_t *pos = NULL;
-  int idx = 0;
-
   const struct xran_fh_init *fh_init = get_xran_fh_init();
   const struct xran_fh_config *fh_cfg = get_xran_fh_config(0);
   uint8_t mu_number = fh_cfg->mu_number[0];
@@ -694,154 +710,200 @@ int xran_fh_tx_send_slot(ru_info_t *ru, int frame, int slot, uint64_t timestamp)
     }
   }
 
-  for (uint16_t cc_id = 0; cc_id < 1 /*nSectorNum*/; cc_id++) { // OAI does not support multiple CC yet.
-    for (uint8_t ant_id = 0; ant_id < ru->nb_tx; ant_id++) {
-      oran_buf_list_t *bufs = get_xran_buffers(ant_id / nb_tx_per_ru);
-      const struct xran_frame_config *frame_conf = &get_xran_fh_config(ant_id / nb_tx_per_ru)->frame_conf;
-      // skip processing this slot is TX (no TX in this slot)
-      if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_dl_guard_slot(frame_conf, slot)) {
-        continue;
-      }
-
-      /* TODO: Remove this hack to set nPrbElm for mixed slot. This can be set statically during init based on TDD pattern. */
-      if (fh_cfg->RunSlotPrbMapBySymbolEnable) {
-        uint8_t *pPrbMapData = bufs->srccp[ant_id % nb_tx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
-        struct xran_prb_map *pPrbMap = (struct xran_prb_map *)pPrbMapData;
-        struct xran_prb_map *pRbMap = pPrbMap;
-        int32_t dl_sym_end = 0;
-        for (int32_t sym_idx = 0; sym_idx < XRAN_NUM_OF_SYMBOL_PER_SLOT; sym_idx++) {
-          if (!is_tdd_dl_symbol(frame_conf, slot, sym_idx)) {
-            dl_sym_end = sym_idx;
-            break;
-          }
-        }
-        if (frame_conf->nFrameDuplexType != XRAN_FDD && is_tdd_guard_slot(frame_conf, slot))
-          pRbMap->nPrbElm = dl_sym_end;
-        else
-          pRbMap->nPrbElm = XRAN_NUM_OF_SYMBOL_PER_SLOT;
-      }
-
-      // This loop would better be more inner to avoid confusion and maybe also errors.
-      for (int32_t sym_idx = 0; sym_idx < XRAN_NUM_OF_SYMBOL_PER_SLOT; sym_idx++) {
-        /* skip UL and guard symbols. */
-        if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_dl_symbol(frame_conf, slot, sym_idx)) {
-          continue;
-        }
-        uint8_t *pData =
-            bufs->src[ant_id % nb_tx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers[sym_idx % XRAN_NUM_OF_SYMBOL_PER_SLOT].pData;
-        uint8_t *pPrbMapData = bufs->srccp[ant_id % nb_tx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
-        struct xran_prb_map *pPrbMap = (struct xran_prb_map *)pPrbMapData;
-        ptr = pData;
-        pos = &ru->txdataF_BF[ant_id][sym_idx * fftsize];
-
-        uint8_t *u8dptr;
-        // even when the fragmentation occurs, nRBSize & nRBStart carry the same values in each prbMap
-        // therefore, I took the liberty to just extract these values from the first prbMap
-        struct xran_prb_elm *p_prbMapElm = &pPrbMap->prbMap[0];
-        int num_totalRB = p_prbMapElm->nRBSize;
-        int start_totalRB = p_prbMapElm->nRBStart;
-
-        if (ptr && pos) {
-          u8dptr = (uint8_t *)ptr;
-          int16_t payload_len = 0;
-
-          uint8_t *dst = (uint8_t *)u8dptr;
-
-          for (uint32_t idxElm = 0; idxElm < pPrbMap->nPrbElm; idxElm++) {
-            struct xran_section_desc *p_sec_desc = NULL;
-            struct xran_prb_elm *p_prbMapElm = &pPrbMap->prbMap[idxElm];
-
-            // radio-transport fragmentation is not supported in xran F release;
-            // E-bit = 1 => each ethernet frame is considered as the last fragment;
-            // a group of PRBs per each symbol is encapsulated in one ethernet frame.
-            // => seems that the RUs don't check for E-bit
-            p_sec_desc = &p_prbMapElm->sec_desc[sym_idx];
-            int16_t startRB = p_prbMapElm->UP_nRBStart;
-            int16_t numRB = p_prbMapElm->UP_nRBSize;
-
-            if (p_sec_desc == NULL) {
-              printf("p_sec_desc == NULL\n");
-              exit(-1);
-            }
-
-            // For Liteon FR2 with RunSlotPrbMapBySymbolEnable xran_prb_map will have xran_prb_elm prbMap[14], each idxElm matches to sym_idx.
-            if (fh_cfg->RunSlotPrbMapBySymbolEnable) {
-              /* skip, if not scheduled */
-              if(sym_idx < p_prbMapElm->nStartSymb || sym_idx >= p_prbMapElm->nStartSymb + p_prbMapElm->numSymb){
-                  p_sec_desc->iq_buffer_offset = 0;
-                  p_sec_desc->iq_buffer_len    = 0;
-                  continue;
-              }
-            }
-            p_prbMapElm->nBeamIndex = ru->beam_id[slot * XRAN_NUM_OF_SYMBOL_PER_SLOT + sym_idx][ant_id];
-
-            dst = xran_add_hdr_offset(dst, p_prbMapElm->compMethod);
-
-            uint16_t *dst16 = (uint16_t *)dst;
-
-            // Start of this section
-            int32_t *pos_start = pos + (start_totalRB + startRB) * N_SC_PER_PRB;
-
-            if (p_prbMapElm->compMethod == XRAN_COMPMETHOD_NONE) {
-              payload_len = numRB * N_SC_PER_PRB * 4L;
-              /* convert to Network order */
-              // NOTE: ggc 11 knows how to generate AVX2 for this!
-              for (idx = 0; idx < (numRB * N_SC_PER_PRB) * 2; idx++)
-                ((uint16_t *)dst16)[idx] = htons(((uint16_t *)pos_start)[idx]);
-            } else if (p_prbMapElm->compMethod == XRAN_COMPMETHOD_BLKFLOAT) {
-              payload_len = (3 * p_prbMapElm->iqWidth + 1) * numRB;
-
-              /* Although arm intrinsics natively handle unaligned memory
-              access, we use a 64 byte aligned input here for maximum
-              performance. So the src_compr buffer is used for both x86 and arm.
-              */
-              uint32_t src_compr[num_totalRB * N_SC_PER_PRB] __attribute__((aligned(64)));
-
-              /* Copy from txdataF with current symbol's PRB start (nRBStart) +
-              current section's PRB start (UP_nPRBStart) */
-              memcpy(src_compr, pos_start, (numRB * N_SC_PER_PRB) * sizeof(*pos_start));
-
-#if defined(__i386__) || defined(__x86_64__)
-              struct xranlib_compress_request bfp_com_req = {};
-              struct xranlib_compress_response bfp_com_rsp = {};
-
-              bfp_com_req.data_in = (int16_t *)src_compr;
-
-              bfp_com_req.numRBs = numRB;
-              bfp_com_req.len = payload_len;
-              bfp_com_req.compMethod = p_prbMapElm->compMethod;
-              bfp_com_req.iqWidth = p_prbMapElm->iqWidth;
-
-              bfp_com_rsp.data_out = (int8_t *)dst;
-              bfp_com_rsp.len = 0;
-
-              xranlib_compress_avx512(&bfp_com_req, &bfp_com_rsp);
-#elif defined(__arm__) || defined(__aarch64__)
-              armral_bfp_compression(p_prbMapElm->iqWidth, numRB, (int16_t *)src_compr, (int8_t *)dst);
-#else
-              AssertFatal(1 == 0, "BFP compression not supported on this architecture");
-#endif
-            } else {
-              printf("p_prbMapElm->compMethod == %d is not supported\n", p_prbMapElm->compMethod);
-              exit(-1);
-            }
-
-            p_sec_desc->iq_buffer_offset = RTE_PTR_DIFF(dst, u8dptr);
-            p_sec_desc->iq_buffer_len = payload_len;
-
-            dst += payload_len;
-            dst = xran_add_hdr_offset(dst, p_prbMapElm->compMethod);
-          }
-
-          // The tti should be updated as it increased.
-          pPrbMap->tti_id = tti;
-
-        } else {
-          printf("ptr ==NULL\n");
-          exit(-1); // fails here??
-        }
-      }
+  /* Per-antenna BFP compression.  Serial here was ~193 us of the TX budget (measured as
+   * tx_fhaul on a DragonWing DU at 273 PRB / 4x4), which is 27% of a full-band slot and the
+   * one TX stage that never got parallelised -- PDSCH generation already spreads over the
+   * pool via L1_num_tx_sym_per_thread.  Spread it over the RU pool when one is configured. */
+  const int nb_tx = ru->nb_tx;
+  oran_txcomp_cmd_t cmd[nb_tx];
+  task_ans_t ans;
+  if (ru->threadPool)
+    init_task_ans(&ans, nb_tx);
+  for (int ant_id = 0; ant_id < nb_tx; ant_id++) {
+    cmd[ant_id] = (oran_txcomp_cmd_t){.ru = ru,
+                                      .slot = slot,
+                                      .tti = tti,
+                                      .ant_id = ant_id,
+                                      .fftsize = fftsize,
+                                      .nb_tx_per_ru = nb_tx_per_ru,
+                                      .ans = ru->threadPool ? &ans : NULL};
+    if (ru->threadPool) {
+      task_t t = {.func = oran_tx_compress_ant, .args = &cmd[ant_id]};
+      pushTpool(ru->threadPool, t);
+    } else {
+      oran_tx_compress_ant(&cmd[ant_id]); /* no RU pool configured: unchanged behaviour */
     }
   }
+  if (ru->threadPool)
+    join_task_ans(&ans);
+
   return (0);
+}
+
+/* see oran_txcomp_cmd_t: one slot of DL compression for a single antenna */
+static void oran_tx_compress_ant(void *arg)
+{
+  oran_txcomp_cmd_t *c = (oran_txcomp_cmd_t *)arg;
+  ru_info_t *ru = c->ru;
+  const int slot = c->slot;
+  const int tti = c->tti;
+  const uint8_t ant_id = c->ant_id;
+  const int fftsize = c->fftsize;
+  const int nb_tx_per_ru = c->nb_tx_per_ru;
+  const struct xran_fh_config *fh_cfg = get_xran_fh_config(0);
+  /* ptr/pos/idx were function-scope in xran_fh_tx_send_slot(); they have to be per-task
+   * now that the antennas run concurrently. */
+  void *ptr = NULL;
+  int32_t *pos = NULL;
+  int idx = 0;
+
+  oran_buf_list_t *bufs = get_xran_buffers(ant_id / nb_tx_per_ru);
+  const struct xran_frame_config *frame_conf = &get_xran_fh_config(ant_id / nb_tx_per_ru)->frame_conf;
+  // skip processing this slot is TX (no TX in this slot)
+  if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_dl_guard_slot(frame_conf, slot)) {
+    goto done;
+  }
+
+  /* TODO: Remove this hack to set nPrbElm for mixed slot. This can be set statically during init based on TDD pattern. */
+  if (fh_cfg->RunSlotPrbMapBySymbolEnable) {
+    uint8_t *pPrbMapData = bufs->srccp[ant_id % nb_tx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
+    struct xran_prb_map *pPrbMap = (struct xran_prb_map *)pPrbMapData;
+    struct xran_prb_map *pRbMap = pPrbMap;
+    int32_t dl_sym_end = 0;
+    for (int32_t sym_idx = 0; sym_idx < XRAN_NUM_OF_SYMBOL_PER_SLOT; sym_idx++) {
+      if (!is_tdd_dl_symbol(frame_conf, slot, sym_idx)) {
+        dl_sym_end = sym_idx;
+        break;
+      }
+    }
+    if (frame_conf->nFrameDuplexType != XRAN_FDD && is_tdd_guard_slot(frame_conf, slot))
+      pRbMap->nPrbElm = dl_sym_end;
+    else
+      pRbMap->nPrbElm = XRAN_NUM_OF_SYMBOL_PER_SLOT;
+  }
+
+  // This loop would better be more inner to avoid confusion and maybe also errors.
+  for (int32_t sym_idx = 0; sym_idx < XRAN_NUM_OF_SYMBOL_PER_SLOT; sym_idx++) {
+    /* skip UL and guard symbols. */
+    if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_dl_symbol(frame_conf, slot, sym_idx)) {
+      continue;
+    }
+    uint8_t *pData =
+        bufs->src[ant_id % nb_tx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers[sym_idx % XRAN_NUM_OF_SYMBOL_PER_SLOT].pData;
+    uint8_t *pPrbMapData = bufs->srccp[ant_id % nb_tx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
+    struct xran_prb_map *pPrbMap = (struct xran_prb_map *)pPrbMapData;
+    ptr = pData;
+    pos = &ru->txdataF_BF[ant_id][sym_idx * fftsize];
+
+    uint8_t *u8dptr;
+    // even when the fragmentation occurs, nRBSize & nRBStart carry the same values in each prbMap
+    // therefore, I took the liberty to just extract these values from the first prbMap
+    struct xran_prb_elm *p_prbMapElm = &pPrbMap->prbMap[0];
+    int num_totalRB = p_prbMapElm->nRBSize;
+    int start_totalRB = p_prbMapElm->nRBStart;
+
+    if (ptr && pos) {
+      u8dptr = (uint8_t *)ptr;
+      int16_t payload_len = 0;
+
+      uint8_t *dst = (uint8_t *)u8dptr;
+
+      for (uint32_t idxElm = 0; idxElm < pPrbMap->nPrbElm; idxElm++) {
+        struct xran_section_desc *p_sec_desc = NULL;
+        struct xran_prb_elm *p_prbMapElm = &pPrbMap->prbMap[idxElm];
+
+        // radio-transport fragmentation is not supported in xran F release;
+        // E-bit = 1 => each ethernet frame is considered as the last fragment;
+        // a group of PRBs per each symbol is encapsulated in one ethernet frame.
+        // => seems that the RUs don't check for E-bit
+        p_sec_desc = &p_prbMapElm->sec_desc[sym_idx];
+        int16_t startRB = p_prbMapElm->UP_nRBStart;
+        int16_t numRB = p_prbMapElm->UP_nRBSize;
+
+        if (p_sec_desc == NULL) {
+          printf("p_sec_desc == NULL\n");
+          exit(-1);
+        }
+
+        // For Liteon FR2 with RunSlotPrbMapBySymbolEnable xran_prb_map will have xran_prb_elm prbMap[14], each idxElm matches to sym_idx.
+        if (fh_cfg->RunSlotPrbMapBySymbolEnable) {
+          /* skip, if not scheduled */
+          if(sym_idx < p_prbMapElm->nStartSymb || sym_idx >= p_prbMapElm->nStartSymb + p_prbMapElm->numSymb){
+              p_sec_desc->iq_buffer_offset = 0;
+              p_sec_desc->iq_buffer_len    = 0;
+              continue;
+          }
+        }
+        p_prbMapElm->nBeamIndex = ru->beam_id[slot * XRAN_NUM_OF_SYMBOL_PER_SLOT + sym_idx][ant_id];
+
+        dst = xran_add_hdr_offset(dst, p_prbMapElm->compMethod);
+
+        uint16_t *dst16 = (uint16_t *)dst;
+
+        // Start of this section
+        int32_t *pos_start = pos + (start_totalRB + startRB) * N_SC_PER_PRB;
+
+        if (p_prbMapElm->compMethod == XRAN_COMPMETHOD_NONE) {
+          payload_len = numRB * N_SC_PER_PRB * 4L;
+          /* convert to Network order */
+          // NOTE: ggc 11 knows how to generate AVX2 for this!
+          for (idx = 0; idx < (numRB * N_SC_PER_PRB) * 2; idx++)
+            ((uint16_t *)dst16)[idx] = htons(((uint16_t *)pos_start)[idx]);
+        } else if (p_prbMapElm->compMethod == XRAN_COMPMETHOD_BLKFLOAT) {
+          payload_len = (3 * p_prbMapElm->iqWidth + 1) * numRB;
+
+          /* Although arm intrinsics natively handle unaligned memory
+          access, we use a 64 byte aligned input here for maximum
+          performance. So the src_compr buffer is used for both x86 and arm.
+          */
+          uint32_t src_compr[num_totalRB * N_SC_PER_PRB] __attribute__((aligned(64)));
+
+          /* Copy from txdataF with current symbol's PRB start (nRBStart) +
+          current section's PRB start (UP_nPRBStart) */
+          memcpy(src_compr, pos_start, (numRB * N_SC_PER_PRB) * sizeof(*pos_start));
+
+#if defined(__i386__) || defined(__x86_64__)
+          struct xranlib_compress_request bfp_com_req = {};
+          struct xranlib_compress_response bfp_com_rsp = {};
+
+          bfp_com_req.data_in = (int16_t *)src_compr;
+
+          bfp_com_req.numRBs = numRB;
+          bfp_com_req.len = payload_len;
+          bfp_com_req.compMethod = p_prbMapElm->compMethod;
+          bfp_com_req.iqWidth = p_prbMapElm->iqWidth;
+
+          bfp_com_rsp.data_out = (int8_t *)dst;
+          bfp_com_rsp.len = 0;
+
+          xranlib_compress_avx512(&bfp_com_req, &bfp_com_rsp);
+#elif defined(__arm__) || defined(__aarch64__)
+          armral_bfp_compression(p_prbMapElm->iqWidth, numRB, (int16_t *)src_compr, (int8_t *)dst);
+#else
+          AssertFatal(1 == 0, "BFP compression not supported on this architecture");
+#endif
+        } else {
+          printf("p_prbMapElm->compMethod == %d is not supported\n", p_prbMapElm->compMethod);
+          exit(-1);
+        }
+
+        p_sec_desc->iq_buffer_offset = RTE_PTR_DIFF(dst, u8dptr);
+        p_sec_desc->iq_buffer_len = payload_len;
+
+        dst += payload_len;
+        dst = xran_add_hdr_offset(dst, p_prbMapElm->compMethod);
+      }
+
+      // The tti should be updated as it increased.
+      pPrbMap->tti_id = tti;
+
+    } else {
+      printf("ptr ==NULL\n");
+      exit(-1); // fails here??
+    }
+  }
+
+done:
+  if (c->ans)
+    completed_task_ans(c->ans);
 }
