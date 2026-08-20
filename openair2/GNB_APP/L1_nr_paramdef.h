@@ -32,6 +32,8 @@
 #define HLP_L1_NUM_RX_SYM_PER_THREAD         "number of symbols processed per PUSCH generation thread"
 #define L1_NUM_TX_SYM_PER_THREAD             "L1_num_tx_sym_per_thread"
 #define HLP_L1_NUM_TX_SYM_PER_THREAD         "number of symbols processed per PDSCH generation thread"
+#define L1_TX_OVERRUN_US                     "L1_tx_overrun_us"
+#define HLP_L1_TX_OVERRUN_US                 "log the PDSCH configuration whenever L1 TX processing exceeds this many us (0 = off). Aggregate stats hide a rare tail; this reports the conditions of the outlier itself."
 #define HLP_TP_SIZ "thread_pool_size paramter removed, please use --thread-pool"
 #define L1_TX_AMP_BACKOFF_dB                 "tx_amp_backoff_dB"
 #define HLP_L1TX_BO "Backoff from full-scale output at the L1 entity(frequency domain), ex. 12 would corresponding to 14-bit input level (6 dB/bit). Default 36 dBFS for OAI RU entity"
@@ -64,6 +66,7 @@
   {L1_TX_THREAD_CORE,                    NULL,       0,         .iptr=NULL,           .defintval=-1,              TYPE_INT,      0},         \
   {L1_NUM_RX_SYM_PER_THREAD,             HLP_L1_NUM_RX_SYM_PER_THREAD, 0, .iptr=NULL, .defintval=1,               TYPE_INT,      0},         \
   {L1_NUM_TX_SYM_PER_THREAD,             HLP_L1_NUM_TX_SYM_PER_THREAD, 0, .iptr=NULL, .defintval=0,               TYPE_INT,      0},         \
+  {L1_TX_OVERRUN_US,                     HLP_L1_TX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_AMP_BACKOFF_dB,                 HLP_L1TX_BO,0,         .uptr=NULL,           .defintval=36,              TYPE_UINT,     0},         \
   {L1_PHASE_COMP,                        HLP_L1_PHASE_COMP,PARAMFLAG_BOOL, .uptr=NULL,.defintval=1,               TYPE_UINT,     0},         \
   {L1_NUM_ANTENNAS_PER_THREAD,           HLP_NUM_ARX,0,         .uptr=NULL,           .defintval=1,               TYPE_UINT,     0},         \
