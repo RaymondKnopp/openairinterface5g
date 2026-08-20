@@ -601,7 +601,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
       // Run the last job inline
       nr_pusch_antenna_processing(rdata);
     } else {
-      pushTpool(&gNB->threadPool, task);
+      pushTpool(gNB->threadPoolRx, task);
     }
   } // Antenna Loop
 

@@ -350,6 +350,8 @@ int main(int argc, char **argv)
 	RC.gNB[0] = calloc(1, sizeof(PHY_VARS_gNB));
 	gNB = RC.gNB[0];
 	initNamedTpool(gNBthreads, &gNB->threadPool, true, "gNB-tpool");
+	/* simulators run both directions on the one pool */
+	gNB->threadPoolRx = &gNB->threadPool;
   initFloatingCoresTpool(dlsch_threads, &nrUE_params.Tpool, false, "UE-tpool");
 	//gNB_config = &gNB->gNB_config;
 	frame_parms = &gNB->frame_parms; //to be initialized I suppose (maybe not necessary for PBCH)

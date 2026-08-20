@@ -476,7 +476,24 @@ typedef struct PHY_VARS_gNB_s {
   notifiedFIFO_t resp_L1;
   notifiedFIFO_t L1_tx_out;
   notifiedFIFO_t L1_rx_out;
+  /* TX work (DLSCH encoding, PDSCH generation), and RX work too unless a separate RX pool
+   * is configured.  Sized by --thread-pool. */
   tpool_t threadPool;
+  /* Storage for the RX pool; only initialised when L1_rx_pool_cores is set. */
+  tpool_t threadPoolRxOwn;
+  /* Where UL work is pushed: &threadPool by default, &threadPoolRxOwn when L1_rx_pool_cores
+   * is configured.
+   *
+   * Sharing one pool between both directions serialises them, and the pool is FIFO with no
+   * priority: nr_pusch_symbol_processing() is pushed once per symbol, so one UL slot floods
+   * the queue with up to 14 tasks and the next DL slot's TX dispatch waits behind all of
+   * them.  Measured on a DragonWing DU at 400 Mbps, 66-71% of TX overruns landed on the
+   * single DL slot following the UL slot, against ~16% on each of the other two, and adding
+   * a third core to the shared pool did not change that split -- the queue is the
+   * constraint, not the worker count. */
+  tpool_t *threadPoolRx;
+  /* L1_rx_pool_cores: core list for threadPoolRxOwn, NULL/empty to share threadPool. */
+  char *rx_pool_cores;
   int num_pusch_symbols_per_thread;
   int num_pdsch_symbols_per_thread;
   int dmrs_num_antennas_per_thread;
@@ -489,6 +506,20 @@ typedef struct PHY_VARS_gNB_s {
   int tx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t tx_overrun_count; /* every overrun, whether logged or not */
   uint64_t tx_overrun_logged; /* how many were actually printed */
+  /* Per-slot-of-frame TX timing.  The alarm above samples, and a sampled stream cannot
+   * answer "is one slot of the TDD pattern systematically slower?" -- a one-in-N limiter
+   * phase-locks to the frame structure and silently reports on a fixed subset of slots.
+   * These count EVERY TX slot instead, so the comparison across slots is sound.
+   * Split gen (phy_procedures_gNB_TX) from ru (precoding + fronthaul compression) because
+   * they scale with different things: gen with REs and TB bits, ru with occupied band. */
+  struct {
+    uint64_t n;
+    uint64_t tot_us; /* sums, not means: keep the accumulator integer and cheap */
+    uint64_t gen_us;
+    uint64_t ru_us;
+    uint32_t max_us;
+    uint32_t max_gen_us;
+  } tx_slot_stats[NR_MAX_SLOTS_PER_FRAME];
   pthread_t L1_rx_thread;
   int L1_rx_thread_core;
   pthread_t L1_tx_thread;
