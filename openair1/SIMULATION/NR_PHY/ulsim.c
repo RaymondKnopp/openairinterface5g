@@ -1581,7 +1581,7 @@ int main(int argc, char *argv[])
 
         //----------- OFDM Demodulation and RX rotation--------------------------
         bool was_symbol_used[14] = {0};
-        int offset = (slot & 3) * gNB->frame_parms.symbols_per_slot * gNB->frame_parms.ofdm_symbol_size;
+        int offset = (slot % RU_RX_SLOT_DEPTH) * gNB->frame_parms.symbols_per_slot * gNB->frame_parms.ofdm_symbol_size;
         for (int i = 0; i < 14; i++) {
           was_symbol_used[i] = true;
         }
