@@ -206,9 +206,19 @@ void *L1_rx_thread(void *arg)
      if (res == NULL)
        break;
      processingData_L1_t *info = (processingData_L1_t *)NotifiedFifoData(res);
+     const int slot_rx = info->slot_rx;
      start_meas(&gNB->l1_rx_proc);
      rx_func(info);
      stop_meas(&gNB->l1_rx_proc);
+     if (cpu_meas_enabled) {
+       AssertFatal(slot_rx < NR_MAX_SLOTS_PER_FRAME, "slot_rx %d out of range\n", slot_rx);
+       const double us = (double)gNB->l1_rx_proc.p_time / (1000.0 * get_cpu_freq_GHz());
+       typeof(gNB->rx_slot_stats[0]) *st = &gNB->rx_slot_stats[slot_rx];
+       st->n++;
+       st->tot_us += (uint64_t)us;
+       if ((uint32_t)us > st->max_us)
+         st->max_us = (uint32_t)us;
+     }
      delNotifiedFIFO_elt(res);
   }
   return NULL;
@@ -369,6 +379,28 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
     }
   }
 
+  /* Per-slot RX timing, companion to the TX table above.  Only slots that carry UL work
+   * appear, so this also shows the TDD pattern from the receive side -- and separates the
+   * full UL slot from the mixed slot, whose costs differ by several times. */
+  bool any_rx = false;
+  for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && !any_rx; s++)
+    any_rx = gNB->rx_slot_stats[s].n > 0;
+  if (any_rx && output < end) {
+    output += snprintf(output, end - output, "RX per slot [slot: n avg max]:\n");
+    for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && output < end; s++) {
+      const uint64_t n = gNB->rx_slot_stats[s].n;
+      if (n == 0)
+        continue;
+      output += snprintf(output,
+                         end - output,
+                         "  %3d: %8llu %6llu us max %5u\n",
+                         s,
+                         (unsigned long long)n,
+                         (unsigned long long)(gNB->rx_slot_stats[s].tot_us / n),
+                         gNB->rx_slot_stats[s].max_us);
+    }
+  }
+
   return output - begin;
 }
 
@@ -400,6 +432,8 @@ void *nrL1_stats_thread(void *param) {
   reset_meas(&gNB->dlsch_pdsch_generation_stats);
   reset_meas(&gNB->dlsch_resource_mapping_stats);
   reset_meas(&gNB->dlsch_precoding_stats);
+  memset(gNB->rx_slot_stats, 0, sizeof(gNB->rx_slot_stats));
+  memset(gNB->tx_slot_stats, 0, sizeof(gNB->tx_slot_stats));
   while (!oai_exit) {
     sleep(1);
     if (ftruncate(fileno(fd), 0) != 0 || fseek(fd, 0, SEEK_SET) != 0) {

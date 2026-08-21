@@ -520,6 +520,15 @@ typedef struct PHY_VARS_gNB_s {
     uint32_t max_us;
     uint32_t max_gen_us;
   } tx_slot_stats[NR_MAX_SLOTS_PER_FRAME];
+  /* Same for RX.  Needed to tell a full UL slot apart from the mixed slot: a TDD pattern
+   * with nrofUplinkSymbols=4 gives the mixed slot a quarter of the symbols of a full UL
+   * slot, so their costs differ by several times and an aggregate mean hides which one
+   * produced a long tail.  Counts every slot rx_func() runs for. */
+  struct {
+    uint64_t n;
+    uint64_t tot_us;
+    uint32_t max_us;
+  } rx_slot_stats[NR_MAX_SLOTS_PER_FRAME];
   pthread_t L1_rx_thread;
   int L1_rx_thread_core;
   pthread_t L1_tx_thread;
