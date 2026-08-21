@@ -511,14 +511,20 @@ typedef struct PHY_VARS_gNB_s {
    * phase-locks to the frame structure and silently reports on a fixed subset of slots.
    * These count EVERY TX slot instead, so the comparison across slots is sound.
    * Split gen (phy_procedures_gNB_TX) from ru (precoding + fronthaul compression) because
-   * they scale with different things: gen with REs and TB bits, ru with occupied band. */
+   * they scale with different things: gen with REs and TB bits, ru with occupied band.
+   *
+   * The counts and sums are cumulative, so the means are stable and can be differenced
+   * across two reads to get an interval mean.  The maxima are WINDOWED -- zeroed on every
+   * stats dump -- because a never-resetting max permanently records the worst moment of the
+   * run (typically the traffic onset) and can then never show whether steady state is
+   * clean.  Read the file repeatedly to separate a transient from a trend. */
   struct {
     uint64_t n;
     uint64_t tot_us; /* sums, not means: keep the accumulator integer and cheap */
     uint64_t gen_us;
     uint64_t ru_us;
-    uint32_t max_us;
-    uint32_t max_gen_us;
+    uint32_t max_us; /* windowed: reset each dump */
+    uint32_t max_gen_us; /* windowed */
   } tx_slot_stats[NR_MAX_SLOTS_PER_FRAME];
   /* Same for RX.  Needed to tell a full UL slot apart from the mixed slot: a TDD pattern
    * with nrofUplinkSymbols=4 gives the mixed slot a quarter of the symbols of a full UL
@@ -527,7 +533,7 @@ typedef struct PHY_VARS_gNB_s {
   struct {
     uint64_t n;
     uint64_t tot_us;
-    uint32_t max_us;
+    uint32_t max_us; /* windowed: reset each dump, see tx_slot_stats above */
   } rx_slot_stats[NR_MAX_SLOTS_PER_FRAME];
   pthread_t L1_rx_thread;
   int L1_rx_thread_core;

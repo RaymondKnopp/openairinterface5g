@@ -495,7 +495,7 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && !any; s++)
     any = gNB->tx_slot_stats[s].n > 0;
   if (any && output < end) {
-    output += snprintf(output, end - output, "TX per slot [slot: n avg(gen+ru) max maxgen]:\n");
+    output += snprintf(output, end - output, "TX per slot [slot: n avg(gen+ru) max maxgen] (max = last dump):\n");
     for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && output < end; s++) {
       const uint64_t n = gNB->tx_slot_stats[s].n;
       if (n == 0)
@@ -510,6 +510,10 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                          (unsigned long long)(gNB->tx_slot_stats[s].ru_us / n),
                          gNB->tx_slot_stats[s].max_us,
                          gNB->tx_slot_stats[s].max_gen_us);
+      /* windowed: a never-resetting max records the traffic onset forever and can then
+       * never show whether steady state is clean */
+      gNB->tx_slot_stats[s].max_us = 0;
+      gNB->tx_slot_stats[s].max_gen_us = 0;
     }
   }
 
@@ -520,7 +524,7 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && !any_rx; s++)
     any_rx = gNB->rx_slot_stats[s].n > 0;
   if (any_rx && output < end) {
-    output += snprintf(output, end - output, "RX per slot [slot: n avg max]:\n");
+    output += snprintf(output, end - output, "RX per slot [slot: n avg max] (max = last dump):\n");
     for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && output < end; s++) {
       const uint64_t n = gNB->rx_slot_stats[s].n;
       if (n == 0)
@@ -532,6 +536,7 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                          (unsigned long long)n,
                          (unsigned long long)(gNB->rx_slot_stats[s].tot_us / n),
                          gNB->rx_slot_stats[s].max_us);
+      gNB->rx_slot_stats[s].max_us = 0; /* windowed, see TX table above */
     }
   }
 
