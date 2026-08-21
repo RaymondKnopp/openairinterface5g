@@ -497,7 +497,7 @@ void nr_decode_pucch1(PHY_VARS_gNB *gNB,
   const int nb_symbols = pucch_pdu->nr_of_symbols;
   const int symb_sz = frame_parms->ofdm_symbol_size;
 
-  const int soffset = (slot & 3) * frame_parms->symbols_per_slot * symb_sz;
+  const int soffset = (slot % RU_RX_SLOT_DEPTH) * frame_parms->symbols_per_slot * symb_sz;
   // lprime is the index of the OFDM symbol in the slot that corresponds to the first OFDM symbol of the PUCCH transmission in the
   // slot given by [5, TS 38.213]
   const int lprime = pucch_pdu->start_symbol_index;
