@@ -215,9 +215,23 @@ void *L1_rx_thread(void *arg)
        break;
      processingData_L1_t *info = (processingData_L1_t *)NotifiedFifoData(res);
      int slot_type = nr_slot_select(&gNB->gNB_config, info->frame_rx, info->slot_rx);
+     const int slot_rx = info->slot_rx;
+     const uint64_t t_rx_start = rdtsc_oai();
      START_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
      rx_func(info);
      STOP_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
+     if (cpu_meas_enabled) {
+       /* Own timestamps rather than l1_rx_proc.p_time: STOP_MEAS_FULL_SLOT measures only
+          full UL slots, and the point of this table is to compare those against the mixed
+          slot, whose cost differs by several times. */
+       AssertFatal(slot_rx < NR_MAX_SLOTS_PER_FRAME, "slot_rx %d out of range\n", slot_rx);
+       const double us = (double)(rdtsc_oai() - t_rx_start) / (1000.0 * get_cpu_freq_GHz());
+       typeof(gNB->rx_slot_stats[0]) *st = &gNB->rx_slot_stats[slot_rx];
+       st->n++;
+       st->tot_us += (uint64_t)us;
+       if ((uint32_t)us > st->max_us)
+         st->max_us = (uint32_t)us;
+     }
      delNotifiedFIFO_elt(res);
   }
   return NULL;
@@ -391,6 +405,8 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->slot_indication_stats);
   reset_meas(&gNB->rx_pusch_stats);
   reset_meas(&gNB->rx_prach);
+  memset(gNB->rx_slot_stats, 0, sizeof(gNB->rx_slot_stats));
+  memset(gNB->tx_slot_stats, 0, sizeof(gNB->tx_slot_stats));
   if (ru->feprx) {
     reset_meas(&ru->ofdm_demod_stats);
   }
@@ -494,6 +510,28 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                          (unsigned long long)(gNB->tx_slot_stats[s].ru_us / n),
                          gNB->tx_slot_stats[s].max_us,
                          gNB->tx_slot_stats[s].max_gen_us);
+    }
+  }
+
+  /* Per-slot RX timing, companion to the TX table above.  Only slots that carry UL work
+   * appear, so this also shows the TDD pattern from the receive side -- and separates the
+   * full UL slot from the mixed slot, whose costs differ by several times. */
+  bool any_rx = false;
+  for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && !any_rx; s++)
+    any_rx = gNB->rx_slot_stats[s].n > 0;
+  if (any_rx && output < end) {
+    output += snprintf(output, end - output, "RX per slot [slot: n avg max]:\n");
+    for (int s = 0; s < NR_MAX_SLOTS_PER_FRAME && output < end; s++) {
+      const uint64_t n = gNB->rx_slot_stats[s].n;
+      if (n == 0)
+        continue;
+      output += snprintf(output,
+                         end - output,
+                         "  %3d: %8llu %6llu us max %5u\n",
+                         s,
+                         (unsigned long long)n,
+                         (unsigned long long)(gNB->rx_slot_stats[s].tot_us / n),
+                         gNB->rx_slot_stats[s].max_us);
     }
   }
 
