@@ -630,8 +630,41 @@ void ru_tx_func(void *param)
  */
 static bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_SLOT_DEPTH], int frame_rx, int slot_rx)
 {
-  if (!IS_SOFTMODEM_RFSIM)
-    return true;
+  if (!IS_SOFTMODEM_RFSIM) {
+    /* Real radios must not block here: ru_thread drives fronthaul timing, so stalling it to
+     * wait for L1 would miss deadlines.  But drain the completion queue anyway and report
+     * when we are about to overwrite a slot L1 has not finished reading.
+     *
+     * That overwrite is invisible everywhere else.  The fronthaul delivered the samples
+     * correctly, so every rx_err_* counter stays at zero; we destroy the data ourselves,
+     * and the only symptom is the PUCCH/PUSCH receiver finding no energy where there
+     * should be some -- i.e. an L1 DTX with a strong signal and no error anywhere. The
+     * ring is only RU_RX_SLOT_DEPTH slots deep, so L1_rx falling that far behind is
+     * enough, and measured RX tails of ~1.6 ms on consecutive UL slots are within reach
+     * of a 2 ms ring. */
+    const int idx = slot_rx % RU_RX_SLOT_DEPTH;
+    notifiedFIFO_elt_t *res;
+    while ((res = pollNotifiedFIFO(L1_rx_out)) != NULL) { /* non-blocking */
+      processingData_L1_t *info = NotifiedFifoData(res);
+      rx_tti_busy[info->slot_rx % RU_RX_SLOT_DEPTH] = false;
+      delNotifiedFIFO_elt(res);
+    }
+    if (rx_tti_busy[idx]) {
+      static uint64_t overwrites = 0;
+      overwrites++;
+      /* rate limited, prime modulus: see the TX overrun alarm for why not 100 */
+      if (overwrites <= 10 || (overwrites % 101) == 0)
+        LOG_W(NR_PHY,
+              "%4d.%2d RX slot overwrite: L1 has not released ring slot %d (%llu total). "
+              "Samples are being destroyed; expect L1 DTX with no fronthaul error.\n",
+              frame_rx,
+              slot_rx,
+              idx,
+              (unsigned long long)overwrites);
+    }
+    rx_tti_busy[idx] = true;
+    return true; /* proceed regardless: never stall the fronthaul */
+  }
   int idx = slot_rx % RU_RX_SLOT_DEPTH;
   if (rx_tti_busy[idx]) {
     bool not_done = true;
