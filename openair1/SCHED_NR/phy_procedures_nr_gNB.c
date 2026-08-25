@@ -552,7 +552,7 @@ static void nr_fill_indication(const PHY_VARS_gNB *gNB,
   crc->ul_cqi = get_pusch_cqi(pusch, frame, slot_rx);
   crc->timing_advance = get_pusch_ta(gNB, stats, pusch, frame, slot_rx);
   // in terms of dBFS range -128 to 0 with 0.1 step
-  crc->rssi = (dtx_flag == 0) ? get_pusch_rssi(pusch, pusch_pdu->param_v4.numSpatialStreamIndices) : 0;
+  crc->rssi = (dtx_flag == 0) ? get_pusch_rssi(pusch, slot_rx, pusch_pdu->param_v4.numSpatialStreamIndices) : 0;
 
   pdu->handle = pusch_pdu->handle;
   pdu->rnti = pusch_pdu->rnti;
@@ -1273,6 +1273,22 @@ static NR_MU_MIMO_job_groups_t group_pusch_jobs(PHY_VARS_gNB *gNB, NR_gNB_PUSCH_
     groups.jobs[g][groups.size[g]++] = ULSCH_id;
   }
   return groups;
+}
+
+/* OAI_L1_RX_DEFER=1 runs the PUSCH back half on its own thread, one slot behind,
+ * so slot N's LDPC decode overlaps slot N+1's front end. Read once.
+ *
+ * Off by default: it changes the L1 RX slot pipeline, and the failure modes if a
+ * buffer or ordering constraint is missed are intermittent (stale LLRs, corrupted
+ * HARQ feedback ordering) rather than obvious. */
+int nr_l1_rx_defer_enabled(void)
+{
+  static int on = -1;
+  if (on < 0) {
+    const char *e = getenv("OAI_L1_RX_DEFER");
+    on = (e && e[0] && e[0] != '0') ? 1 : 0;
+  }
+  return on;
 }
 
 /* The PUSCH "back half": everything after the per-symbol front end -- the LDPC

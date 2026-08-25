@@ -535,7 +535,9 @@ static void symbol_unscrambling_demux(puschSymbolProc_t *rdata, int ue_idx, int 
   bool no_uci = (map_uci->d_ack[s] == 0 && map_uci->d_csi1[s] == 0 && map_uci->d_csi2[s] == 0);
   if (no_uci) {
     const int end = joint_pusch_vars->ul_valid_re_per_slot[s] * bits_per_re;
-    int16_t *llr = &ue_pusch_vars->ulsch_llrs[u_idx];
+    /* The buffer this slot owns: with the back half deferred, slot N's decode is
+     * still reading the other one. nr_pusch_llr_buf() is the identity when off. */
+    int16_t *llr = &nr_pusch_llr_buf(ue_pusch_vars, rdata->slot)[u_idx];
     unscramble_helper(llr_in, s_seq, llr, end);
     return;
   }
@@ -607,7 +609,7 @@ static void symbol_unscrambling_demux(puschSymbolProc_t *rdata, int ue_idx, int 
       rem_csi2--;
       continue;
     }
-    unscramble_helper(curr_re_llr, curr_re_s, &ue_pusch_vars->ulsch_llrs[u_idx], bits_per_re);
+    unscramble_helper(curr_re_llr, curr_re_s, &nr_pusch_llr_buf(ue_pusch_vars, rdata->slot)[u_idx], bits_per_re);
     u_idx += bits_per_re;
   }
 }
@@ -1228,6 +1230,19 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       pv->ulsch_power_tot += pv->ulsch_power[aarx];
       pv->ulsch_noise_power_tot += pv->ulsch_noise_power[aarx];
     }
+    /* Snapshot into this slot's parity slot as well. The back half turns these
+     * into ul_cqi and RSSI for the MAC, and with the back half deferred the next
+     * slot's front end would otherwise have overwritten them first. */
+    if (nr_l1_rx_defer_enabled()) {
+      const int par = slot & 1;
+      for (int aarx = 0; aarx < num_sp_streams; aarx++) {
+        pv->ulsch_power_d[par][aarx] = pv->ulsch_power[aarx];
+        pv->ulsch_noise_power_d[par][aarx] = pv->ulsch_noise_power[aarx];
+      }
+      pv->ulsch_power_tot_d[par] = pv->ulsch_power_tot;
+      pv->ulsch_noise_power_tot_d[par] = pv->ulsch_noise_power_tot;
+      pv->pwr_d_valid = true;
+    }
   }
   stop_meas(&gNB->rx_pusch_symbol_processing_stats);
 
@@ -1251,6 +1266,6 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
     gNBunlockScopeData(gNB, gNBPuschRxIq)
   }
   uint32_t total_llrs = total_res * rel15_ul_ref->qam_mod_order * rel15_ul_ref->nrOfLayers;
-  gNBscopeCopyWithMetadata(gNB, gNBPuschLlr, pusch_vars_group[0]->ulsch_llrs, sizeof(c16_t), 1, total_llrs, 0, &mt);
+  gNBscopeCopyWithMetadata(gNB, gNBPuschLlr, nr_pusch_llr_buf(pusch_vars_group[0], slot), sizeof(c16_t), 1, total_llrs, 0, &mt);
   return 0;
 }

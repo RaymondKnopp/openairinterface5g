@@ -214,6 +214,80 @@ void *L1_tx_thread(void *arg) {
   return NULL;
 }
 
+/* ---- deferred PUSCH back half (OAI_L1_RX_DEFER) -----------------------------
+ *
+ * Runs the LDPC decode and its rx_data/CRC indications one slot behind, on its
+ * own thread, so slot N's decode overlaps slot N+1's front end. Without this the
+ * single L1_rx_thread pays the SUM of ARM work and DSP wait; with it, the max.
+ * Measured at single layer, 273 PRB: ARM ~2,360 us, DSP decode ~2,180 us, so
+ * 4,540 serial against a 2,500 us budget for one U slot in DDDSU -- it does not
+ * fit serially and does fit overlapped. That is one ARM core for RX instead of
+ * two, and the second is the one we want to give back to TX.
+ *
+ * ONE thread, deliberately: handle_nr_ulsch pops feedback_ul_harq from the head
+ * and matches the incoming harq_pid, so rx_data/CRC must arrive in slot order. A
+ * pool would not guarantee that. (RACH, UCI and SRS already go from the front
+ * half and are unaffected.)
+ *
+ * Depth is ONE outstanding slot, enforced by g_defer_slots. That is what makes
+ * the two-buffer schemes safe: slot N and slot N+1 have different parities, so
+ * they never share an LLR buffer (nr_pusch_llr_buf) or a UL_INFO. Raising the
+ * depth needs more of both, and RU_RX_SLOT_DEPTH = 4 caps it at 3 regardless.
+ *
+ * UL_INFO lives here rather than on rx_func's stack because it has to outlive the
+ * call. It is used in place, never copied -- NR_UL_IND_t holds pointers into
+ * itself (crc_list -> crc_pdu_list and so on), so a struct copy would leave them
+ * aimed at the original.
+ *
+ * Known cosmetic aliasing: the back half also reads pusch->ulsch_power[] and
+ * ulsch_noise_power[], which the next slot's front half overwrites, so reported
+ * power can be one slot stale. Those feed statistics only, so they are not
+ * double-buffered. */
+static NR_UL_IND_t    g_defer_ul[2];
+static notifiedFIFO_t g_defer_fifo;
+static pthread_t      g_defer_thread;
+static sem_t          g_defer_slots;
+static int            g_defer_up;
+
+typedef struct {
+  PHY_VARS_gNB *gNB;
+  nr_pusch_defer_t job;
+} defer_msg_t;
+
+static void *defer_back_half_thread(void *arg)
+{
+  (void)arg;
+  while (oai_exit == 0) {
+    notifiedFIFO_elt_t *res = pullNotifiedFIFO(&g_defer_fifo);
+    if (res == NULL)
+      break;
+    defer_msg_t *m = (defer_msg_t *)NotifiedFifoData(res);
+    NR_UL_IND_t *ul = &g_defer_ul[m->job.slot & 1];
+    nr_pusch_decode_and_indicate(m->gNB, m->job.frame, m->job.slot, m->job.ulsch_idx,
+                                 m->job.num_pusch, ul);
+    m->gNB->if_inst->NR_UL_indication(ul);
+    delNotifiedFIFO_elt(res);
+    sem_post(&g_defer_slots);
+  }
+  return NULL;
+}
+
+static void defer_back_half_start(void)
+{
+  if (g_defer_up)
+    return;
+  initNotifiedFIFO(&g_defer_fifo);
+  /* one credit == one outstanding slot */
+  sem_init(&g_defer_slots, 0, 1);
+  if (pthread_create(&g_defer_thread, NULL, defer_back_half_thread, NULL) != 0) {
+    LOG_E(NR_PHY, "L1 RX defer: pthread_create failed, staying synchronous\n");
+    return;
+  }
+  pthread_setname_np(g_defer_thread, "L1_rx_back");
+  g_defer_up = 1;
+  LOG_I(NR_PHY, "L1 RX back half DEFERRED onto its own thread (depth 1)\n");
+}
+
 static void rx_func(processingData_L1_t *info)
 {
   PHY_VARS_gNB *gNB = info->gNB;
@@ -229,12 +303,30 @@ static void rx_func(processingData_L1_t *info)
     LOG_D(NR_PHY, "%d.%d Starting RX processing\n", frame_rx, slot_rx);
 
     // UE-specific RX processing for subframe n
-    // Intentionally not zero-initialized: each indication fills only its used PDUs.
-    NR_UL_IND_t UL_INFO;
-    UL_INFO.frame = frame_rx;
-    UL_INFO.slot = slot_rx;
-    UL_INFO.module_id = gNB->Mod_id;
-    UL_INFO.phy_id = gNB->CC_id;
+    const int defer = nr_l1_rx_defer_enabled();
+    if (defer)
+      defer_back_half_start();
+    /* Deferred, UL_INFO must outlive this call, so it lives in the parity ring.
+     * Wait for a credit first: with one outstanding slot, that guarantees the
+     * back half has finished with this parity's UL_INFO and LLR buffer. */
+    NR_UL_IND_t UL_INFO_local;
+    NR_UL_IND_t *ULI;
+    if (defer && g_defer_up) {
+      sem_wait(&g_defer_slots);
+      ULI = &g_defer_ul[slot_rx & 1];
+    } else {
+      ULI = &UL_INFO_local;
+    }
+    /* Upstream dropped this clear ("each indication fills only its used PDUs").
+     * Kept here for now because the parity ring REUSES a buffer every second slot,
+     * so an indication that leaves a stale count behind would be read as this
+     * slot's. Revisit once the per-indication counts are confirmed exhaustive. */
+    memset(ULI, 0, sizeof(*ULI));
+    ULI->frame = frame_rx;
+    ULI->slot = slot_rx;
+    ULI->module_id = gNB->Mod_id;
+    ULI->phy_id = gNB->CC_id;
+#define UL_INFO (*ULI)
     // Do PRACH RU processing
     UL_INFO.rach_ind.header.transmit_timestamp = 0;
     UL_INFO.rach_ind.pdu_list = UL_INFO.prach_pdu_indication_list;
@@ -263,14 +355,25 @@ static void rx_func(processingData_L1_t *info)
         }
       }
     }
+    nr_pusch_defer_t job = {0};
+    phy_procedures_gNB_uespec_RX_defer(gNB, frame_rx, slot_rx, &UL_INFO,
+                                       (defer && g_defer_up) ? &job : NULL);
 
-    // Call PHY Rx signal procedures
-    phy_procedures_gNB_uespec_RX(gNB, frame_rx, slot_rx, &UL_INFO);
-
-    // Call the scheduler
-    START_MEAS_FULL_SLOT(&gNB->ul_indication_stats, rx_slot_type, NR_UPLINK_SLOT);
-    gNB->if_inst->NR_UL_indication(&UL_INFO);
-    STOP_MEAS_FULL_SLOT(&gNB->ul_indication_stats, rx_slot_type, NR_UPLINK_SLOT);
+    if (defer && g_defer_up) {
+      /* Hand the back half over and return, so this thread can start slot N+1
+       * while the decode for slot N runs. The credit is released by the back-half
+       * thread once it has delivered rx_data/CRC. */
+      notifiedFIFO_elt_t *e = newNotifiedFIFO_elt(sizeof(defer_msg_t), 0, &g_defer_fifo, NULL);
+      defer_msg_t *m = (defer_msg_t *)NotifiedFifoData(e);
+      m->gNB = gNB;
+      m->job = job;
+      pushNotifiedFIFO(&g_defer_fifo, e);
+    } else {
+      // Call the scheduler
+      START_MEAS_FULL_SLOT(&gNB->ul_indication_stats, rx_slot_type, NR_UPLINK_SLOT);
+      gNB->if_inst->NR_UL_indication(&UL_INFO);
+      STOP_MEAS_FULL_SLOT(&gNB->ul_indication_stats, rx_slot_type, NR_UPLINK_SLOT);
+    }
 
     /* Signal that this slot's rxdataF is free.  RFSIM needs it because wait_free_rx_tti()
      * blocks on it; on real radios nothing blocks, but ru_thread still drains this queue to
@@ -288,6 +391,7 @@ static void rx_func(processingData_L1_t *info)
       LOG_D(NR_PHY, "Signaling completion for %d.%d (mod_slot %d) on L1_rx_out\n", frame_rx, slot_rx, slot_rx % RU_RX_SLOT_DEPTH);
       pushNotifiedFIFO(&gNB->L1_rx_out, res);
     }
+#undef UL_INFO
   }
 
 }

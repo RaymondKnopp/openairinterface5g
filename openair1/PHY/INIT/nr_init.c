@@ -7,6 +7,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "common/ran_context.h"
 #include "PHY/defs_gNB.h"
+#include "SCHED_NR/sched_nr.h"
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
@@ -194,6 +195,12 @@ void phy_init_nr_gNB(PHY_VARS_gNB *gNB)
     pusch->llr_dev = gpuHostGetDevicePointer_or_fail(pusch->ulsch_llrs);
 #else
     pusch->ulsch_llrs = (int16_t *)malloc16_clear((144 * 3 * 8448) * sizeof(int16_t)); // 144 segments 3*8448 coded bits per segment
+    /* Second LLR buffer, only when the back half is deferred: slot N's decode and
+     * slot N+1's inner receiver are then concurrent and must not share it.
+     * Sized exactly like ulsch_llrs above -- nr_pusch_llr_buf() keys off it being
+     * NULL to reproduce the non-deferred behaviour. Not allocated when off. */
+    if (nr_l1_rx_defer_enabled())
+      pusch->llr_alt = (int16_t *)malloc16_clear((144 * 3 * 8448) * sizeof(int16_t));
 #endif
     // TODO refine the size
     pusch->ack_llrs = (int16_t *)malloc16_clear((144 * 3 * 8448) * sizeof(int16_t));

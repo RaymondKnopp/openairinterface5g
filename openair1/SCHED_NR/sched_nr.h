@@ -22,6 +22,44 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
 /* What the PUSCH back half needs from the front half, and nothing more -- the
  * boundary turned out to be this small. Used to defer the LDPC decode and its
  * rx_data/CRC indications so they overlap the NEXT slot's front end. */
+int nr_l1_rx_defer_enabled(void);
+
+/* Which of the two LLR buffers this slot owns.
+ *
+ * With the back half deferred, slot N's decode reads the LLRs while slot N+1's
+ * inner receiver is already writing, so they must not be the same buffer. Keyed
+ * on slot parity rather than by swapping a shared pointer, because two threads
+ * are involved and a swap would race. llr_alt is only allocated when deferral is
+ * enabled, so when it is NULL this returns exactly what the code used before. */
+static inline int16_t *nr_pusch_llr_buf(const NR_gNB_PUSCH *pv, int slot)
+{
+  return (pv->llr_alt && (slot & 1)) ? pv->llr_alt : pv->ulsch_llrs;
+}
+
+/* Power measurements for the slot the back half is working on. When deferral is
+ * off, pwr_d_valid is false and this returns the live values, i.e. exactly what
+ * the code read before. */
+static inline void nr_pusch_pwr(const NR_gNB_PUSCH *pv,
+                                int slot,
+                                const uint32_t **power,
+                                const uint32_t **noise,
+                                uint32_t *power_tot,
+                                uint32_t *noise_tot)
+{
+  const int p = slot & 1;
+  if (pv->pwr_d_valid) {
+    *power = pv->ulsch_power_d[p];
+    *noise = pv->ulsch_noise_power_d[p];
+    *power_tot = pv->ulsch_power_tot_d[p];
+    *noise_tot = pv->ulsch_noise_power_tot_d[p];
+  } else {
+    *power = pv->ulsch_power;
+    *noise = pv->ulsch_noise_power;
+    *power_tot = pv->ulsch_power_tot;
+    *noise_tot = pv->ulsch_noise_power_tot;
+  }
+}
+
 typedef struct {
   bool valid;
   int frame;

@@ -186,22 +186,34 @@ int get_pusch_ta(const PHY_VARS_gNB *gNB, NR_gNB_PHY_STATS_t *stats, const NR_gN
   return timing_advance_update;
 }
 
-int get_pusch_rssi(const NR_gNB_PUSCH *pusch, int n_rx)
+int get_pusch_rssi(const NR_gNB_PUSCH *pusch, int slot, int n_rx)
 {
-  return 1280 - (10 * dB_fixed(32767 * 32767) - dB_fixed_times10(pusch->ulsch_power_tot / n_rx));
+  /* Takes the slot: with the L1 RX back half deferred this runs one slot behind
+   * the inner receiver, so the live ulsch_power_tot already belongs to the NEXT
+   * slot. nr_pusch_pwr() returns the live value when deferral is off. */
+  const uint32_t *power, *noise;
+  uint32_t power_tot, noise_tot;
+  nr_pusch_pwr(pusch, slot, &power, &noise, &power_tot, &noise_tot);
+  return 1280 - (10 * dB_fixed(32767 * 32767) - dB_fixed_times10(power_tot / n_rx));
 }
 
 int get_pusch_cqi(const NR_gNB_PUSCH *pusch, int frame, int slot)
 {
   // estimate UL_CQI for MAC
-  int SNRtimes10 = dB_fixed_x10(pusch->ulsch_power_tot) - dB_fixed_x10(pusch->ulsch_noise_power_tot);
+  /* Slot-indexed, not live: see get_pusch_rssi(). This value becomes the ul_cqi the
+   * scheduler does uplink link adaptation with, so a stale one is not a cosmetic
+   * error -- it would be the next slot's SNR attributed to this TB. */
+  const uint32_t *power, *noise;
+  uint32_t power_tot, noise_tot;
+  nr_pusch_pwr(pusch, slot, &power, &noise, &power_tot, &noise_tot);
+  int SNRtimes10 = dB_fixed_x10(power_tot) - dB_fixed_x10(noise_tot);
   LOG_D(NR_PHY,
         "%d.%d: Estimated SNR for PUSCH is = %f dB (ulsch_power %f, noise %f)\n",
         frame,
         slot,
         SNRtimes10 / 10.0,
-        dB_fixed_x10(pusch->ulsch_power_tot) / 10.0,
-        dB_fixed_x10(pusch->ulsch_noise_power_tot) / 10.0);
+        dB_fixed_x10(power_tot) / 10.0,
+        dB_fixed_x10(noise_tot) / 10.0);
 
   int cqi;
   if (SNRtimes10 < -640)

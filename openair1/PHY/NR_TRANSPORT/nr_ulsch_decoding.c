@@ -160,8 +160,13 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
       stats->ulsch_stats.round_trials[harq_process->round]++;
       const uint8_t num_streams = pusch_pdu->param_v4.numSpatialStreamIndices;
       for (int aarx = 0; aarx < num_streams; aarx++) {
-        stats->ulsch_stats.power[aarx] = dB_fixed_x10(pusch->ulsch_power[aarx]);
-        stats->ulsch_stats.noise_power[aarx] = dB_fixed_x10(pusch->ulsch_noise_power[aarx]);
+        /* same parity slot as nr_fill_indication uses; display only, but keeping
+         * the two consistent avoids reporting mismatched numbers */
+        const uint32_t *pwr_a, *noi_a;
+        uint32_t pwr_t, noi_t;
+        nr_pusch_pwr(pusch, nr_tti_rx, &pwr_a, &noi_a, &pwr_t, &noi_t);
+        stats->ulsch_stats.power[aarx] = dB_fixed_x10(pwr_a[aarx]);
+        stats->ulsch_stats.noise_power[aarx] = dB_fixed_x10(noi_a[aarx]);
       }
       if (!harq_process->harq_to_be_cleared) {
         stats->ulsch_stats.current_Qm = TB_parameters->Qm;
@@ -239,7 +244,9 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
 #ifdef LDPC_CUDA
     int16_t *ulsch_llr = phy_vars_gNB->pusch_vars[ULSCH_id].llr_dev;
 #else
-    int16_t *ulsch_llr = phy_vars_gNB->pusch_vars[ULSCH_id].ulsch_llrs;
+    /* The buffer this SLOT owns -- see nr_pusch_llr_buf(). With the back half
+     * deferred, slot N+1's inner receiver is already filling the other one. */
+    short *ulsch_llr = nr_pusch_llr_buf(&phy_vars_gNB->pusch_vars[ULSCH_id], nr_tti_rx);
 #endif
 
     if (!ulsch_llr) {

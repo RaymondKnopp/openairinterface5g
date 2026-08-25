@@ -83,7 +83,7 @@ void nr_uci_decoding(PHY_VARS_gNB *phy_vars_gNB, NR_UL_IND_t *UL_INFO, int nb_pu
     pusch_ind->rnti = pusch_pdu->rnti;
     pusch_ind->ul_cqi = get_pusch_cqi(pusch, sfn, slot);
     pusch_ind->timing_advance = get_pusch_ta(phy_vars_gNB, get_phy_stats(phy_vars_gNB, ulsch->rnti), pusch, sfn, slot);
-    pusch_ind->rssi = pusch->DTX ? 0 : get_pusch_rssi(pusch, pusch_pdu->param_v4.numSpatialStreamIndices);
+    pusch_ind->rssi = pusch->DTX ? 0 : get_pusch_rssi(pusch, slot, pusch_pdu->param_v4.numSpatialStreamIndices);
     pusch_ind->pduBitmap = 0;
     int bytes = 0;
     if (pusch_uci->harq_ack_bit_length > 0) {

@@ -266,6 +266,17 @@ typedef struct {
    * slot N's decode has not read yet, so the two slots alternate between these
    * and rx_func swaps them. Unused, and not allocated, when deferral is off. */
   int16_t *llr_alt;
+  /* Parity-indexed copies of the power measurements, for the same reason as
+   * llr_alt: nr_fill_indication runs in the back half and turns these into the
+   * ul_cqi and RSSI it reports to the MAC, so they are NOT statistics -- a stale
+   * value would feed the scheduler wrong link adaptation. Written by the front
+   * half alongside the per-UE copies, read by the back half via
+   * nr_pusch_pwr(). Only meaningful when the back half is deferred. */
+  uint32_t ulsch_power_d[2][8];
+  uint32_t ulsch_noise_power_d[2][8];
+  uint32_t ulsch_power_tot_d[2];
+  uint32_t ulsch_noise_power_tot_d[2];
+  bool pwr_d_valid;
   /// \brief Total RE count after DMRS/PTRS RE's are extracted from respective symbol.
   /// - first index: ? [0...14] smybol per slot
   int16_t *ul_valid_re_per_slot;
