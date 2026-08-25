@@ -7,6 +7,7 @@
 #include "common/utils/nr/nr_common.h"
 #include "common/ran_context.h"
 #include "PHY/defs_gNB.h"
+#include "SCHED_NR/sched_nr.h"
 #include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
@@ -194,6 +195,13 @@ void phy_init_nr_gNB(PHY_VARS_gNB *gNB)
 #else
     // 144 segments 3*8448 coded bits per segment; an inner-RX module may write its LLRs there in place (alloc_host)
     pusch->ulsch_llrs = nr_irx_alloc_rx_buffer((144 * 3 * 8448) * sizeof(int16_t));
+    /* Second LLR buffer, only when the back half is deferred: slot N's decode and
+     * slot N+1's inner receiver are then concurrent and must not share it.
+     * Sized and allocated exactly like ulsch_llrs above, so an inner-RX module can
+     * write into it in place too -- nr_pusch_llr_buf() keys off it being NULL to
+     * reproduce the non-deferred behaviour. Not allocated when off. */
+    if (nr_l1_rx_defer_enabled())
+      pusch->llr_alt = nr_irx_alloc_rx_buffer((144 * 3 * 8448) * sizeof(int16_t));
 #endif
     // TODO refine the size
     pusch->ack_llrs = (int16_t *)malloc16_clear((144 * 3 * 8448) * sizeof(int16_t));
@@ -254,11 +262,13 @@ void phy_free_nr_gNB(PHY_VARS_gNB *gNB)
 #else
     nr_irx_free_rx_buffer(pusch_vars->ulsch_llrs);
     pusch_vars->ulsch_llrs = NULL;
+    if (pusch_vars->llr_alt)
+      nr_irx_free_rx_buffer(pusch_vars->llr_alt);
+    pusch_vars->llr_alt = NULL;
 #endif
     free_and_zero(pusch_vars->ack_llrs);
     free_and_zero(pusch_vars->csi1_llrs);
     free_and_zero(pusch_vars->csi2_llrs);
-    free_and_zero(pusch_vars->llr_alt);
   } // ULSCH_id
   free(gNB->pusch_vars);
 
