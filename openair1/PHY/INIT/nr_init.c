@@ -259,6 +259,7 @@ void phy_free_nr_gNB(PHY_VARS_gNB *gNB)
     free_and_zero(pusch_vars->ack_llrs);
     free_and_zero(pusch_vars->csi1_llrs);
     free_and_zero(pusch_vars->csi2_llrs);
+    free_and_zero(pusch_vars->llr_alt);
   } // ULSCH_id
   free(gNB->pusch_vars);
 

@@ -261,6 +261,11 @@ typedef struct {
   int16_t *ack_llrs;
   int16_t *csi1_llrs;
   int16_t *csi2_llrs;
+  /* Second LLR buffer, used only when the L1 RX back half is deferred
+   * (OAI_L1_RX_DEFER). Slot N+1's inner receiver must not overwrite the LLRs that
+   * slot N's decode has not read yet, so the two slots alternate between these
+   * and rx_func swaps them. Unused, and not allocated, when deferral is off. */
+  int16_t *llr_alt;
   /// \brief Total RE count after DMRS/PTRS RE's are extracted from respective symbol.
   /// - first index: ? [0...14] smybol per slot
   int16_t *ul_valid_re_per_slot;

@@ -1304,13 +1304,12 @@ static NR_MU_MIMO_job_groups_t group_pusch_jobs(PHY_VARS_gNB *gNB, NR_gNB_PUSCH_
  *
  * This commit only moves the code; the call site is unchanged, so behaviour is
  * identical. */
-static void nr_pusch_decode_and_indicate(PHY_VARS_gNB *gNB,
-                                         int frame_rx,
-                                         int slot_rx,
-                                         const int *ulsch_idx_to_decode,
-                                         int num_pusch,
-                                         NR_UL_IND_t *UL_INFO,
-                                         int slot_type)
+void nr_pusch_decode_and_indicate(PHY_VARS_gNB *gNB,
+                                  int frame_rx,
+                                  int slot_rx,
+                                  const int *ulsch_idx_to_decode,
+                                  int num_pusch,
+                                  NR_UL_IND_t *UL_INFO)
 {
   /* slot_type is carried in so this keeps w38's per-slot-type measurement rather
    * than the plain start_meas() the original had: the deferred call runs on a
@@ -1326,6 +1325,18 @@ static void nr_pusch_decode_and_indicate(PHY_VARS_gNB *gNB,
 }
 
 int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, NR_UL_IND_t *UL_INFO)
+{
+  return phy_procedures_gNB_uespec_RX_defer(gNB, frame_rx, slot_rx, UL_INFO, NULL);
+}
+
+/* defer_out == NULL reproduces the original behaviour exactly: the back half runs
+ * inline before returning. Non-NULL records what the back half will need and
+ * leaves it for the caller to run later. */
+int phy_procedures_gNB_uespec_RX_defer(PHY_VARS_gNB *gNB,
+                                       int frame_rx,
+                                       int slot_rx,
+                                       NR_UL_IND_t *UL_INFO,
+                                       nr_pusch_defer_t *defer_out)
 {
   /* those variables to log T_GNB_PHY_PUCCH_PUSCH_IQ only when we try to decode */
   int pusch_DTX = 0;
@@ -1441,7 +1452,17 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     }
   }
 
-  nr_pusch_decode_and_indicate(gNB, frame_rx, slot_rx, ulsch_idx_to_decode, num_pusch, UL_INFO, slot_type);
+  /* Either run the back half now, or hand it to the caller to run later. See
+   * nr_pusch_decode_and_indicate for why the boundary is here. */
+  if (defer_out) {
+    defer_out->frame = frame_rx;
+    defer_out->slot = slot_rx;
+    defer_out->num_pusch = num_pusch;
+    memcpy(defer_out->ulsch_idx, ulsch_idx_to_decode, sizeof(defer_out->ulsch_idx));
+    defer_out->valid = true;
+  } else {
+    nr_pusch_decode_and_indicate(gNB, frame_rx, slot_rx, ulsch_idx_to_decode, num_pusch, UL_INFO);
+  }
 
   UL_INFO->srs_ind.header.transmit_timestamp = 0;
   UL_INFO->srs_ind.sfn = frame_rx;

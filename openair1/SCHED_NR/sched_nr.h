@@ -18,6 +18,29 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
                            int slot);
 void nr_save_ul_tti_req(PHY_VARS_gNB *gNB, nfapi_nr_ul_tti_request_t *UL_tti_req);
 int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, NR_UL_IND_t *UL_INFO);
+
+/* What the PUSCH back half needs from the front half, and nothing more -- the
+ * boundary turned out to be this small. Used to defer the LDPC decode and its
+ * rx_data/CRC indications so they overlap the NEXT slot's front end. */
+typedef struct {
+  bool valid;
+  int frame;
+  int slot;
+  int num_pusch;
+  int ulsch_idx[MAX_UL_PDUS_PER_SLOT];
+} nr_pusch_defer_t;
+
+int phy_procedures_gNB_uespec_RX_defer(PHY_VARS_gNB *gNB,
+                                       int frame_rx,
+                                       int slot_rx,
+                                       NR_UL_IND_t *UL_INFO,
+                                       nr_pusch_defer_t *defer_out);
+void nr_pusch_decode_and_indicate(PHY_VARS_gNB *gNB,
+                                  int frame_rx,
+                                  int slot_rx,
+                                  const int *ulsch_idx_to_decode,
+                                  int num_pusch,
+                                  NR_UL_IND_t *UL_INFO);
 void L1_nr_prach_procedures(PHY_VARS_gNB *gNB, prach_item_t *prach_id, nfapi_nr_rach_indication_t *rach_ind);
 void nr_common_signal_procedures(PHY_VARS_gNB *gNB,
                                  int frame,
