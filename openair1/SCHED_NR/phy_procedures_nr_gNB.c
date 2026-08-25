@@ -1431,6 +1431,60 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     handle_pucch(gNB, rxdataF, &pucch[i], uci++);
   }
 
+  UL_INFO->srs_ind.sfn = frame_rx;
+  UL_INFO->srs_ind.slot = slot_rx;
+  UL_INFO->srs_ind.pdu_list = UL_INFO->srs_pdu_list;
+  UL_INFO->srs_ind.number_of_pdus = n_srs;
+  for (int i = 0; i < n_srs; ++i) {
+    start_meas(&gNB->rx_srs_stats);
+    handle_srs(now, gNB, &srs[i], &UL_INFO->srs_ind.pdu_list[i], &UL_INFO->srs_toa_vendor_ext_ind);
+    stop_meas(&gNB->rx_srs_stats);
+  }
+
+  /* Deliver RACH, UCI and SRS to the MAC NOW, before the PUSCH chain, instead of
+   * bundling them with the ULSCH results at the end.
+   *
+   * They are ready here and they used to wait for everything below: the PUSCH
+   * front end and the LDPC decode. That is not a small wait -- at 273 PRB with
+   * two layers it is milliseconds, i.e. several slots -- and it is spent by the
+   * one indication the DL side depends on. UCI carries the DL HARQ-ACK, so
+   * holding it inflates the DL HARQ round trip by exactly that much, and DL HARQ
+   * has only 16 processes to cover it; it also delays CSI (link adaptation) and
+   * SR (UL access latency). RACH is at least as timing-critical.
+   *
+   * Splitting is safe rather than merely expedient:
+   *  - every handler in NR_UL_indication is guarded on its own count and is a
+   *    no-op for the parts left empty, so two calls with disjoint content do the
+   *    same work as one call with everything;
+   *  - NR_UL_indication does not run the scheduler (that has its own slot tick),
+   *    so there is no once-per-slot side effect to double up;
+   *  - the two halves touch disjoint MAC state -- UCI/SRS feed DL HARQ, CSI and
+   *    beam management, ULSCH feeds UL HARQ -- so no ordering is created between
+   *    them. The ordering that DOES matter, the feedback_ul_harq FIFO, is
+   *    ULSCH-only and stays in the second call.
+   *
+   * SRS moved up from after the decode for the same reason. handle_srs reads SRS
+   * symbols out of rxdataF and touches nothing the PUSCH stage produces, so its
+   * old position was late without being necessary.
+   *
+   * Counts are zeroed after sending so the ULSCH indication at the end of the
+   * slot does not deliver any of this twice.
+   *
+   * The if_inst check is not defensive padding: nr_ulsim and nr_ulsim_mu_mimo
+   * call this function directly with no MAC attached, so if_inst is NULL there.
+   * It also means the simulators cannot exercise this split -- it needs the
+   * softmodem. */
+  if (gNB->if_inst && gNB->if_inst->NR_UL_indication
+      && (UL_INFO->rach_ind.number_of_pdus > 0 || UL_INFO->uci_ind.num_ucis > 0
+          || UL_INFO->srs_ind.number_of_pdus > 0
+          || UL_INFO->srs_toa_vendor_ext_ind.num_ta > 0)) {
+    gNB->if_inst->NR_UL_indication(UL_INFO);
+    UL_INFO->rach_ind.number_of_pdus = 0;
+    UL_INFO->uci_ind.num_ucis = 0;
+    UL_INFO->srs_ind.number_of_pdus = 0;
+    UL_INFO->srs_toa_vendor_ext_ind.num_ta = 0;
+  }
+
   UL_INFO->crc_ind.sfn = frame_rx;
   UL_INFO->crc_ind.slot = slot_rx;
   UL_INFO->crc_ind.crc_list = UL_INFO->crc_pdu_list;
@@ -1487,16 +1541,6 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
       LOG_E(NR_PHY, "Error in nr_ulsch_procedures, returned %d\n", ret_nr_ulsch_procedures);
   }
   stop_meas(&gNB->ulsch_decoding_stats);
-
-  UL_INFO->srs_ind.sfn = frame_rx;
-  UL_INFO->srs_ind.slot = slot_rx;
-  UL_INFO->srs_ind.pdu_list = UL_INFO->srs_pdu_list;
-  UL_INFO->srs_ind.number_of_pdus = n_srs;
-  for (int i = 0; i < n_srs; ++i) {
-    start_meas(&gNB->rx_srs_stats);
-    handle_srs(now, gNB, &srs[i], &UL_INFO->srs_ind.pdu_list[i], &UL_INFO->srs_toa_vendor_ext_ind);
-    stop_meas(&gNB->rx_srs_stats);
-  }
 
   stop_meas(&gNB->phy_proc_rx);
 
