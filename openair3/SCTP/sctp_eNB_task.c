@@ -31,6 +31,7 @@
 #include "sctp_default_values.h"
 #include "sctp_common.h"
 #include "sctp_eNB_itti_messaging.h"
+#include "oai_sctp.h"
 
 /* Used to format an uint32_t containing an ipv4 address */
 #define IPV4_ADDR    "%u.%u.%u.%u"
@@ -116,14 +117,14 @@ sctp_eNB_accept_associations_multi(
     from_len = (socklen_t)sizeof(struct sockaddr_in);
     memset((void *)&sinfo, 0, sizeof(struct sctp_sndrcvinfo));
 
-    n = sctp_recvmsg(sctp_cnx->sd, (void *)buffer, SCTP_RECV_BUFFER_SIZE,
+    n = oai_sctp_recvmsg(sctp_cnx->sd, (void *)buffer, SCTP_RECV_BUFFER_SIZE,
                      (struct sockaddr *)&addr, &from_len,
                      &sinfo, &flags);
 
     if (n < 0) {
         if (errno == ENOTCONN) {
             SCTP_DEBUG("Received not connected for sd %d\n", sctp_cnx->sd);
-            close(sctp_cnx->sd);
+            oai_sctp_close(sctp_cnx->sd);
         } else {
             SCTP_DEBUG("An error occured during read\n");
             SCTP_ERROR("sctp_recvmsg (fd %d, len %d ): %s:%d\n", sctp_cnx->sd, n, strerror(errno), errno);
@@ -158,7 +159,7 @@ sctp_eNB_accept_associations_multi(
 
                 new_cnx->connection_type = SCTP_TYPE_CLIENT;
 
-                ns = sctp_peeloff(sctp_cnx->sd, sctp_assoc_changed->sac_assoc_id);
+                ns = oai_sctp_peeloff(sctp_cnx->sd, sctp_assoc_changed->sac_assoc_id);
 
                 new_cnx->sd         = ns;
                 new_cnx->task_id    = sctp_cnx->task_id;
@@ -171,7 +172,7 @@ sctp_eNB_accept_associations_multi(
                 if (sctp_get_sockinfo(ns, &new_cnx->in_streams, &new_cnx->out_streams,
                                       &new_cnx->assoc_id) != 0) {
                     SCTP_ERROR("sctp_get_sockinfo failed\n");
-                    close(ns);
+                    oai_sctp_close(ns);
                     free(new_cnx);
                     return;
                 }
@@ -227,7 +228,7 @@ sctp_handle_new_association_req_multi(
     //if (fcntl(sd, F_SETFL, O_NONBLOCK) < 0) {
     //SCTP_ERROR("fcntl F_SETFL O_NONBLOCK failed: %s\n",
     //         strerror(errno));
-    //close(sd);
+    //oai_sctp_close(sd);
     //return;
     //}
 
@@ -282,7 +283,7 @@ sctp_handle_new_association_req_multi(
         }
 
         /* Connect to remote host and port */
-        if (sctp_connectx(sd, (struct sockaddr *)addr, 1, &assoc_id) < 0) {
+        if (oai_sctp_connectx(sd, (struct sockaddr *)addr, 1, &assoc_id) < 0) {
             /* sctp_connectx on non-blocking socket return EINPROGRESS */
             if (errno != EINPROGRESS) {
                 SCTP_ERROR("Connect failed: %s\n", strerror(errno));
@@ -291,7 +292,7 @@ sctp_handle_new_association_req_multi(
                     SCTP_STATE_UNREACHABLE, 0, 0);
                 /* Add the socket to list of fd monitored by ITTI */
                 //itti_unsubscribe_event_fd(TASK_SCTP, sd);
-                //close(sd);
+                //oai_sctp_close(sd);
                 return;
             } else {
                 SCTP_DEBUG("connectx assoc_id  %d in progress..., used %d addresses\n",
@@ -305,7 +306,7 @@ sctp_handle_new_association_req_multi(
         }
     }
 
-    ns = sctp_peeloff(sd, assoc_id);
+    ns = oai_sctp_peeloff(sd, assoc_id);
     AssertFatal(ns != -1, "sctp_peeloff() failed for sd=%d assoc_id=%d: errno %d %s\n", sd, assoc_id, errno, strerror(errno));
 
     sctp_cnx = calloc(1, sizeof(*sctp_cnx));
@@ -379,7 +380,7 @@ static void sctp_handle_new_association_req(const instance_t instance,
     const char *ip = print_ip(p, buf, sizeof(buf));
     SCTP_DEBUG("Trying %s for client socket creation\n", ip);
 
-    if ((sd = socket(serv->ai_family, serv->ai_socktype, serv->ai_protocol)) == -1) {
+    if ((sd = oai_sctp_socket(serv->ai_family, serv->ai_socktype, serv->ai_protocol)) == -1) {
       SCTP_WARN("Socket creation failed: %s\n", strerror(errno));
       continue;
     }
@@ -400,14 +401,14 @@ static void sctp_handle_new_association_req(const instance_t instance,
     events.sctp_partial_delivery_event = 1;
 
     /* as above */
-    ret = setsockopt(sd, serv->ai_protocol, SCTP_EVENTS, &events, 8);
+    ret = oai_sctp_setsockopt(sd, serv->ai_protocol, SCTP_EVENTS, &events, 8);
     AssertFatal(ret == 0, "setsockopt() IPPROTO_SCTP_EVENTS failed: %s\n", strerror(errno));
 
     /* if that fails, we will try the next address */
-    ret = sctp_bindx(sd, p->ai_addr, 1, SCTP_BINDX_ADD_ADDR);
+    ret = oai_sctp_bindx(sd, p->ai_addr, 1, SCTP_BINDX_ADD_ADDR);
     if (ret != 0) {
       SCTP_WARN("sctp_bindx() SCTP_BINDX_ADD_ADDR failed: errno %d %s\n", errno, strerror(errno));
-      close(sd);
+      oai_sctp_close(sd);
       continue;
     }
 
@@ -448,13 +449,13 @@ static void sctp_handle_new_association_req(const instance_t instance,
       const char *ip = print_ip(p, buf, sizeof(buf));
       SCTP_DEBUG("Trying to connect to %s for remote end %s\n", ip, remote);
 
-      if (sctp_connectx(sd, p->ai_addr, 1, &assoc_id) < 0) {
+      if (oai_sctp_connectx(sd, p->ai_addr, 1, &assoc_id) < 0) {
         /* sctp_connectx on non-blocking socket return EINPROGRESS */
         if (errno != EINPROGRESS) {
           SCTP_ERROR("Connect failed: %s\n", strerror(errno));
           sctp_itti_send_association_resp(requestor, instance, -1, req->ulp_cnx_id, SCTP_STATE_UNREACHABLE, 0, 0);
           freeaddrinfo(serv);
-          close(sd);
+          oai_sctp_close(sd);
           return;
         } else {
           SCTP_DEBUG("sctp_connectx(): assoc_id %d in progress...\n", assoc_id);
@@ -467,7 +468,7 @@ static void sctp_handle_new_association_req(const instance_t instance,
 
     freeaddrinfo(serv);
   } else {
-    /* I am not sure that this is relevant; we already did sctp_bindx() above */
+    /* I am not sure that this is relevant; we already did oai_sctp_bindx() above */
     connection_type = SCTP_TYPE_SERVER;
 
     /* No remote address provided -> only bind the socket for now.
@@ -482,9 +483,9 @@ static void sctp_handle_new_association_req(const instance_t instance,
     addr6.sin6_port = htons(req->port);
     addr6.sin6_flowinfo = 0;
 
-    if (bind(sd, (struct sockaddr *)&addr6, sizeof(addr6)) < 0) {
+    if (oai_sctp_bind(sd, (struct sockaddr *)&addr6, sizeof(addr6)) < 0) {
       SCTP_ERROR("Failed to bind the socket to address any (v4/v6): %s\n", strerror(errno));
-      close(sd);
+      oai_sctp_close(sd);
       return;
     }
     */
@@ -538,7 +539,7 @@ static void sctp_send_data(sctp_data_req_t *sctp_data_req_p)
     /* Send message on specified stream of the sd association
      * NOTE: PPID should be defined in network order
      */
-    if (sctp_sendmsg(sctp_cnx->sd, sctp_data_req_p->buffer,
+    if (oai_sctp_sendmsg(sctp_cnx->sd, sctp_data_req_p->buffer,
                      sctp_data_req_p->buffer_length, NULL, 0,
                      htonl(sctp_cnx->ppid), 0, sctp_data_req_p->stream, 0, 0) < 0) {
         SCTP_ERROR("Sctp_sendmsg failed: %s\n", strerror(errno));
@@ -566,7 +567,7 @@ static int sctp_close_association(sctp_close_association_t *close_association_p)
         /* TODO: notify upper layer */
         return -1;
     } else {
-        close(sctp_cnx->sd);
+        oai_sctp_close(sctp_cnx->sd);
         STAILQ_REMOVE(&sctp_cnx_list, sctp_cnx, sctp_cnx_list_elm_s, entries);
         SCTP_DEBUG("Removed assoc_id %d (closed socket %u)\n",
                    sctp_cnx->assoc_id, (unsigned int)sctp_cnx->sd);
@@ -602,7 +603,7 @@ static int sctp_create_new_listener(const instance_t instance, const task_id_t r
 
     /* SOCK_SEQPACKET to be able to reuse(?) socket through SCTP_INIT_MSG_MULTI_REQ */
     int socktype = server_type ? SOCK_SEQPACKET : SOCK_STREAM;
-    if ((sd = socket(serv->ai_family, socktype, serv->ai_protocol)) == -1) {
+    if ((sd = oai_sctp_socket(serv->ai_family, socktype, serv->ai_protocol)) == -1) {
       SCTP_WARN("Socket creation failed: %s\n", strerror(errno));
       continue;
     }
@@ -622,20 +623,20 @@ static int sctp_create_new_listener(const instance_t instance, const task_id_t r
     event.sctp_partial_delivery_event = 1;
 
     /* as above */
-    ret = setsockopt(sd, serv->ai_protocol, SCTP_EVENTS, &event, 8);
+    ret = oai_sctp_setsockopt(sd, serv->ai_protocol, SCTP_EVENTS, &event, 8);
     AssertFatal(ret == 0, "setsockopt() IPPROTO_SCTP_EVENTS failed: %s\n", strerror(errno));
 
     /* if that fails, we will try the next address */
-    ret = sctp_bindx(sd, p->ai_addr, 1, SCTP_BINDX_ADD_ADDR);
+    ret = oai_sctp_bindx(sd, p->ai_addr, 1, SCTP_BINDX_ADD_ADDR);
     if (ret != 0) {
       SCTP_WARN("sctp_bindx() SCTP_BINDX_ADD_ADDR failed: errno %d %s\n", errno, strerror(errno));
-      close(sd);
+      oai_sctp_close(sd);
       continue;
     }
 
-    if (listen(sd, 5) < 0) {
+    if (oai_sctp_listen(sd, 5) < 0) {
       SCTP_WARN("listen() failed: %s:%d\n", strerror(errno), errno);
-      close(sd);
+      oai_sctp_close(sd);
       return -1;
     }
 
@@ -688,7 +689,7 @@ sctp_eNB_accept_associations(
 
     /* There is a new client connecting. Accept it...
      */
-    if ((client_sd = accept(sctp_cnx->sd, (struct sockaddr*)&saddr, &saddr_size)) < 0) {
+    if ((client_sd = oai_sctp_accept(sctp_cnx->sd, (struct sockaddr*)&saddr, &saddr_size)) < 0) {
         SCTP_ERROR("[%d] accept failed: %s:%d\n", sctp_cnx->sd, strerror(errno), errno);
     } else {
         struct sctp_cnx_list_elm_s *new_cnx;
@@ -701,7 +702,7 @@ sctp_eNB_accept_associations(
         if (fcntl(client_sd, F_SETFL, O_NONBLOCK) < 0) {
             SCTP_ERROR("fcntl F_SETFL O_NONBLOCK failed: %s\n",
                        strerror(errno));
-            close(client_sd);
+            oai_sctp_close(client_sd);
             return;
         }
 
@@ -721,7 +722,7 @@ sctp_eNB_accept_associations(
         if (sctp_get_sockinfo(client_sd, &new_cnx->in_streams, &new_cnx->out_streams,
                               &new_cnx->assoc_id) != 0) {
             SCTP_ERROR("sctp_get_sockinfo failed\n");
-            close(client_sd);
+            oai_sctp_close(client_sd);
             free(new_cnx);
             return;
         }
@@ -751,7 +752,7 @@ sctp_eNB_read_from_socket(
     struct sctp_sndrcvinfo sinfo={0};
     uint8_t buffer[SCTP_RECV_BUFFER_SIZE];
 
-    int n = sctp_recvmsg(sctp_cnx->sd, (void *)buffer, SCTP_RECV_BUFFER_SIZE,
+    int n = oai_sctp_recvmsg(sctp_cnx->sd, (void *)buffer, SCTP_RECV_BUFFER_SIZE,
                     NULL, NULL, 
                      &sinfo, &flags);
 
@@ -767,7 +768,7 @@ sctp_eNB_read_from_socket(
                 sctp_cnx->task_id, sctp_cnx->instance, sctp_cnx->assoc_id,
                 sctp_cnx->cnx_id, SCTP_STATE_UNREACHABLE, 0, 0);
 
-            close(sctp_cnx->sd);
+            oai_sctp_close(sctp_cnx->sd);
             STAILQ_REMOVE(&sctp_cnx_list, sctp_cnx, sctp_cnx_list_elm_s, entries);
             sctp_nb_cnx--;
             free(sctp_cnx);
@@ -799,7 +800,7 @@ sctp_eNB_read_from_socket(
             itti_unsubscribe_event_fd(TASK_SCTP, sctp_cnx->sd);
 
             SCTP_WARN("Received SCTP SHUTDOWN EVENT\n");
-            close(sctp_cnx->sd);
+            oai_sctp_close(sctp_cnx->sd);
 
             sctp_itti_send_association_resp(
                 sctp_cnx->task_id, sctp_cnx->instance, sctp_cnx->assoc_id,
