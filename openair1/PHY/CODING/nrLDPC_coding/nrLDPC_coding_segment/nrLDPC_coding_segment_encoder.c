@@ -277,6 +277,7 @@ static void ldpc8blocks(void *p)
   if (Eshift) {
     bzero(f2, ceil_mod(E2, 64));
   }
+  start_meas(&nrLDPC_TB_encoding_parameters->segments[macro_segment].ts_rate_match);
   if (nr_rate_matching_ldpc(Tbslbrm,
                             impp->BG,
                             impp->Zc,
@@ -300,6 +301,8 @@ static void ldpc8blocks(void *p)
           impp->F,
           impp->Zc,
           nrLDPC_TB_encoding_parameters->rv_index);
+  stop_meas(&nrLDPC_TB_encoding_parameters->segments[macro_segment].ts_rate_match);
+  start_meas(&nrLDPC_TB_encoding_parameters->segments[macro_segment].ts_interleave);
 
   nr_interleaving_ldpc(E,
                        mod_order,
@@ -310,6 +313,7 @@ static void ldpc8blocks(void *p)
                          mod_order,
                          e,
                          f2);
+  stop_meas(&nrLDPC_TB_encoding_parameters->segments[macro_segment].ts_interleave);
 
   completed_task_ans(impp->ans);
 }
@@ -324,6 +328,12 @@ static int nrLDPC_launch_TB_encoding(nrLDPC_slot_encoding_parameters_t *nrLDPC_s
 
   encoder_implemparams_t common_segment_params = {
     .n_segments = nrLDPC_TB_encoding_parameters->C,
+    .tinput = nrLDPC_slot_encoding_parameters->tinput,
+    .tinput_memcpy = nrLDPC_slot_encoding_parameters->tinput_memcpy,
+    .tprep = nrLDPC_slot_encoding_parameters->tprep,
+    .tparity = nrLDPC_slot_encoding_parameters->tparity,
+    .toutput = nrLDPC_slot_encoding_parameters->toutput,
+    .tconcat = nrLDPC_slot_encoding_parameters->tconcat,
     .Kb = nrLDPC_TB_encoding_parameters->Kb,
     .Zc = nrLDPC_TB_encoding_parameters->Z,
     .BG = nrLDPC_TB_encoding_parameters->BG,
@@ -406,6 +416,9 @@ int nrLDPC_coding_encoder(nrLDPC_slot_encoding_parameters_t *nrLDPC_slot_encodin
   join_task_ans(&ans);
 
   // Write output
+  time_stats_t *tconcat = nrLDPC_slot_encoding_parameters->tconcat;
+  if (tconcat != NULL)
+    start_meas(tconcat);
   nbTasks = 0;
   for (int dlsch_id = 0; dlsch_id < nrLDPC_slot_encoding_parameters->nb_TBs; dlsch_id++) {
     nrLDPC_TB_encoding_parameters_t *nrLDPC_TB_encoding_parameters = &nrLDPC_slot_encoding_parameters->TBs[dlsch_id];
@@ -441,11 +454,11 @@ int nrLDPC_coding_encoder(nrLDPC_slot_encoding_parameters_t *nrLDPC_slot_encodin
                         macro_segment_end - macro_segment,
                         nrLDPC_TB_encoding_parameters->output,
                         Eoffset);
-
-
     }
     nbTasks += n_seg;
   }
+  if (tconcat != NULL)
+    stop_meas(tconcat);
 
   return 0;
 }
