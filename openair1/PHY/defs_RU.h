@@ -160,7 +160,15 @@ typedef struct {
  task_ans_t *ans;
 } feptx_cmd_t;
 
-#define RU_RX_SLOT_DEPTH 4
+/* Depth of the rxdataF ring, in slots.  Must DIVIDE slots_per_frame, otherwise the
+ * index aliases across the frame boundary and the effective reuse distance collapses:
+ * with a DDDSU pattern at mu=1 only UL/mixed slots {3,4,8,9,13,14,18,19} touch the ring,
+ * and depth 4 gives idx {3,0,0,1,1,2,2,3} -- a minimum reuse of 4 slots (2 ms), which is
+ * less than a loaded rx_func() plus its queueing on a slow part.  Depth 8 is no better
+ * (20 % 8 = 4, so slot 19 still collides with the next frame's slot 3); 20 makes every
+ * slot of the frame unique, for 10 ms.  Costs symbols_per_slot * ofdm_symbol_size * depth
+ * per antenna: ~9 MB at 273 PRB / 2 antennas. */
+#define RU_RX_SLOT_DEPTH 20
 typedef struct RU_proc_t_s {
   /// Pointer to associated RU descriptor
   struct RU_t_s *ru;
