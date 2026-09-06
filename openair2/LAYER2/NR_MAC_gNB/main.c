@@ -74,6 +74,32 @@ void *nrmac_stats_thread(void *arg) {
       p += print_meas_log(&cell->nr_srs_ri_computation_timer, "UL-RI computation time", NULL, NULL, p, end - p);
       p += print_meas_log(&cell->nr_srs_tpmi_computation_timer, "UL-TPMI computation time", NULL, NULL, p, end - p);
     }
+    /* Per-slot-of-frame UL outcome.  Only slots that actually carry PUSCH appear, so the
+       table doubles as a map of where the scheduler puts UL in the TDD pattern.  Printed
+       once rather than inside the per-cell loop above: ul_slot_stats lives on the MAC
+       instance, so repeating it per cell would print the same numbers N times. */
+    {
+      bool any = false;
+      for (int sl = 0; sl < NR_MAX_SLOTS_PER_FRAME && !any; sl++)
+        any = gNB->ul_slot_stats[sl].n > 0;
+      if (any) {
+        p += snprintf(p, end - p, "UL per slot [slot: n dtx crc]:\n");
+        for (int sl = 0; sl < NR_MAX_SLOTS_PER_FRAME && p < end; sl++) {
+          const nr_ul_slot_stat_t *u = &gNB->ul_slot_stats[sl];
+          if (u->n == 0)
+            continue;
+          p += snprintf(p,
+                        end - p,
+                        "  %3d: %9llu  dtx %8llu (%5.2f%%)  crc %8llu (%5.2f%%)\n",
+                        sl,
+                        (unsigned long long)u->n,
+                        (unsigned long long)u->dtx,
+                        100.0 * u->dtx / u->n,
+                        (unsigned long long)u->crc,
+                        100.0 * u->crc / u->n);
+        }
+      }
+    }
     NR_SCHED_UNLOCK(&gNB->sched_lock);
     size_t len = p - output;
     if (fwrite(output, len, 1, file) != 1 || fflush(file) != 0) {

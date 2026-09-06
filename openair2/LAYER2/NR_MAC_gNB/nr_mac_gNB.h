@@ -1322,7 +1322,24 @@ typedef struct nr_cell_sched_s {
 } nr_cell_sched_t;
 
 /*! \brief top level gNB MAC structure */
+/* Per-slot-of-frame UL reception outcome.  ulsch_DTX is a per-UE total with no slot
+ * breakdown, so it cannot answer "is one slot of the TDD pattern systematically losing
+ * PUSCH?" -- and with a DDDSU pattern all PUSCH is confined to a handful of slots, one of
+ * which also carries PRACH every frame.  Counts EVERY reception rather than sampling, so
+ * slots are directly comparable (same reasoning as tx_slot_stats/rx_slot_stats).
+ *
+ * dtx and crc are different failures and must not be merged: dtx means no energy was
+ * found where the UE was granted (the UE MAC pads TBs, so it always transmits), while crc
+ * means energy arrived but did not decode. */
+typedef struct {
+  uint64_t n;   /* PUSCH receptions reported for this slot */
+  uint64_t dtx; /* ul_cqi == 0xff || <= 128: nothing detected */
+  uint64_t crc; /* energy present, CRC failed */
+} nr_ul_slot_stat_t;
+
 typedef struct gNB_MAC_INST_s {
+  /// per-slot-of-frame UL reception outcome, see nr_ul_slot_stat_t
+  nr_ul_slot_stat_t ul_slot_stats[NR_MAX_SLOTS_PER_FRAME];
   /// F1-C/U network configuration (addresses and ports)
   f1ap_net_config_t net_config;
   /// Nvipc parameters for FAPI interface with Aerial
