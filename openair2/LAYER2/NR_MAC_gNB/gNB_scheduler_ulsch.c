@@ -992,6 +992,10 @@ static void _nr_rx_sdu(gNB_MAC_INST *gNB_mac,
 
 #endif
 
+    /* per-slot-of-frame UL outcome; see nr_ul_slot_stat_t */
+    nr_ul_slot_stat_t *uss = &gNB_mac->ul_slot_stats[slotP % NR_MAX_SLOTS_PER_FRAME];
+    uss->n++;
+
     if (sduP != NULL) {
       LOG_D(NR_MAC, "Received PDU at MAC gNB \n");
       UE->UE_sched_ctrl.pusch_consecutive_dtx_cnt = 0;
@@ -1004,7 +1008,10 @@ static void _nr_rx_sdu(gNB_MAC_INST *gNB_mac,
       if (ul_cqi == 0xff || ul_cqi <= 128) {
         UE->UE_sched_ctrl.pusch_consecutive_dtx_cnt++;
         UE->mac_stats.ulsch_DTX++;
+        uss->dtx++;
         nr_mac_signal_dtx(&UE_scheduling_control->pusch_pc);
+      } else {
+        uss->crc++; /* energy was present, it just did not decode */
       }
 
       if (!get_softmodem_params()->phy_test && UE->UE_sched_ctrl.pusch_consecutive_dtx_cnt >= pusch_failure_thres) {
