@@ -523,7 +523,13 @@ int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
   const struct xran_fh_init *fh_init = get_xran_fh_init();
   int fftsize = 1 << fh_cfg->perMu[mu].nULFftSize;
 
-  int slot_offset_rxdata = 3 & (*slot);
+  /* Ring index MUST come from RU_RX_SLOT_DEPTH: this is the site that WRITES rxdataF,
+   * and every reader (rx_func, ulsch demod, pucch, srs, channel estimation) indexes with
+   * slot % RU_RX_SLOT_DEPTH.  A hardcoded mask here silently sends the fronthaul data to
+   * a different slot than the receiver reads -- PRACH still works (time domain, separate
+   * buffer) so the cell looks alive, but Msg3 and every PUSCH decode fails.  Commit
+   * 5977d24e10 fixed three such sites and missed this one. */
+  int slot_offset_rxdata = (*slot) % RU_RX_SLOT_DEPTH;
   uint32_t slot_size = 4 * 14 * fftsize;
   uint8_t *rx_data = (uint8_t *)ru->rxdataF[0];
   uint8_t *start_ptr = NULL;
