@@ -10,6 +10,7 @@
 #include "nr_dci.h"
 #include "nr_sch_dmrs.h"
 #include "PHY/MODULATION/nr_modulation.h"
+#include "PHY/NR_REFSIG/nr_refsig.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h"
 #include "PHY/NR_REFSIG/ptrs_nr.h"
 #include "common/utils/nr/nr_common.h"
@@ -670,6 +671,71 @@ static inline bool do_txdataF_2x4(c16_t **txdataF,
   return true;
 }
 
+/* Parallel scramble + modulate + layer-map.
+ *
+ * All three stages are elementwise/strided with no cross-element dependency:
+ * scrambling is a pure XOR against a fully materialised gold sequence, modulation is a
+ * per-symbol table lookup, and layer mapping is a fixed stride-n_layers deinterleave.
+ * Serially they cost ~180 us of a ~525 us PDSCH generation at 273 PRB / 2 layers on a
+ * Cortex-A72, and being outside the per-symbol task region they set an Amdahl floor that
+ * no number of pool cores can lower.
+ *
+ * Chunks are cut on a granule of lcm(32, Qm * n_layers) bits so that every boundary is
+ * simultaneously 32-bit aligned (the scrambler XORs whole words) and a whole number of
+ * per-layer symbols (so each chunk writes a contiguous, disjoint slice of every layer).
+ * Only the final chunk may be short, so only it can round its word count up -- the +4
+ * word slack on scrambled_output covers that.
+ *
+ * gold_cache() keeps a THREAD-LOCAL table, so the sequence is fetched once by the caller
+ * and the pointer handed to the workers; letting each worker call it would regenerate the
+ * sequence per thread. */
+typedef struct {
+  const uint32_t *in;      // encoder output
+  const uint32_t *seq;     // gold sequence, from the caller's gold_cache()
+  uint32_t *scrambled;     // shared buffer, this chunk writes [word_off, word_off+n_words)
+  c16_t *tx_base;          // &tx_layers[0][0]
+  int layerSz;
+  uint32_t word_off, n_words, bit_len, sym_off, n_syms;
+  uint16_t Qm;
+  uint8_t n_layers;
+  task_ans_t *ans;
+} pdschModChunk_t;
+
+static void nr_pdsch_scramble_modulate_chunk(void *arg)
+{
+  pdschModChunk_t *d = (pdschModChunk_t *)arg;
+
+  uint32_t *out = d->scrambled + d->word_off;
+  const uint32_t *in = d->in + d->word_off;
+  const uint32_t *seq = d->seq + d->word_off;
+  for (uint32_t i = 0; i < d->n_words; i++)
+    out[i] = in[i] ^ seq[i];
+
+  c16_t mod_symbs[d->n_syms] __attribute__((aligned(64)));
+  nr_modulation(out, d->bit_len, d->Qm, (int16_t *)mod_symbs);
+
+  /* Offsetting the flat base keeps the per-layer stride, so tl[l][k] is
+     tx_layers[l][sym_off / n_layers + k]. */
+  c16_t (*tl)[d->layerSz] = (c16_t (*)[d->layerSz])(d->tx_base + d->sym_off / d->n_layers);
+  c16_t (*ms)[d->n_syms] = &mod_symbs;
+  nr_layer_mapping(1, d->n_syms, ms, d->n_layers, d->layerSz, d->n_syms, tl);
+
+  completed_task_ans(d->ans);
+}
+
+/* Floor on chunk size, so a small allocation does not spend more on dispatch than it
+   saves.  Above it, the chunk COUNT follows the pool width rather than a fixed symbol
+   count: a fixed 16384 gave only 2-3 chunks at 1 layer with the allocations a real
+   scheduler produces, which is why the first version measured -49% in dlsim at 2 layers
+   and no gain at all on the live DU. */
+#define NR_PDSCH_MOD_MIN_CHUNK_SYMS 2048
+
+static inline uint32_t nr_gcd_u32(uint32_t a, uint32_t b)
+{
+  while (b) { uint32_t t = a % b; a = b; b = t; }
+  return a;
+}
+
 typedef struct pdschSymbolProc_s {
   PHY_VARS_gNB *gNB;
   NR_DL_FRAME_PARMS *frame_parms;
@@ -955,28 +1021,101 @@ static int do_one_dlsch(unsigned char *input_ptr,
   start_meas(&gNB->dlsch_pdsch_generation_stats);
   int layerSz2 = (layerSz + 63) & ~63;
   c16_t tx_layers[rel15->nrOfLayers][layerSz2] __attribute__((aligned(64)));
+  /* Clear only the TAIL of each layer.  Both the chunked and the serial mapping write
+     tx_layers[l][0 .. n_symbs/n_layers), and the symbol tasks read exactly that range
+     (re_beginning_of_symbol accumulates to the same total), so the head is always
+     written before it is read.  Clearing all of tx_layers[] was a 358 KB memset at
+     273 PRB / 2 layers -- the largest remaining serial item once scramble+modulate were
+     parallelised, and it got *slower* under the pool (26 -> 37 us) because the lines had
+     been touched by other cores. */
+  const uint32_t layer_used = (encoded_length / Qm) / rel15->nrOfLayers;
   start_meas(&gNB->dlsch_layer_clear_stats);
-  memset(tx_layers, 0, sizeof(tx_layers));
+  if (layer_used < (uint32_t)layerSz2)
+    for (int l = 0; l < rel15->nrOfLayers; l++)
+      memset(&tx_layers[l][layer_used], 0, ((uint32_t)layerSz2 - layer_used) * sizeof(c16_t));
   stop_meas(&gNB->dlsch_layer_clear_stats);
 
-  start_meas(dlsch_scrambling_stats);
   uint32_t scrambled_output[(encoded_length >> 5) + 4]; // modulator access by 4 bytes in some cases
-  memset(scrambled_output, 0, sizeof(scrambled_output));
-  nr_pdsch_codeword_scrambling(input_ptr, encoded_length, 0, rel15->dataScramblingId, rel15->rnti, scrambled_output);
-  stop_meas(dlsch_scrambling_stats);
+  const uint32_t roundedSz = (encoded_length + 31) / 32;
 
-  /* started AFTER scrambling stops: these two windows used to overlap, so
-   * dlsch_modulation_stats silently included the scrambling time and the two
-   * counters could not be added. */
-  start_meas(dlsch_modulation_stats);
-  const bool fused_ok =
-      nr_modulation_layer_mapping(scrambled_output, encoded_length, Qm, rel15->nrOfLayers, layerSz2, tx_layers);
-  AssertFatal(fused_ok,
+  /* Split scramble+modulate+layer-map over the pool when it is worth it. Restricted to
+     <= 2 layers because that is exactly the range where nr_modulation_layer_mapping()
+     itself selects modulate-then-deinterleave; for 3-4 layers it picks a fused scalar
+     loop that this chunking does not reproduce, so fall through to the serial call. */
+  uint32_t nb_chunks = 1;
+  const uint32_t unit = (uint32_t)Qm * rel15->nrOfLayers;
+  const uint32_t granule_bits = (32u / nr_gcd_u32(32u, unit)) * unit; // lcm(32, unit)
+  const uint32_t granules_total = (encoded_length + granule_bits - 1) / granule_bits;
+  if (gNB->num_pdsch_symbols_per_thread > 0 && rel15->nrOfLayers <= 2) {
+    /* one chunk per worker plus one for the caller, which runs the last inline */
+    const uint32_t by_pool = (uint32_t)gNB->threadPool.len_thr + 1;
+    const uint32_t by_size = (encoded_length / Qm) / NR_PDSCH_MOD_MIN_CHUNK_SYMS;
+    nb_chunks = by_pool < by_size ? by_pool : by_size;
+    if (nb_chunks > granules_total)
+      nb_chunks = granules_total;
+    if (nb_chunks < 1)
+      nb_chunks = 1;
+  }
+
+  if (nb_chunks > 1) {
+    start_meas(dlsch_scrambling_stats);
+    /* only the trailing slack the modulator may over-read: the chunks tile [0, roundedSz) */
+    memset(scrambled_output + roundedSz, 0, (sizeof(scrambled_output) / 4 - roundedSz) * 4);
+    /* fetched once here: gold_cache() is thread-local, so per-worker calls would each
+       regenerate the sequence instead of sharing it */
+    const uint32_t *seq = gold_cache((rel15->rnti << 15) + (0 << 14) + rel15->dataScramblingId, roundedSz);
+    stop_meas(dlsch_scrambling_stats);
+
+    start_meas(dlsch_modulation_stats);
+    pdschModChunk_t cd[nb_chunks];
+    task_ans_t mans;
+    init_task_ans(&mans, nb_chunks);
+    for (uint32_t c = 0; c < nb_chunks; c++) {
+      const uint32_t b0 = ((granules_total * c) / nb_chunks) * granule_bits;
+      uint32_t b1 = ((granules_total * (c + 1)) / nb_chunks) * granule_bits;
+      if (b1 > encoded_length || c == nb_chunks - 1)
+        b1 = encoded_length;
+      cd[c] = (pdschModChunk_t){.in = (const uint32_t *)input_ptr,
+                                .seq = seq,
+                                .scrambled = scrambled_output,
+                                .tx_base = &tx_layers[0][0],
+                                .layerSz = layerSz2,
+                                .word_off = b0 / 32,
+                                .n_words = ((b1 + 31) / 32) - (b0 / 32),
+                                .bit_len = b1 - b0,
+                                .sym_off = b0 / Qm,
+                                .n_syms = (b1 - b0) / Qm,
+                                .Qm = Qm,
+                                .n_layers = rel15->nrOfLayers,
+                                .ans = &mans};
+      if (c < nb_chunks - 1) {
+        task_t t = {.func = &nr_pdsch_scramble_modulate_chunk, .args = &cd[c]};
+        pushTpool(&gNB->threadPool, t);
+      } else {
+        nr_pdsch_scramble_modulate_chunk(&cd[c]); // last one inline, like the symbol tasks
+      }
+    }
+    join_task_ans(&mans);
+    stop_meas(dlsch_modulation_stats);
+  } else {
+    start_meas(dlsch_scrambling_stats);
+    memset(scrambled_output, 0, sizeof(scrambled_output));
+    nr_pdsch_codeword_scrambling(input_ptr, encoded_length, 0, rel15->dataScramblingId, rel15->rnti, scrambled_output);
+    stop_meas(dlsch_scrambling_stats);
+
+    /* started AFTER scrambling stops: these two windows used to overlap, so
+     * dlsch_modulation_stats silently included the scrambling time and the two
+     * counters could not be added. */
+    start_meas(dlsch_modulation_stats);
+    const bool fused_ok =
+        nr_modulation_layer_mapping(scrambled_output, encoded_length, Qm, rel15->nrOfLayers, layerSz2, tx_layers);
+    AssertFatal(fused_ok,
                 "Unsupported fused modulation/layer mapping for Qm %d, %d layers, %d codewords\n",
                 Qm,
                 rel15->nrOfLayers,
                 rel15->NrOfCodewords);
-  stop_meas(dlsch_modulation_stats);
+    stop_meas(dlsch_modulation_stats);
+  }
 
   /// Layer Precoding and Antenna port mapping
   // tx_layers 1-8 are mapped on antenna ports 1000-1007
