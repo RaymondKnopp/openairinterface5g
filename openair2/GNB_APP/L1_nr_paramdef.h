@@ -35,6 +35,8 @@
 #define L1_RX_POOL_CORES                     "L1_rx_pool_cores"
 #define HLP_L1_RX_POOL_CORES                 "cores for a separate UL thread pool, e.g. \"0,6\" (empty = share the --thread-pool one). The shared pool is FIFO, and one UL slot pushes a task per symbol, so DL work queued behind it waits for the whole batch."
 #define L1_TX_OVERRUN_US                     "L1_tx_overrun_us"
+#define L1_RX_OVERRUN_US                     "L1_rx_overrun_us"
+#define HLP_L1_RX_OVERRUN_US                 "log the split of the feprx->rx_func path whenever it exceeds this many us (0 = off). Exceeding the rxdataF ring budget is what destroys UL samples."
 #define HLP_L1_TX_OVERRUN_US                 "log the PDSCH configuration whenever L1 TX processing exceeds this many us (0 = off). Aggregate stats hide a rare tail; this reports the conditions of the outlier itself."
 #define HLP_TP_SIZ "thread_pool_size paramter removed, please use --thread-pool"
 #define L1_TX_AMP_BACKOFF_dB                 "tx_amp_backoff_dB"
@@ -70,6 +72,7 @@
   {L1_NUM_TX_SYM_PER_THREAD,             HLP_L1_NUM_TX_SYM_PER_THREAD, 0, .iptr=NULL, .defintval=0,               TYPE_INT,      0},         \
   {L1_RX_POOL_CORES,                     HLP_L1_RX_POOL_CORES, 0,       .strptr=NULL, .defstrval="",              TYPE_STRING,   0},         \
   {L1_TX_OVERRUN_US,                     HLP_L1_TX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
+  {L1_RX_OVERRUN_US,                     HLP_L1_RX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_AMP_BACKOFF_dB,                 HLP_L1TX_BO,0,         .uptr=NULL,           .defintval=36,              TYPE_UINT,     0},         \
   {L1_PHASE_COMP,                        HLP_L1_PHASE_COMP,PARAMFLAG_BOOL, .uptr=NULL,.defintval=1,               TYPE_UINT,     0},         \
   {L1_NUM_ANTENNAS_PER_THREAD,           HLP_NUM_ARX,0,         .uptr=NULL,           .defintval=1,               TYPE_UINT,     0},         \

@@ -883,6 +883,9 @@ void *ru_thread(void *param)
                                          .slot = proc->tti_tx,
                                          .frame_rx = proc->frame_rx,
                                          .slot_rx = proc->tti_rx,
+                                         /* stamped here, not in tx_func(), so the lag covers the
+                                          * whole feprx -> rx_func path against the ring budget */
+                                         .dispatch_tsc = rdtsc_oai(),
                                          .timestamp_tx = proc->timestamp_tx};
     pushNotifiedFIFO(&gNB->L1_tx_out, resTx);
   }

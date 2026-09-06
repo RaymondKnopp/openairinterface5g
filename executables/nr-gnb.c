@@ -81,6 +81,10 @@ static void tx_func(processingData_L1tx_t *info)
 
   // At this point, MAC scheduler just ran, including scheduling
   // PRACH/PUCCH/PUSCH, so trigger RX chain processing
+  //
+  // The RX job must stay on this thread: dispatching it from ru_thread lets
+  // NR_UL_indication(slot_rx) race NR_slot_indication(slot_tx) for sched_lock, which
+  // measurably destabilises the UE.  Queuing here keeps their order fixed.
   nr_save_ul_tti_req(gNB, &sched_response.UL_tti_req);
   LOG_D(NR_PHY, "Trigger RX for %d.%d\n", frame_rx, slot_rx);
   notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->resp_L1, NULL);
@@ -89,6 +93,7 @@ static void tx_func(processingData_L1tx_t *info)
   syncMsg->frame_rx = frame_rx;
   syncMsg->slot_rx = slot_rx;
   syncMsg->timestamp_tx = info->timestamp_tx;
+  syncMsg->dispatch_tsc = info->dispatch_tsc; // stamped by ru_thread after feprx()
   res->key = slot_rx;
   pushNotifiedFIFO(&gNB->resp_L1, res);
 
@@ -216,10 +221,55 @@ void *L1_rx_thread(void *arg)
      processingData_L1_t *info = (processingData_L1_t *)NotifiedFifoData(res);
      int slot_type = nr_slot_select(&gNB->gNB_config, info->frame_rx, info->slot_rx);
      const int slot_rx = info->slot_rx;
+     if (cpu_meas_enabled && info->dispatch_tsc) {
+       /* how long this job sat between ru_thread queuing it and us starting it */
+       gNB->rx_dispatch_lag.trials++;
+       const uint64_t lag = rdtsc_oai() - info->dispatch_tsc;
+       gNB->rx_dispatch_lag.diff += lag;
+       /* windowed like start_meas() does, so the max describes recent behaviour */
+       if ((gNB->rx_dispatch_lag.trials & 16383) < 10)
+         gNB->rx_dispatch_lag.max = 0;
+       if (lag > gNB->rx_dispatch_lag.max)
+         gNB->rx_dispatch_lag.max = lag;
+       const double lag_us = (double)lag / (1000.0 * get_cpu_freq_GHz());
+       if (lag_us > 200.0) gNB->rx_lag_over[0]++;
+       if (lag_us > 500.0) gNB->rx_lag_over[1]++;
+       if (lag_us > 1000.0) gNB->rx_lag_over[2]++;
+     }
      const uint64_t t_rx_start = rdtsc_oai();
      START_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
      rx_func(info);
      STOP_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
+     const uint64_t t_rx_end = rdtsc_oai();
+     /* RX overrun alarm: the ring budget applies to the whole feprx -> here path, so judge
+      * that, and report which half consumed it.  proc_ comes from our own timestamps, not
+      * l1_rx_proc.p_time, because STOP_MEAS_FULL_SLOT measures only full UL slots while the
+      * ring budget applies to every slot.  Rate limited with a prime modulus for the same
+      * reason as the TX alarm: a one-in-100 limiter phase-locks to a TDD pattern whose UL
+      * slot count shares a factor with 100 and would then only ever report a fixed subset. */
+     if (gNB->rx_overrun_us > 0 && cpu_meas_enabled && info->dispatch_tsc) {
+       const double ghz_ = 1000.0 * get_cpu_freq_GHz();
+       const double proc_ = (double)(t_rx_end - t_rx_start) / ghz_;
+       const double e2e_ = (double)(t_rx_end - info->dispatch_tsc) / ghz_;
+       if (e2e_ > gNB->rx_overrun_us) {
+         gNB->rx_overrun_count++;
+         if (gNB->rx_overrun_count <= 10 || (gNB->rx_overrun_count % 101) == 0) {
+           gNB->rx_overrun_logged++;
+           LOG_W(NR_PHY,
+                 "%4d.%2d L1 RX overrun: %.1f us > %d us (queued %.1f + proc %.1f), ring idx %d, "
+                 "%llu total (%llu logged)\n",
+                 info->frame_rx,
+                 slot_rx,
+                 e2e_,
+                 gNB->rx_overrun_us,
+                 e2e_ - proc_,
+                 proc_,
+                 slot_rx % RU_RX_SLOT_DEPTH,
+                 (unsigned long long)gNB->rx_overrun_count,
+                 (unsigned long long)gNB->rx_overrun_logged);
+         }
+       }
+     }
      if (cpu_meas_enabled) {
        /* Own timestamps rather than l1_rx_proc.p_time: STOP_MEAS_FULL_SLOT measures only
           full UL slots, and the point of this table is to compare those against the mixed
@@ -407,6 +457,7 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->dlsch_precoding_stats);
   reset_meas(&gNB->dlsch_pdsch_generation_stats);
   reset_meas(&gNB->phy_proc_rx);
+  reset_meas(&gNB->rx_dispatch_lag);
   reset_meas(&gNB->ulsch_decoding_stats);
   reset_meas(&gNB->ts_ldpc_decode);
   reset_meas(&gNB->ul_indication_stats);
@@ -463,6 +514,18 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->dlsch_precoding_stats, "  PDSCH precoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->phy_proc_rx, "L1 Rx processing", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ulsch_decoding_stats, "ULSCH decoding", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_dispatch_lag, "RX dispatch lag", NULL, NULL, output, end - output);
+  if (output < end)
+    output += snprintf(output, end - output, "%25s:  %llu (%llu logged)\n", "RX overruns",
+                       (unsigned long long)gNB->rx_overrun_count, (unsigned long long)gNB->rx_overrun_logged);
+  if (gNB->rx_dispatch_lag.trials > 0 && output < end)
+    output += snprintf(output, end - output,
+                       "%25s:  n %llu, >200us %llu (%.2f%%), >500us %llu (%.3f%%), >1ms %llu (%.3f%%)\n",
+                       "RX dispatch lag tail",
+                       (unsigned long long)gNB->rx_dispatch_lag.trials,
+                       (unsigned long long)gNB->rx_lag_over[0], 100.0 * gNB->rx_lag_over[0] / gNB->rx_dispatch_lag.trials,
+                       (unsigned long long)gNB->rx_lag_over[1], 100.0 * gNB->rx_lag_over[1] / gNB->rx_dispatch_lag.trials,
+                       (unsigned long long)gNB->rx_lag_over[2], 100.0 * gNB->rx_lag_over[2] / gNB->rx_dispatch_lag.trials);
   output += print_meas_log(&gNB->ts_ldpc_decode, "UL segments decoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ul_indication_stats, "UL Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);

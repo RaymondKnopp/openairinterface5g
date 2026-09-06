@@ -449,6 +449,11 @@ typedef struct PHY_VARS_gNB_s {
 
   time_stats_t dci_generation_stats;
   time_stats_t phase_comp_stats;
+  time_stats_t rx_dispatch_lag;
+  /* how many RX jobs waited longer than 200/500/1000 us between ru_thread queuing
+   * them and rx_func() starting.  A max alone cannot distinguish one init outlier
+   * from a tail that recurs every frame. */
+  uint64_t rx_lag_over[3];
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
@@ -506,6 +511,17 @@ typedef struct PHY_VARS_gNB_s {
   int tx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t tx_overrun_count; /* every overrun, whether logged or not */
   uint64_t tx_overrun_logged; /* how many were actually printed */
+  /* L1 RX overrun alarm, the receive-side counterpart.  The quantity that matters on RX is
+   * not rx_func()'s own duration but the whole path from ru_thread's feprx() to rx_func()
+   * completing: only when that exceeds the rxdataF ring budget does the RU overwrite a
+   * slot L1 has not read.  Only UL/mixed slots use the ring, so with a DDDSU pattern the
+   * index repeats every 4 slots (4->8, 9->13, 14->18, 19->3) and the budget is 4 slot
+   * times, not RU_RX_SLOT_DEPTH slot times.  Reporting the split (queueing vs processing)
+   * is the point: "RX slot overwrite" already tells you the deadline was missed, but not
+   * which half of the path missed it. */
+  int rx_overrun_us; /* threshold in us; 0 disables the alarm */
+  uint64_t rx_overrun_count;
+  uint64_t rx_overrun_logged;
   /* Per-slot-of-frame TX timing.  The alarm above samples, and a sampled stream cannot
    * answer "is one slot of the TDD pattern systematically slower?" -- a one-in-N limiter
    * phase-locks to the frame structure and silently reports on a fixed subset of slots.
@@ -603,6 +619,10 @@ union ldpcReqUnion {
 typedef struct processingData_L1 {
   int frame_rx;
   int slot_rx;
+  /* rdtsc when ru_thread queued this job, so L1_rx_thread can report how long the
+   * job waited before rx_func() started -- the dispatch term of the rxdataF ring
+   * budget, which cannot be separated from rx_func()'s own cost otherwise. */
+  uint64_t dispatch_tsc;
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
   notifiedFIFO_elt_t *elt;
@@ -613,6 +633,7 @@ typedef struct processingData_L1tx {
   int slot;
   int frame_rx;
   int slot_rx;
+  uint64_t dispatch_tsc;
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
 } processingData_L1tx_t;

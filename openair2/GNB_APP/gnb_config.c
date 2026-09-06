@@ -823,6 +823,9 @@ void RCconfig_NR_L1(void)
       gNB->tx_overrun_us = *gpd(params, np, L1_TX_OVERRUN_US)->iptr;
       if (gNB->tx_overrun_us > 0)
         LOG_I(NR_PHY, "L1 TX overrun alarm armed at %d us\n", gNB->tx_overrun_us);
+      gNB->rx_overrun_us = *gpd(params, np, L1_RX_OVERRUN_US)->iptr;
+      if (gNB->rx_overrun_us > 0)
+        LOG_I(NR_PHY, "L1 RX overrun alarm armed at %d us\n", gNB->rx_overrun_us);
       gNB->TX_AMP = min(32767.0 / pow(10.0, .05 * (double)(*gpd(params, np, L1_TX_AMP_BACKOFF_dB)->uptr)), INT16_MAX);
       LOG_I(NR_PHY, "TX_AMP = %d (-%d dBFS)\n", gNB->TX_AMP, *gpd(params, np, L1_TX_AMP_BACKOFF_dB)->uptr);
       AssertFatal(gNB->TX_AMP > 300, "TX_AMP is too small, must be larger than 300 (is %d)\n", gNB->TX_AMP);
