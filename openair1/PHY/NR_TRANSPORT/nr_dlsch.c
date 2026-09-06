@@ -955,15 +955,20 @@ static int do_one_dlsch(unsigned char *input_ptr,
   start_meas(&gNB->dlsch_pdsch_generation_stats);
   int layerSz2 = (layerSz + 63) & ~63;
   c16_t tx_layers[rel15->nrOfLayers][layerSz2] __attribute__((aligned(64)));
+  start_meas(&gNB->dlsch_layer_clear_stats);
   memset(tx_layers, 0, sizeof(tx_layers));
+  stop_meas(&gNB->dlsch_layer_clear_stats);
 
   start_meas(dlsch_scrambling_stats);
   uint32_t scrambled_output[(encoded_length >> 5) + 4]; // modulator access by 4 bytes in some cases
   memset(scrambled_output, 0, sizeof(scrambled_output));
-  start_meas(dlsch_modulation_stats);
   nr_pdsch_codeword_scrambling(input_ptr, encoded_length, 0, rel15->dataScramblingId, rel15->rnti, scrambled_output);
   stop_meas(dlsch_scrambling_stats);
 
+  /* started AFTER scrambling stops: these two windows used to overlap, so
+   * dlsch_modulation_stats silently included the scrambling time and the two
+   * counters could not be added. */
+  start_meas(dlsch_modulation_stats);
   const bool fused_ok =
       nr_modulation_layer_mapping(scrambled_output, encoded_length, Qm, rel15->nrOfLayers, layerSz2, tx_layers);
   AssertFatal(fused_ok,
