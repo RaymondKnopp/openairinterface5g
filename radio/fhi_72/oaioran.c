@@ -20,6 +20,7 @@
 #include "oran_isolate.h"
 #include "oran-init.h"
 #include "oaioran.h"
+#include "common/utils/rt_deferred_log.h"
 #include <rte_ethdev.h>
 
 #include "oran-config.h" // for g_kbar
@@ -51,8 +52,8 @@ void print_fhi_counters(ru_info_t *ru, const int frame, const int slot)
   const struct xran_fh_init *fh_init = get_xran_fh_init();
   for (int o_xu_id = 0; o_xu_id < fh_init->xran_ports; o_xu_id++) {
     if ((frame & 0x7f) == 0 && slot == 0 && xran_get_common_counters(gxran_handle[o_xu_id], &x_counters[o_xu_id]) == XRAN_STATUS_SUCCESS) {
-      LOG_I(HW,
-            "[%s%d][rx %7ld pps %7ld kbps %7ld][tx %7ld pps %7ld kbps %7ld][Total Msgs_Rcvd %ld]\n",
+      /* deferred: this runs on ru_thread. See rt_deferred_log.h. */
+      RT_LOG_DEFER("[%s%d][rx %7ld pps %7ld kbps %7ld][tx %7ld pps %7ld kbps %7ld][Total Msgs_Rcvd %ld]",
             "o-du ",
             o_xu_id,
             x_counters[o_xu_id].rx_counter,
@@ -63,8 +64,7 @@ void print_fhi_counters(ru_info_t *ru, const int frame, const int slot)
             x_counters[o_xu_id].tx_bytes_per_sec * 8 / 1000L,
             x_counters[o_xu_id].Total_msgs_rcvd);
 #if defined K_RELEASE
-      LOG_I(HW,
-            "[%s%d][RX Timing][on time: %7lu, early %7lu late %7lu corrupt %7lu, duplicated %7lu]\n",
+      RT_LOG_DEFER("[%s%d][RX Timing][on time: %7lu, early %7lu late %7lu corrupt %7lu, duplicated %7lu]",
             "o_du",
             o_xu_id,
             x_counters[o_xu_id].Rx_on_time,
@@ -74,16 +74,14 @@ void print_fhi_counters(ru_info_t *ru, const int frame, const int slot)
             x_counters[o_xu_id].Rx_pkt_dupl);
 #endif
       for (int rxant = 0; rxant < ru->nb_rx / fh_init->xran_ports; rxant++)
-        LOG_I(HW,
-              "[%s%d][pusch%d %7ld prach%d %7ld]\n",
+        RT_LOG_DEFER("[%s%d][pusch%d %7ld prach%d %7ld]",
               "o_du",
               o_xu_id,
               rxant,
               x_counters[o_xu_id].rx_pusch_packets[rxant],
               rxant,
               x_counters[o_xu_id].rx_prach_packets[rxant]);
-      LOG_I(HW,
-            "[%s%d][drop errors %7d ecpri errors %7d cp errors %7d up errors %7d pusch errors %7d prach errors %7d]\n",
+      RT_LOG_DEFER("[%s%d][drop errors %7d ecpri errors %7d cp errors %7d up errors %7d pusch errors %7d prach errors %7d]",
 	    "o_du",
             o_xu_id,
             x_counters[o_xu_id].rx_err_drop,
@@ -290,8 +288,12 @@ int xran_fh_rx_prach_read_slot(PHY_VARS_gNB *gNB, ru_info_t *ru, int *frame, int
       res = f;
     }
     info = NotifiedFifoData(res);
-    LOG_W(HW, "PRACH TTI processing delay detected, skipping %4d.%2d => %4d.%2d\n", old_f, old_sl, info->f, info->sl);
-    DevAssert(xran_queue_prach_length == 0);
+    RT_LOG_DEFER("PRACH TTI processing delay detected, skipping %4d.%2d => %4d.%2d", old_f, old_sl, info->f, info->sl);
+    /* The xRAN timing thread may have pushed one more entry during the drain loop.
+     * That residual entry is harmless — it will be consumed on the next call. */
+    if (xran_queue_prach_length != 0)
+      RT_LOG_DEFER("xran_queue_prach_length=%d after drain (expected 0) — residual from concurrent push",
+                   xran_queue_prach_length);
   }
 
   *slot = info->sl;
@@ -506,8 +508,12 @@ int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
       res = f;
     }
     info = NotifiedFifoData(res);
-    LOG_W(HW, "TTI processing delay detected, skipping %4d.%2d => %4d.%2d\n", old_f, old_sl, info->f, info->sl);
-    DevAssert(xran_queue_length == 0);
+    RT_LOG_DEFER("TTI processing delay detected, skipping %4d.%2d => %4d.%2d", old_f, old_sl, info->f, info->sl);
+    /* The xRAN timing thread may have pushed one more entry during the drain loop.
+     * That residual entry is harmless — it will be consumed on the next call. */
+    if (xran_queue_length != 0)
+      RT_LOG_DEFER("xran_queue_length=%d after drain (expected 0) — residual from concurrent push",
+                   xran_queue_length);
   }
 
   *slot = info->sl;

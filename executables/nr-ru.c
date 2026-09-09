@@ -21,6 +21,7 @@
 #include "radio/ETHERNET/ethernet_lib.h"
 
 #include "PHY/defs_nr_common.h"
+#include "common/utils/rt_deferred_log.h"
 #include "PHY/phy_extern.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
 #include "PHY/INIT/nr_phy_init.h"
@@ -653,14 +654,15 @@ static bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_S
       static uint64_t overwrites = 0;
       overwrites++;
       /* rate limited, prime modulus: see the TX overrun alarm for why not 100 */
+      /* Deferred: this runs on ru_thread, which drives fronthaul timing. LOG_W there does a
+         blocking write(2) and has been measured stalling the DU for seconds. */
       if (overwrites <= 10 || (overwrites % 101) == 0)
-        LOG_W(NR_PHY,
-              "%4d.%2d RX slot overwrite: L1 has not released ring slot %d (%llu total). "
-              "Samples are being destroyed; expect L1 DTX with no fronthaul error.\n",
-              frame_rx,
-              slot_rx,
-              idx,
-              (unsigned long long)overwrites);
+        RT_LOG_DEFER("%4d.%2d RX slot overwrite: L1 has not released ring slot %d (%llu total). "
+                     "Samples are being destroyed; expect L1 DTX with no fronthaul error.",
+                     frame_rx,
+                     slot_rx,
+                     idx,
+                     (unsigned long long)overwrites);
     }
     rx_tti_busy[idx] = true;
     return true; /* proceed regardless: never stall the fronthaul */

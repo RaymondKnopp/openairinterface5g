@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include "common/utils/rt_deferred_log.h"
 #include <string.h>
 #include "common_lib.h"
 #include "radio/ETHERNET/ethernet_lib.h"
@@ -151,14 +152,15 @@ void oran_fh_if4p5_south_in(RU_t *ru, int *frame, int *slot)
   stop_meas(&ru->rx_fhaul);
   LOG_D(HW, "Read %d.%d rxdataF %p,%p\n", f, sl, ru_info.rxdataF[0], ru_info.rxdataF[1]);
   if (ret != 0) {
-    printf("ORAN: %d.%d ORAN_fh_if4p5_south_in ERROR in RX function \n", f, sl);
+    RT_LOG_DEFER("ORAN: %d.%d ORAN_fh_if4p5_south_in ERROR in RX function", f, sl);
   }
 
   /* Secondly, process PRACH packets */
   int f_prach, sl_prach;
   ret = xran_fh_rx_prach_read_slot(ru->gNB_list[0], &ru_info, &f_prach, &sl_prach);
   if (ret != 0) {
-    printf("ORAN: %d.%d ORAN_fh_if4p5_south_in ERROR in RX PRACH function \n", f_prach, sl_prach);
+    /* deferred: ru_thread. printf() blocks exactly like LOG_*. */
+    RT_LOG_DEFER("ORAN: %d.%d ORAN_fh_if4p5_south_in ERROR in RX PRACH function", f_prach, sl_prach);
   }
 
   int slots_per_frame = 10 << (ru->openair0_cfg.split7.mu);
@@ -170,22 +172,20 @@ void oran_fh_if4p5_south_in(RU_t *ru, int *frame, int *slot)
   if (proc->first_rx == 0) {
     print_fhi_counters(&ru_info, proc->frame_rx, proc->tti_rx);
     if (proc->tti_rx != *slot) {
-      LOG_E(HW,
-            "Received Time doesn't correspond to the time we think it is (slot mismatch, received %d.%d, expected %d.%d)\n",
-            proc->frame_rx,
-            proc->tti_rx,
-            *frame,
-            *slot);
+      RT_LOG_DEFER("Received Time doesn't correspond to the time we think it is (slot mismatch, received %d.%d, expected %d.%d)",
+                   proc->frame_rx,
+                   proc->tti_rx,
+                   *frame,
+                   *slot);
       *slot = proc->tti_rx;
     }
 
     if (proc->frame_rx != *frame) {
-      LOG_E(HW,
-            "Received Time doesn't correspond to the time we think it is (frame mismatch, %d.%d , expected %d.%d)\n",
-            proc->frame_rx,
-            proc->tti_rx,
-            *frame,
-            *slot);
+      RT_LOG_DEFER("Received Time doesn't correspond to the time we think it is (frame mismatch, %d.%d , expected %d.%d)",
+                   proc->frame_rx,
+                   proc->tti_rx,
+                   *frame,
+                   *slot);
       *frame = proc->frame_rx;
     }
   } else {

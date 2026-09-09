@@ -41,6 +41,7 @@
 #include "nfapi_nr_interface_scf.h"
 #include "notified_fifo.h"
 #include "thread-pool.h"
+#include "common/utils/rt_deferred_log.h"
 #include "time_meas.h"
 #include "utils.h"
 
@@ -688,6 +689,8 @@ void *nrL1_stats_thread(void *param) {
        a blocking write(2) on the calling thread, which must never be L1_tx/L1_rx. */
     l1_alarm_drain(&gNB->tx_alarms, true, gNB->tx_overrun_us);
     l1_alarm_drain(&gNB->rx_alarms, false, gNB->rx_overrun_us);
+    /* and anything ru_thread deferred: it drives fronthaul timing and must never write */
+    rt_log_drain();
   }
 
   if (cpu_meas_enabled == TIME_STATS_ADVANCED_MODE) {
