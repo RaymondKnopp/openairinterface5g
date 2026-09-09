@@ -21,6 +21,7 @@
 #include "common/utils/threadPool/task_ans.h"
 #include "openair1/PHY/defs_RU.h"
 #include "common/utils/ds/spsc_q.h"
+#include <stdatomic.h>
 
 #define MAX_NUM_RU_PER_gNB 8
 #define MAX_PUCCH0_NID 8
@@ -343,6 +344,48 @@ typedef struct {
 #define MAX_NUM_NR_UCI_PDUS MAX_MOBILES_PER_GNB
 
 /// Top-level PHY Data Structure for gNB
+/* Overrun alarm records, produced by the RT threads and drained by the 1 Hz stats thread.
+ *
+ * The alarms used to LOG_W directly from L1_tx_thread / L1_rx_thread.  OAI's log path ends
+ * in a raw write(2) on the CALLING thread (log_output_memory()), so that placed an
+ * unbounded blocking syscall in the slot path.  Measured on this platform: a single
+ * 200-byte write takes microseconds to a file but up to 400 ms when the consumer is slow,
+ * e.g. a terminal over ssh -- 800 slots at mu=1.  That is why captures redirected to a
+ * file never showed it while interactive runs were unstable, and why enabling the alarms
+ * at all (they are cpu_meas_enabled-gated, i.e. -q) could destabilise real time.
+ *
+ * The RT thread now only fills a slot in an overwriting ring and bumps a release-ordered
+ * sequence: a bounded struct copy, no syscall, no lock, no allocation.  The stats thread
+ * formats and prints; it is unpinned and non-RT, so blocking there costs nothing.
+ *
+ * If the producer laps the consumer the oldest records are lost.  That is reported rather
+ * than hidden, and a partially overwritten record is acceptable for a diagnostic. */
+#define L1_ALARM_RING_LOG2 4
+#define L1_ALARM_RING (1u << L1_ALARM_RING_LOG2)
+#define L1_ALARM_MAX_PDSCH 4
+
+typedef struct {
+  uint16_t rnti;
+  uint16_t rb_start, rb_size;
+  uint32_t tbs;
+  uint8_t mcs, layers, symb_start, nr_symb;
+} l1_alarm_pdsch_t;
+
+typedef struct {
+  uint32_t frame, slot;
+  uint64_t count; /* value of the alarm's total counter when this record was taken */
+  float a, b, c, d; /* TX: tot/gen/ru/prec  RX: e2e/queued/proc/unused */
+  float e; /* TX: fhaul */
+  uint8_t n_pdsch;
+  l1_alarm_pdsch_t pdsch[L1_ALARM_MAX_PDSCH];
+} l1_alarm_rec_t;
+
+typedef struct {
+  l1_alarm_rec_t rec[L1_ALARM_RING];
+  _Atomic uint64_t seq; /* producer: total records ever written */
+  uint64_t drained; /* consumer only */
+} l1_alarm_ring_t;
+
 typedef struct PHY_VARS_gNB_s {
   /// Module ID indicator for this instance
   module_id_t Mod_id;
@@ -523,6 +566,9 @@ typedef struct PHY_VARS_gNB_s {
    * times, not RU_RX_SLOT_DEPTH slot times.  Reporting the split (queueing vs processing)
    * is the point: "RX slot overwrite" already tells you the deadline was missed, but not
    * which half of the path missed it. */
+  /// alarm detail rings; RT threads produce, the stats thread prints. See l1_alarm_ring_t.
+  l1_alarm_ring_t tx_alarms;
+  l1_alarm_ring_t rx_alarms;
   int rx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t rx_overrun_count;
   uint64_t rx_overrun_logged;

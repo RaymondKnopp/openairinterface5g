@@ -48,6 +48,54 @@
 #define L1STATSSTRLEN 16384
 static void rx_func(processingData_L1_t *param);
 
+/* Alarm ring producer/consumer.  See l1_alarm_ring_t in defs_gNB.h for why the RT threads
+   must not format or write anything themselves. */
+static inline l1_alarm_rec_t *l1_alarm_claim(l1_alarm_ring_t *r)
+{
+  return &r->rec[atomic_load_explicit(&r->seq, memory_order_relaxed) & (L1_ALARM_RING - 1)];
+}
+
+static inline void l1_alarm_publish(l1_alarm_ring_t *r)
+{
+  atomic_store_explicit(&r->seq, atomic_load_explicit(&r->seq, memory_order_relaxed) + 1, memory_order_release);
+}
+
+/* Drained from the stats thread, which is unpinned and non-RT: the write(2) inside LOG_W
+   is harmless there. */
+static void l1_alarm_drain(l1_alarm_ring_t *r, bool is_tx, int thresh_us)
+{
+  const uint64_t head = atomic_load_explicit(&r->seq, memory_order_acquire);
+  if (head - r->drained > L1_ALARM_RING) {
+    const uint64_t lost = head - r->drained - L1_ALARM_RING;
+    r->drained = head - L1_ALARM_RING;
+    LOG_W(NR_PHY, "L1 %s overrun: %llu record(s) lost, ring holds %u\n", is_tx ? "TX" : "RX",
+          (unsigned long long)lost, L1_ALARM_RING);
+  }
+  while (r->drained < head) {
+    const l1_alarm_rec_t *e = &r->rec[r->drained & (L1_ALARM_RING - 1)];
+    if (is_tx) {
+      char cfg[256];
+      int off = 0;
+      for (int i = 0; i < e->n_pdsch && off < (int)sizeof(cfg) - 64; i++)
+        off += snprintf(cfg + off, sizeof(cfg) - off, " [rnti %04x mcs %u rb %u+%u layers %u symb %u+%u tbs %u]",
+                        e->pdsch[i].rnti, e->pdsch[i].mcs, e->pdsch[i].rb_start, e->pdsch[i].rb_size,
+                        e->pdsch[i].layers, e->pdsch[i].symb_start, e->pdsch[i].nr_symb, e->pdsch[i].tbs);
+      LOG_W(NR_PHY,
+            "%4u.%2u L1 TX overrun: %.1f us > %d us (gen %.1f, ru %.1f = prec %.1f + fhaul %.1f)"
+            " (%llu total, %u PDSCH PDU%s)%s\n",
+            e->frame, e->slot, e->a, thresh_us, e->b, e->c, e->d, e->e,
+            (unsigned long long)e->count, e->n_pdsch, e->n_pdsch == 1 ? "" : "s",
+            e->n_pdsch ? cfg : " none");
+    } else {
+      LOG_W(NR_PHY,
+            "%4u.%2u L1 RX overrun: %.1f us > %d us (queued %.1f + proc %.1f), ring idx %u, %llu total\n",
+            e->frame, e->slot, e->a, thresh_us, e->b, e->c, e->slot % RU_RX_SLOT_DEPTH,
+            (unsigned long long)e->count);
+    }
+    r->drained++;
+  }
+}
+
 static void tx_func(processingData_L1tx_t *info)
 {
   int frame_tx = info->frame;
@@ -164,46 +212,35 @@ static void tx_func(processingData_L1tx_t *info)
          * For per-slot statistics use tx_slot_stats[] below, which counts every slot. */
         if (gNB->tx_overrun_count <= 10 || (gNB->tx_overrun_count % 101) == 0) {
           gNB->tx_overrun_logged++;
+          /* Record only.  Formatting and the write(2) happen on the stats thread: doing
+             them here put an unbounded blocking syscall on L1_tx_thread. */
+          const double ghz = 1000.0 * get_cpu_freq_GHz();
+          const RU_t *ru = gNB->RU_list[0];
           const nfapi_nr_dl_tti_request_body_t *b = &sched_response.DL_req.dl_tti_request_body;
-          int n_pdsch = 0;
-          char cfg[256];
-          int off = 0;
-          for (int i = 0; i < b->nPDUs && off < (int)sizeof(cfg) - 64; i++) {
+          l1_alarm_rec_t *e = l1_alarm_claim(&gNB->tx_alarms);
+          e->frame = frame_tx;
+          e->slot = slot_tx;
+          e->count = gNB->tx_overrun_count;
+          e->a = us;
+          e->b = (double)(t_gen_end - t_gen_start) / ghz;
+          e->c = (double)(t_ru_end - t_gen_end) / ghz;
+          e->d = (double)ru->precoding_stats.p_time / ghz;
+          e->e = (double)ru->tx_fhaul.p_time / ghz;
+          e->n_pdsch = 0;
+          for (int i = 0; i < b->nPDUs && e->n_pdsch < L1_ALARM_MAX_PDSCH; i++) {
             if (b->dl_tti_pdu_list[i].PDUType != NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
               continue;
             const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *p = &b->dl_tti_pdu_list[i].pdsch_pdu.pdsch_pdu_rel15;
-            n_pdsch++;
-            off += snprintf(cfg + off,
-                            sizeof(cfg) - off,
-                            " [rnti %04x mcs %d rb %d+%d layers %d symb %d+%d tbs %u]",
-                            p->rnti,
-                            p->mcsIndex[0],
-                            p->rbStart,
-                            p->rbSize,
-                            p->nrOfLayers,
-                            p->StartSymbolIndex,
-                            p->NrOfSymbols,
-                            p->TBSize[0]);
+            e->pdsch[e->n_pdsch++] = (l1_alarm_pdsch_t){.rnti = p->rnti,
+                                                        .rb_start = p->rbStart,
+                                                        .rb_size = p->rbSize,
+                                                        .tbs = p->TBSize[0],
+                                                        .mcs = p->mcsIndex[0],
+                                                        .layers = p->nrOfLayers,
+                                                        .symb_start = p->StartSymbolIndex,
+                                                        .nr_symb = p->NrOfSymbols};
           }
-          /* precoding_stats and tx_fhaul carry p_time from THIS slot's call, so the RU half
-           * breaks down further without extra instrumentation. */
-          const double ghz = 1000.0 * get_cpu_freq_GHz();
-          const RU_t *ru = gNB->RU_list[0];
-          LOG_W(NR_PHY,
-                "%4d.%2d L1 TX overrun: %.1f us > %d us (gen %.1f, ru %.1f = prec %.1f + fhaul %.1f)"
-                " (%llu total, %d PDSCH PDU%s)%s\n",
-                frame_tx,
-                slot_tx,
-                us,
-                gNB->tx_overrun_us,
-                (double)(t_gen_end - t_gen_start) / ghz,
-                (double)(t_ru_end - t_gen_end) / ghz,
-                (double)ru->precoding_stats.p_time / ghz,
-                (double)ru->tx_fhaul.p_time / ghz,
-                (unsigned long long)gNB->tx_overrun_count,
-                n_pdsch,
-                n_pdsch == 1 ? "" : "s",
-                n_pdsch ? cfg : " none");
+          l1_alarm_publish(&gNB->tx_alarms);
         }
       }
     }
@@ -255,18 +292,16 @@ void *L1_rx_thread(void *arg)
          gNB->rx_overrun_count++;
          if (gNB->rx_overrun_count <= 10 || (gNB->rx_overrun_count % 101) == 0) {
            gNB->rx_overrun_logged++;
-           LOG_W(NR_PHY,
-                 "%4d.%2d L1 RX overrun: %.1f us > %d us (queued %.1f + proc %.1f), ring idx %d, "
-                 "%llu total (%llu logged)\n",
-                 info->frame_rx,
-                 slot_rx,
-                 e2e_,
-                 gNB->rx_overrun_us,
-                 e2e_ - proc_,
-                 proc_,
-                 slot_rx % RU_RX_SLOT_DEPTH,
-                 (unsigned long long)gNB->rx_overrun_count,
-                 (unsigned long long)gNB->rx_overrun_logged);
+           /* Record only; the stats thread prints. See l1_alarm_ring_t. */
+           l1_alarm_rec_t *e = l1_alarm_claim(&gNB->rx_alarms);
+           e->frame = info->frame_rx;
+           e->slot = slot_rx;
+           e->count = gNB->rx_overrun_count;
+           e->a = e2e_;
+           e->b = e2e_ - proc_;
+           e->c = proc_;
+           e->n_pdsch = 0;
+           l1_alarm_publish(&gNB->rx_alarms);
          }
        }
      }
@@ -649,6 +684,10 @@ void *nrL1_stats_thread(void *param) {
     dump_L1_meas_stats(gNB, ru, output, L1STATSSTRLEN);
     fprintf(fd,"%s\n",output);
     fflush(fd);
+    /* Print any alarm detail the RT threads recorded. Done here, not there: LOG_W ends in
+       a blocking write(2) on the calling thread, which must never be L1_tx/L1_rx. */
+    l1_alarm_drain(&gNB->tx_alarms, true, gNB->tx_overrun_us);
+    l1_alarm_drain(&gNB->rx_alarms, false, gNB->rx_overrun_us);
   }
 
   if (cpu_meas_enabled == TIME_STATS_ADVANCED_MODE) {
