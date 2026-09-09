@@ -40,6 +40,7 @@
 #include "nfapi_nr_interface_scf.h"
 #include "notified_fifo.h"
 #include "thread-pool.h"
+#include "common/utils/rt_deferred_log.h"
 #include "time_meas.h"
 #include "utils.h"
 
@@ -424,6 +425,10 @@ void *nrL1_stats_thread(void *param) {
     dump_L1_meas_stats(gNB, ru, output, L1STATSSTRLEN);
     fprintf(fd,"%s\n",output);
     fflush(fd);
+    /* Anything ru_thread deferred: it drives fronthaul timing, and OAI's log path ends in a
+       blocking write(2) on the CALLING thread, so it must never write. Drained here, on the
+       1 Hz stats thread, which is unpinned and non-RT. */
+    rt_log_drain();
   }
 
   if (cpu_meas_enabled == TIME_STATS_ADVANCED_MODE) {

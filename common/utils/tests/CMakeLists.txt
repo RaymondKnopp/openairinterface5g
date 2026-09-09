@@ -13,3 +13,8 @@ add_test(NAME test_fsn COMMAND ./test_fsn)
 add_executable(test_bits test_bits.c)
 add_dependencies(tests test_bits)
 add_test(NAME test_bits COMMAND ./test_bits)
+
+add_executable(test_rt_deferred_log test_rt_deferred_log.cpp)
+add_dependencies(tests test_rt_deferred_log)
+target_link_libraries(test_rt_deferred_log PRIVATE utils LOG minimal_lib GTest::gtest)
+add_test(NAME test_rt_deferred_log COMMAND ./test_rt_deferred_log)
