@@ -73,6 +73,70 @@ void *nrmac_stats_thread(void *arg) {
       p += print_meas_log(&cell->rlc_data_req, "rlc_data_req", NULL, NULL, p, end - p);
       p += print_meas_log(&cell->nr_srs_ri_computation_timer, "UL-RI computation time", NULL, NULL, p, end - p);
       p += print_meas_log(&cell->nr_srs_tpmi_computation_timer, "UL-TPMI computation time", NULL, NULL, p, end - p);
+      /* Wide-band CQI and PDSCH MCS distributions.  Both are already accumulated for the
+         E2 KPM service (wb_cqi_dist at gNB_scheduler_uci.c, pdsch_mcs_dist at
+         gNB_scheduler_dlsch.c) but were never shown locally, so the only way to see what
+         the UE reported or what we actually transmitted was to sample the 1 Hz dump and
+         hope the interesting moment landed in a sample.
+
+         They answer different questions and are worth reading together: the CQI is the cap
+         the UE asked for (via get_mcs_from_cqi(), which sets sched_ctrl->dl_max_mcs), the
+         MCS is what the scheduler sent after the BLER outer loop and the configured
+         dl_max_mcs also had their say.  A CQI pinned at 15 with the MCS spread over half
+         the table means the outer loop is pulling back; both spread together means the
+         channel itself is moving. */
+      {
+        const NR_du_stats_t *ds = &cell->du_stats;
+        uint64_t cqi_tot = 0;
+        for (int c = 0; c < 16; c++)
+          for (int r = 0; r < NR_KPM_MAX_LAYERS; r++)
+            for (int t = 0; t < 3; t++)
+              cqi_tot += ds->wb_cqi_dist[c][r][t];
+        if (cqi_tot) {
+          p += snprintf(p, end - p, "wide-band CQI distribution (%llu reports):\n", (unsigned long long)cqi_tot);
+          for (int t = 0; t < 3 && p < end; t++) {
+            for (int r = 0; r < NR_KPM_MAX_LAYERS && p < end; r++) {
+              uint64_t sub = 0;
+              for (int c = 0; c < 16; c++)
+                sub += ds->wb_cqi_dist[c][r][t];
+              if (!sub)
+                continue;
+              p += snprintf(p, end - p, "  table %d RI %d:", t + 1, r + 1);
+              for (int c = 0; c < 16 && p < end; c++)
+                if (ds->wb_cqi_dist[c][r][t])
+                  p += snprintf(p, end - p, " %d:%u(%.1f%%)", c, ds->wb_cqi_dist[c][r][t],
+                                100.0 * ds->wb_cqi_dist[c][r][t] / sub);
+              p += snprintf(p, end - p, "\n");
+            }
+          }
+        }
+
+        /* Weighted by rbSize, not by PDU count: an MCS used on 273 PRB and one used on a
+           13 PRB SIB are not the same event, and it is the wide allocations that decide
+           whether the link is being run at the right operating point. */
+        uint64_t mcs_tot = 0;
+        for (int l = 0; l < NR_KPM_MAX_LAYERS; l++)
+          for (int t = 0; t < NR_KPM_NB_MCS_TABLE_DL; t++)
+            for (int m = 0; m < NR_KPM_NB_MCS; m++)
+              mcs_tot += ds->pdsch_mcs_dist[l][t][m];
+        if (mcs_tot) {
+          p += snprintf(p, end - p, "PDSCH MCS distribution, PRB-weighted (%llu PRBs):\n", (unsigned long long)mcs_tot);
+          for (int l = 0; l < NR_KPM_MAX_LAYERS && p < end; l++) {
+            for (int t = 0; t < NR_KPM_NB_MCS_TABLE_DL && p < end; t++) {
+              uint64_t sub = 0;
+              for (int m = 0; m < NR_KPM_NB_MCS; m++)
+                sub += ds->pdsch_mcs_dist[l][t][m];
+              if (!sub)
+                continue;
+              p += snprintf(p, end - p, "  layers %d table %d:", l + 1, t + 1);
+              for (int m = 0; m < NR_KPM_NB_MCS && p < end; m++)
+                if (ds->pdsch_mcs_dist[l][t][m])
+                  p += snprintf(p, end - p, " %d:%.1f%%", m, 100.0 * ds->pdsch_mcs_dist[l][t][m] / sub);
+              p += snprintf(p, end - p, "\n");
+            }
+          }
+        }
+      }
     }
     /* Per-slot-of-frame UL outcome.  Only slots that actually carry PUSCH appear, so the
        table doubles as a map of where the scheduler puts UL in the TDD pattern.  Printed
