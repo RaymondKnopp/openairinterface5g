@@ -10,6 +10,25 @@
 #include "phy_frame_config_nr.h"
 
 void nr_set_ssb_first_subcarrier(nfapi_nr_config_request_scf_t *cfg, NR_DL_FRAME_PARMS *fp);
+/* phy_procedures_gNB_TX() split so that the encoding of one slot can overlap the
+   grid filling of another.  The encode half touches only DL_req/TX_req, gNB->dlsch[] and
+   enc; the generate half owns txdataF, which is a single slot deep and cleared on entry,
+   so it and the ru_tx_func() that drains it must be given the same slot. */
+void phy_procedures_gNB_TX_encode(PHY_VARS_gNB *gNB,
+                                  const nfapi_nr_dl_tti_request_t *DL_req,
+                                  const nfapi_nr_tx_data_request_t *TX_req,
+                                  int frame,
+                                  int slot,
+                                  nr_dlsch_encoded_t *enc);
+
+void phy_procedures_gNB_TX_generate(PHY_VARS_gNB *gNB,
+                                    const nfapi_nr_dl_tti_request_t *DL_req,
+                                    const nfapi_nr_ul_dci_request_t *UL_dci_req,
+                                    int frame,
+                                    int slot,
+                                    const nr_dlsch_encoded_t *enc);
+
+/* Both halves on one slot, back to back. */
 void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
                            const nfapi_nr_dl_tti_request_t *DL_req,
                            const nfapi_nr_tx_data_request_t *TX_req,

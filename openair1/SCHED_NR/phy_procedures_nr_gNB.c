@@ -392,17 +392,72 @@ static void nr_generate_prs_gNB(PHY_VARS_gNB *gNB,
                               prb_mask_words);
 }
 
-void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
-                           const nfapi_nr_dl_tti_request_t *DL_req,
-                           const nfapi_nr_tx_data_request_t *TX_req,
-                           const nfapi_nr_ul_dci_request_t *UL_dci_req,
-                           int frame,
-                           int slot)
+/* Collect the slot's PDSCH PDUs and encode them, leaving the result in enc.
+ *
+ * Split from the grid-filling half below because the two do not scale alike: encoding is
+ * pinned at ceil(C/8) tasks and is flat against pool width, generation scales with it, and
+ * in series neither core count nor an accelerator can fit both into a slot at high MCS.
+ * Everything here reads DL_req/TX_req and writes gNB->dlsch[] and enc; it never touches
+ * txdataF, which is what lets it run against a different slot than the generate half. */
+void phy_procedures_gNB_TX_encode(PHY_VARS_gNB *gNB,
+                                  const nfapi_nr_dl_tti_request_t *DL_req,
+                                  const nfapi_nr_tx_data_request_t *TX_req,
+                                  int frame,
+                                  int slot,
+                                  nr_dlsch_encoded_t *enc)
+{
+  nfapi_nr_config_request_scf_t *cfg = &gNB->gNB_config;
+  enc->n_pdsch = 0;
+
+  if ((cfg->cell_config.frame_duplex_type.value == TDD) && (nr_slot_select(cfg, frame, slot) == NR_UPLINK_SLOT))
+    return;
+
+  int num_pdsch = 0;
+  for (int i = 0; i < DL_req->dl_tti_request_body.nPDUs; ++i) {
+    const nfapi_nr_dl_tti_request_pdu_t *dl_tti_pdu = &DL_req->dl_tti_request_body.dl_tti_pdu_list[i];
+    if (dl_tti_pdu->PDUType != NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
+      continue;
+    int tx_data_idx = dl_tti_pdu->pdsch_pdu.pdsch_pdu_rel15.pduIndex;
+    if (tx_data_idx < TX_req->Number_of_PDUs && TX_req->pdu_list[tx_data_idx].PDU_index == tx_data_idx) {
+      // reuse dlsch variables, as there are multiple very large memory buffers
+      gNB->dlsch[num_pdsch].pdsch_pdu = &dl_tti_pdu->pdsch_pdu;
+      const nfapi_nr_tx_data_request_tlv_t *tlv = &TX_req->pdu_list[tx_data_idx].TLVs[0];
+      gNB->dlsch[num_pdsch].pdu = tlv->tag == 0 ? (uint8_t *)tlv->value.direct : (uint8_t *)tlv->value.ptr;
+      DevAssert(num_pdsch < gNB->max_nb_pdsch);
+      num_pdsch++;
+    } else {
+      LOG_E(NR_PHY,
+            "%4d.%2d no corresponding tx_data.request for dl_tti.request index %d (out of %d)\n",
+            frame,
+            slot,
+            tx_data_idx,
+            TX_req->Number_of_PDUs);
+    }
+  }
+
+  if (num_pdsch == 0)
+    return;
+
+  LOG_D(PHY, "PDSCH encoding started (%d) in frame %d.%d\n", num_pdsch, frame, slot);
+  nr_dlsch_encode(gNB, num_pdsch, gNB->dlsch, frame, slot, enc);
+}
+
+/* Fill txdataF for one slot: PRS, DCI, SSB, CSI-RS, and the PDSCH bits that
+ * phy_procedures_gNB_TX_encode() left in enc.  txdataF is a single slot deep and is
+ * cleared at the top here, so this half and the ru_tx_func() that drains it must stay
+ * together on the same slot. */
+void phy_procedures_gNB_TX_generate(PHY_VARS_gNB *gNB,
+                                    const nfapi_nr_dl_tti_request_t *DL_req,
+                                    const nfapi_nr_ul_dci_request_t *UL_dci_req,
+                                    int frame,
+                                    int slot,
+                                    const nr_dlsch_encoded_t *enc)
 {
   const NR_DL_FRAME_PARMS *fp = &gNB->frame_parms;
   nfapi_nr_config_request_scf_t *cfg = &gNB->gNB_config;
+  const int slot_type = nr_slot_select(cfg, frame, slot);
 
-  if ((cfg->cell_config.frame_duplex_type.value == TDD) && (nr_slot_select(cfg,frame,slot) == NR_UPLINK_SLOT))
+  if ((cfg->cell_config.frame_duplex_type.value == TDD) && slot_type == NR_UPLINK_SLOT)
     return;
 
   const int prb_mask_words = (fp->N_RB_DL + 63) >> 6;
@@ -437,7 +492,6 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
                     &phase_comp_prb_mask[0][0][0],
                     prb_mask_words);
 
-  int num_pdsch = 0;
   for (int i = 0; i < DL_req->dl_tti_request_body.nPDUs; ++i) {
     const nfapi_nr_dl_tti_request_pdu_t *dl_tti_pdu = &DL_req->dl_tti_request_body.dl_tti_pdu_list[i];
     switch (dl_tti_pdu->PDUType) {
@@ -460,42 +514,18 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
       case NFAPI_NR_DL_TTI_CSI_RS_PDU_TYPE:
         nr_generate_csi_rs_gNB(gNB, slot, &dl_tti_pdu->csi_rs_pdu, &phase_comp_prb_mask[0][0][0], prb_mask_words);
         break;
-      case NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE: {
-        int tx_data_idx = dl_tti_pdu->pdsch_pdu.pdsch_pdu_rel15.pduIndex;
-        if (tx_data_idx < TX_req->Number_of_PDUs && TX_req->pdu_list[tx_data_idx].PDU_index == tx_data_idx) {
-          // reuse dlsch variables, as there are multiple very large memory
-          // buffers
-          gNB->dlsch[num_pdsch].pdsch_pdu = &dl_tti_pdu->pdsch_pdu;
-          const nfapi_nr_tx_data_request_tlv_t *tlv = &TX_req->pdu_list[tx_data_idx].TLVs[0];
-          gNB->dlsch[num_pdsch].pdu = tlv->tag == 0 ? (uint8_t *)tlv->value.direct : (uint8_t *)tlv->value.ptr;
-          DevAssert(num_pdsch < gNB->max_nb_pdsch);
-          num_pdsch++;
-        } else {
-          LOG_E(NR_PHY,
-                "%4d.%2d no corresponding tx_data.request for dl_tti.request index %d (out of %d)\n",
-                frame,
-                slot,
-                tx_data_idx,
-                TX_req->Number_of_PDUs);
-        }
-        } break;
+      case NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE:
+        /* handled by phy_procedures_gNB_TX_encode() */
+        break;
     }
-  }
- 
-  if (num_pdsch > 0) {
-    LOG_D(PHY, "PDSCH generation started (%d) in frame %d.%d\n", num_pdsch, frame, slot);
-    nr_generate_pdsch(gNB, num_pdsch, gNB->dlsch, frame, slot, &phase_comp_prb_mask[0][0][0], prb_mask_words);
-    /*
-    char fname[100],vname[100];
-    for (int s=0;s<12;s++) {
-           sprintf(fname,"txdataF%d.m",s);
-           sprintf(vname,"txF%d",s);
-           LOG_M(fname,vname,&gNB->common_vars.txdataF[0][s*fp->ofdm_symbol_size],fp->N_RB_DL*12,1,1);
-    }
-    exit(-1);*/
   }
 
-  START_MEAS_FULL_SLOT(&gNB->phase_comp_stats);
+  if (enc->n_pdsch > 0) {
+    LOG_D(PHY, "PDSCH generation started (%d) in frame %d.%d\n", enc->n_pdsch, frame, slot);
+    nr_dlsch_generate(gNB, slot, enc, &phase_comp_prb_mask[0][0][0], prb_mask_words);
+  }
+
+  START_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
   for (int aa = 0; aa < cfg->carrier_config.num_tx_ant.value; aa++) {
       T(T_GNB_PHY_DL_OUTPUT_SIGNAL,
         T_INT(0),
@@ -505,6 +535,19 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
         T_BUFFER(gNB->common_vars.txdataF[aa], fp->samples_per_slot_wCP * sizeof(int32_t)));
   }
   STOP_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
+}
+
+/* Both halves on one slot, back to back: the original behaviour. */
+void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
+                           const nfapi_nr_dl_tti_request_t *DL_req,
+                           const nfapi_nr_tx_data_request_t *TX_req,
+                           const nfapi_nr_ul_dci_request_t *UL_dci_req,
+                           int frame,
+                           int slot)
+{
+  nr_dlsch_encoded_t *enc = &gNB->dlsch_encoded;
+  phy_procedures_gNB_TX_encode(gNB, DL_req, TX_req, frame, slot, enc);
+  phy_procedures_gNB_TX_generate(gNB, DL_req, UL_dci_req, frame, slot, enc);
 }
 
 static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int *ulsch_to_decode, int nb_pusch, NR_UL_IND_t *UL_INFO)

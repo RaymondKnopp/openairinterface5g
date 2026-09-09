@@ -398,6 +398,8 @@ static void init_DLSCH_struct(PHY_VARS_gNB *gNB)
               "could not allocate %zu bytes for the DLSCH encoding output\n",
               gNB->dlsch_encoded.capacity);
   LOG_I(PHY, "DLSCH encoding output buffer: %zu bytes\n", gNB->dlsch_encoded.capacity);
+  gNB->dlsch_encoded.info = calloc(gNB->max_nb_pdsch, sizeof(*gNB->dlsch_encoded.info));
+  AssertFatal(gNB->dlsch_encoded.info != NULL, "could not allocate the PDSCH generation info array\n");
 }
 
 static void destroy_DLSCH_struct(const PHY_VARS_gNB *gNB)
@@ -410,6 +412,7 @@ static void destroy_DLSCH_struct(const PHY_VARS_gNB *gNB)
   }
   free(gNB->dlsch);
   free16(gNB->dlsch_encoded.output, gNB->dlsch_encoded.capacity);
+  free(gNB->dlsch_encoded.info);
 }
 
 void init_nr_transport(PHY_VARS_gNB *gNB)

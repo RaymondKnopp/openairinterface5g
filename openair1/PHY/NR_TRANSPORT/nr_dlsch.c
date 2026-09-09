@@ -969,7 +969,7 @@ static void nr_pdsch_symbol_processing(void *arg)
 
 static int do_one_dlsch(unsigned char *input_ptr,
                         PHY_VARS_gNB *gNB,
-                        NR_gNB_DLSCH_t *dlsch,
+                        const nr_pdsch_gen_info_t *info,
                         int slot,
                         uint64_t *pdsch_phase_comp_prb_mask,
                         int prb_mask_words)
@@ -978,8 +978,8 @@ static int do_one_dlsch(unsigned char *input_ptr,
 
   time_stats_t *dlsch_scrambling_stats = &gNB->dlsch_scrambling_stats;
   time_stats_t *dlsch_modulation_stats = &gNB->dlsch_modulation_stats;
-  freq_alloc_bitmap_t *freq_alloc = &dlsch->freq_alloc;
-  const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15 = &dlsch->pdsch_pdu->pdsch_pdu_rel15;
+  const freq_alloc_bitmap_t *freq_alloc = &info->freq_alloc;
+  const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15 = &info->pdsch_pdu->pdsch_pdu_rel15;
   const int layerSz = frame_parms->N_RB_DL * frame_parms->symbols_per_slot * NR_NB_SC_PER_RB;
   const int nb_re_dmrs = rel15->numDmrsCdmGrpsNoData * (rel15->dmrsConfigType == NFAPI_NR_DMRS_TYPE1 ? 6 : 4);
   const int n_dmrs = freq_alloc->num_rbs * nb_re_dmrs;
@@ -1001,9 +1001,9 @@ static int do_one_dlsch(unsigned char *input_ptr,
 
 #ifdef DEBUG_DLSCH
   printf("PDSCH encoding:\nPayload:\n");
-  for (int i = 0; i < (dlsch->B >> 3); i += 16) {
+  for (int i = 0; i < (info->dlsch->B >> 3); i += 16) {
     for (int j = 0; j < 16; j++)
-      printf("0x%02x\t", dlsch->pdu[i + j]);
+      printf("0x%02x\t", info->dlsch->pdu[i + j]);
     printf("\n");
   }
   printf("\nEncoded payload:\n");
@@ -1016,7 +1016,7 @@ static int do_one_dlsch(unsigned char *input_ptr,
 #endif
 
   if (IS_SOFTMODEM_DLSIM)
-    memcpy(dlsch->f, input_ptr, (encoded_length + 7) >> 3);
+    memcpy(info->dlsch->f, input_ptr, (encoded_length + 7) >> 3);
 
   start_meas(&gNB->dlsch_pdsch_generation_stats);
   int layerSz2 = (layerSz + 63) & ~63;
@@ -1287,7 +1287,14 @@ bool nr_dlsch_encode(PHY_VARS_gNB *gNB,
      */
     size_t size_output_tb = dlsch->freq_alloc.num_rbs * NR_SYMBOLS_PER_SLOT * NR_NB_SC_PER_RB * Qm * rel15->nrOfLayers;
     size_output += ceil_mod(size_output_tb, 8 * 64);
+
+    /* Hand the generation stage its own copy of what it needs, so that a later encode
+       overwriting dlsch[i] cannot pull the grid mapping out from under it. */
+    enc->info[i].pdsch_pdu = dlsch->pdsch_pdu;
+    enc->info[i].freq_alloc = dlsch->freq_alloc;
+    enc->info[i].dlsch = dlsch;
   }
+  enc->n_pdsch = n_dlsch;
 
   const size_t size_output_bytes = size_output >> 3;
   AssertFatal(size_output_bytes <= enc->capacity,
@@ -1320,6 +1327,9 @@ bool nr_dlsch_encode(PHY_VARS_gNB *gNB,
                         dlsch_segmentation_stats,
 			dlsch_crc_stats)
       == -1) {
+    /* Nothing usable in enc->output; make sure the generation half skips the slot
+       rather than mapping stale bits onto the grid. */
+    enc->n_pdsch = 0;
     return false;
   }
   STOP_MEAS_FULL_SLOT(dlsch_encoding_stats, slot_type, NR_DOWNLINK_SLOT);
@@ -1328,34 +1338,18 @@ bool nr_dlsch_encode(PHY_VARS_gNB *gNB,
 
 /* Second half of the old nr_generate_pdsch(): scrambling, modulation, layer mapping,
    resource mapping and precoding of the bits nr_dlsch_encode() left in enc->output.
-   Reads dlsch_array[i].freq_alloc / unav_res / pdsch_pdu, which the encode half sets, so
-   both halves must be given the same slot's dlsch_array. */
+   Everything it needs comes out of enc, so it can run on a slot whose dlsch[] entries
+   have since been reused by a later encode. */
 void nr_dlsch_generate(PHY_VARS_gNB *gNB,
-                       int n_dlsch,
-                       NR_gNB_DLSCH_t *dlsch_array,
                        int slot,
                        const nr_dlsch_encoded_t *enc,
                        uint64_t *pdsch_phase_comp_prb_mask,
                        int prb_mask_words)
 {
   unsigned char *output_ptr = enc->output;
-  for (int i = 0; i < n_dlsch; i++) {
-    output_ptr += do_one_dlsch(output_ptr, gNB, &dlsch_array[i], slot, pdsch_phase_comp_prb_mask, prb_mask_words);
+  for (int i = 0; i < enc->n_pdsch; i++) {
+    output_ptr += do_one_dlsch(output_ptr, gNB, &enc->info[i], slot, pdsch_phase_comp_prb_mask, prb_mask_words);
   }
-}
-
-void nr_generate_pdsch(PHY_VARS_gNB *gNB,
-                       int n_dlsch,
-                       NR_gNB_DLSCH_t *dlsch_array,
-                       int frame,
-                       int slot,
-                       uint64_t *pdsch_phase_comp_prb_mask,
-                       int prb_mask_words)
-{
-  nr_dlsch_encoded_t *enc = &gNB->dlsch_encoded;
-  if (!nr_dlsch_encode(gNB, n_dlsch, dlsch_array, frame, slot, enc))
-    return;
-  nr_dlsch_generate(gNB, n_dlsch, dlsch_array, slot, enc, pdsch_phase_comp_prb_mask, prb_mask_words);
 }
 
 void dump_pdsch_stats(FILE *fd, PHY_VARS_gNB *gNB)

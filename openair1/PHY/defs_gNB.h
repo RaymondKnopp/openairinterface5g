@@ -394,9 +394,24 @@ typedef struct {
    The bound holds because PDSCH allocations within a slot are disjoint in frequency, so
    the num_rbs of every DLSCH in the slot sums to at most N_RB_DL, and the per-TB
    rounding to 8*64 bits adds at most 511 bits each. */
+/* Per-PDSCH state the generation stage needs from the encoding stage.  Deliberately
+   only the two fields that actually cross: freq_alloc, which the encode half computes,
+   and the DL_req PDU it came from.  unav_res does not cross (it is consumed inside
+   nr_dlsch_encoding), and the HARQ and segment buffers are touched by the encode half
+   alone -- which is why pipelining does not have to double any of them. */
+typedef struct {
+  const nfapi_nr_dl_tti_pdsch_pdu *pdsch_pdu;
+  freq_alloc_bitmap_t freq_alloc;
+  /* Only for the nr_dlsim waveform capture and the DEBUG_DLSCH dumps, neither of which
+     is pipelined.  Do not read slot state through this on the RT path. */
+  NR_gNB_DLSCH_t *dlsch;
+} nr_pdsch_gen_info_t;
+
 typedef struct {
   unsigned char *output; /* concatenated encoded bits of every DLSCH in the slot */
   size_t capacity;       /* bytes allocated; never grows, exceeding it is fatal */
+  nr_pdsch_gen_info_t *info; /* max_nb_pdsch entries */
+  int n_pdsch;           /* how many entries of info[] the last encode filled */
   int frame;
   int slot;
 } nr_dlsch_encoded_t;
