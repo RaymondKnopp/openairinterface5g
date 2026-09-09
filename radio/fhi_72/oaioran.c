@@ -20,6 +20,7 @@
 #include "oran_isolate.h"
 #include "oran-init.h"
 #include "oaioran.h"
+#include "common/utils/rt_deferred_log.h"
 #include "common/utils/threadPool/notified_fifo.h"
 #include <rte_ethdev.h>
 
@@ -39,14 +40,15 @@ int xran_is_prach_slot(uint8_t PortId, uint32_t subframe_id, uint32_t slot_id, u
 /* Prints TX_TOTAL, RX_TOTAL, RX_ON_TIME, RX_ERR_DROP counters every 128 frames. */
 void print_fhi_counters(struct xran_fh_init fh_init, struct xran_fh_config *fh_config)
 {
+  /* runs on split7_thread: deferred, see rt_deferred_log.h */
   static int64_t old_rx_counter[XRAN_PORTS_NUM] = {0};
   static int64_t old_tx_counter[XRAN_PORTS_NUM] = {0};
   struct xran_common_counters x_counters[XRAN_PORTS_NUM];
 
   for (int xran_port = 0; xran_port < fh_init.xran_ports; xran_port++) {
     if (xran_get_common_counters(gxran_handle[xran_port], &x_counters[xran_port]) == XRAN_STATUS_SUCCESS) {
-      LOG_I(HW,
-            "[%s%d][rx %7ld pps %7ld kbps %7ld][tx %7ld pps %7ld kbps %7ld][Total Msgs_Rcvd %ld]\n",
+      RT_LOG_DEFER(
+            "[%s%d][rx %7ld pps %7ld kbps %7ld][tx %7ld pps %7ld kbps %7ld][Total Msgs_Rcvd %ld]",
             "o-du ",
             xran_port,
             x_counters[xran_port].rx_counter,
@@ -56,8 +58,8 @@ void print_fhi_counters(struct xran_fh_init fh_init, struct xran_fh_config *fh_c
             x_counters[xran_port].tx_counter - old_tx_counter[xran_port],
             x_counters[xran_port].tx_bytes_per_sec * 8 / 1000L,
             x_counters[xran_port].Total_msgs_rcvd);
-      LOG_I(HW,
-            "[%s%d][RX Timing][on time: %7lu, early %7lu late %7lu corrupt %7lu, duplicated %7lu]\n",
+      RT_LOG_DEFER(
+            "[%s%d][RX Timing][on time: %7lu, early %7lu late %7lu corrupt %7lu, duplicated %7lu]",
             "o-du ",
             xran_port,
             x_counters[xran_port].Rx_on_time,
@@ -66,16 +68,16 @@ void print_fhi_counters(struct xran_fh_init fh_init, struct xran_fh_config *fh_c
             x_counters[xran_port].Rx_corrupt,
             x_counters[xran_port].Rx_pkt_dupl);
       for (int rxant = 0; rxant < fh_config[xran_port].neAxcUl; rxant++)
-        LOG_I(HW,
-              "[%s%d][pusch%d %7ld prach%d %7ld]\n",
+        RT_LOG_DEFER(
+              "[%s%d][pusch%d %7ld prach%d %7ld]",
               "o-du ",
               xran_port,
               rxant,
               x_counters[xran_port].rx_pusch_packets[rxant],
               rxant,
               x_counters[xran_port].rx_prach_packets[rxant]);
-      LOG_I(HW,
-            "[%s%d][drop errors %7d ecpri errors %7d cp errors %7d up errors %7d pusch errors %7d prach errors %7d]\n",
+      RT_LOG_DEFER(
+            "[%s%d][drop errors %7d ecpri errors %7d cp errors %7d up errors %7d pusch errors %7d prach errors %7d]",
 	    "o-du ",
             xran_port,
             x_counters[xran_port].rx_err_drop,
@@ -123,7 +125,7 @@ static void slot_ready(uint32_t tti, uint32_t ru_id)
   const int num_ports = get_xran_fh_init()->xran_ports;
   if (tti != ports_tti) {
     if (num_ports_done > 0)
-      LOG_W(HW, "slot tti %u completed on %d of %d xran ports, dropped\n", ports_tti, num_ports_done, num_ports);
+      RT_LOG_DEFER("slot tti %u completed on %d of %d xran ports, dropped", ports_tti, num_ports_done, num_ports);
     ports_tti = tti;
     reset_ports_done();
   }
@@ -154,7 +156,7 @@ void oai_xran_wait_slot(oai_xran_slot_t *s)
       e = f;
     }
     const oai_xran_slot_t *cur = NotifiedFifoData(e);
-    LOG_W(HW, "split 7.2 UL processing late, skipping %d => %d\n", old.tti, cur->tti);
+    RT_LOG_DEFER("split 7.2 UL processing late, skipping %d => %d", old.tti, cur->tti);
   }
 
   *s = *(oai_xran_slot_t *)NotifiedFifoData(e);

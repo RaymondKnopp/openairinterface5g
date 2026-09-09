@@ -12,6 +12,7 @@
 #include "openair1/PHY/defs_gNB.h"
 #include "openair1/PHY/nr_phy_common/inc/nr_phy_meas.h" // START_MEAS_FULL_SLOT
 #include "oaioran.h"
+#include "common/utils/rt_deferred_log.h"
 #include "oran-config.h"
 #include "radio/COMMON/gnb_fhi72_if.h"
 
@@ -171,7 +172,7 @@ static void oran_cp(split7_config_t *s7cfg, uint16_t **beam_id, int frame, int s
         // Send CP UL
         ret = xran_send_cp_slot(tti, slot, xran_port, fh_cfg->neAxcUl, beam_id, bufs->dstcp);
         if (ret != 0) {
-          LOG_W(HW, "[%d.%d] xran_send_cp_slot UL error for xran_port %d\n", frame, slot, xran_port);
+          RT_LOG_DEFER("[%d.%d] xran_send_cp_slot UL error for xran_port %d", frame, slot, xran_port);
         }
       }
     }
@@ -190,7 +191,7 @@ static void oran_cp(split7_config_t *s7cfg, uint16_t **beam_id, int frame, int s
         // Send CP DL
         ret = xran_send_cp_slot(tti, slot, xran_port, fh_cfg->neAxc, beam_id, bufs->srccp);
         if (ret != 0) {
-          LOG_W(HW, "[%d.%d] xran_send_cp_slot DL error for xran_port %d\n", frame, slot, xran_port);
+          RT_LOG_DEFER("[%d.%d] xran_send_cp_slot DL error for xran_port %d", frame, slot, xran_port);
         }
       }
     }
@@ -377,7 +378,7 @@ static void process_ul_data(int tti, int frame, int slot, PHY_VARS_gNB *gNB, str
       if (frame % info.x == info.y && xran_is_prach_slot(xran_port, slot / slots_per_sf, prach[i].slot % slots_per_sf, s7cfg->mu))
         port_prach[xran_port][num_port_prach++] = &prach[i];
       else
-        LOG_W(HW, "[%d.%d] xran_port %d Expected PRACH reception of scheduled slot %d\n", frame, slot, xran_port, prach[i].slot);
+        RT_LOG_DEFER("[%d.%d] xran_port %d Expected PRACH reception of scheduled slot %d", frame, slot, xran_port, prach[i].slot);
     }
     oran_buf_list_t *bufs = get_xran_buffers(xran_port);
     const int nb_ant = fh_cfg[xran_port].neAxcUl;
