@@ -392,14 +392,15 @@ static void init_DLSCH_struct(PHY_VARS_gNB *gNB)
    * plus the per-TB rounding to 8*64 bits.  See nr_dlsch_encoded_t. */
   const size_t max_bits = (size_t)fp->N_RB_DL * NR_SYMBOLS_PER_SLOT * NR_NB_SC_PER_RB * 8 * NR_MAX_NB_LAYERS
                           + (size_t)gNB->max_nb_pdsch * 8 * 64;
-  gNB->dlsch_encoded.capacity = (max_bits + 7) >> 3;
-  gNB->dlsch_encoded.output = malloc16(gNB->dlsch_encoded.capacity);
-  AssertFatal(gNB->dlsch_encoded.output != NULL,
-              "could not allocate %zu bytes for the DLSCH encoding output\n",
-              gNB->dlsch_encoded.capacity);
-  LOG_I(PHY, "DLSCH encoding output buffer: %zu bytes\n", gNB->dlsch_encoded.capacity);
-  gNB->dlsch_encoded.info = calloc(gNB->max_nb_pdsch, sizeof(*gNB->dlsch_encoded.info));
-  AssertFatal(gNB->dlsch_encoded.info != NULL, "could not allocate the PDSCH generation info array\n");
+  for (int p = 0; p < 2; p++) {
+    nr_dlsch_encoded_t *enc = &gNB->dlsch_encoded[p];
+    enc->capacity = (max_bits + 7) >> 3;
+    enc->output = malloc16(enc->capacity);
+    AssertFatal(enc->output != NULL, "could not allocate %zu bytes for the DLSCH encoding output\n", enc->capacity);
+    enc->info = calloc(gNB->max_nb_pdsch, sizeof(*enc->info));
+    AssertFatal(enc->info != NULL, "could not allocate the PDSCH generation info array\n");
+  }
+  LOG_I(PHY, "DLSCH encoding output buffers: 2 x %zu bytes\n", gNB->dlsch_encoded[0].capacity);
 }
 
 static void destroy_DLSCH_struct(const PHY_VARS_gNB *gNB)
@@ -411,8 +412,10 @@ static void destroy_DLSCH_struct(const PHY_VARS_gNB *gNB)
     free_gNB_dlsch(&gNB->dlsch[i], grid_size, fp);
   }
   free(gNB->dlsch);
-  free16(gNB->dlsch_encoded.output, gNB->dlsch_encoded.capacity);
-  free(gNB->dlsch_encoded.info);
+  for (int p = 0; p < 2; p++) {
+    free16(gNB->dlsch_encoded[p].output, gNB->dlsch_encoded[p].capacity);
+    free(gNB->dlsch_encoded[p].info);
+  }
 }
 
 void init_nr_transport(PHY_VARS_gNB *gNB)

@@ -545,7 +545,7 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
                            int frame,
                            int slot)
 {
-  nr_dlsch_encoded_t *enc = &gNB->dlsch_encoded;
+  nr_dlsch_encoded_t *enc = &gNB->dlsch_encoded[slot & 1];
   phy_procedures_gNB_TX_encode(gNB, DL_req, TX_req, frame, slot, enc);
   phy_procedures_gNB_TX_generate(gNB, DL_req, UL_dci_req, frame, slot, enc);
 }

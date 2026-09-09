@@ -97,6 +97,39 @@ static void l1_alarm_drain(l1_alarm_ring_t *r, bool is_tx, int thresh_us)
   }
 }
 
+/* Launch vehicle for phy_procedures_gNB_TX_encode() on the encoding pool.
+ *
+ * Note this task BLOCKS: nrLDPC_coding_encoder() pushes its own ceil(C/8) sub-tasks and
+ * joins them, and join_task_ans() is a plain sem_wait that does not execute tasks while
+ * waiting.  So the pool must have at least one thread more than the sub-task count, or
+ * this wrapper occupies the only worker and the sub-tasks never run.  init_gNB_proc()
+ * refuses to enable the pipeline on a pool that cannot satisfy that. */
+typedef struct {
+  PHY_VARS_gNB *gNB;
+  const nfapi_nr_dl_tti_request_t *DL_req;
+  const nfapi_nr_tx_data_request_t *TX_req;
+  int frame;
+  int slot;
+  nr_dlsch_encoded_t *enc;
+  task_ans_t *ans;
+} tx_encode_arg_t;
+
+static void tx_encode_task(void *arg)
+{
+  tx_encode_arg_t *a = (tx_encode_arg_t *)arg;
+  phy_procedures_gNB_TX_encode(a->gNB, a->DL_req, a->TX_req, a->frame, a->slot, a->enc);
+  completed_task_ans(a->ans);
+}
+
+/* The TX slot whose grid has not been filled yet because its encoding was still in
+ * flight.  Only tx_func() touches it, and tx_func() is serial. */
+typedef struct {
+  int frame;
+  int slot;
+  openair0_timestamp_t timestamp_tx;
+  bool valid;
+} tx_pending_t;
+
 static void tx_func(processingData_L1tx_t *info)
 {
   int frame_tx = info->frame;
@@ -122,8 +155,12 @@ static void tx_func(processingData_L1tx_t *info)
   // this variable is very big (multiple MB), so we put it into static storage
   // to not overflow the stack while still having it in local (function) scope
   // also, tx_func() is only executed by one thread, serially
-  static NR_Sched_Rsp_t sched_response;
-  ifi->NR_slot_indication(&ind, &sched_response);
+  //
+  // Two of them, indexed by slot parity: with L1_tx_pipeline the grid of slot N-1 is
+  // filled from its DL_req while the MAC has already written slot N's into the other.
+  static NR_Sched_Rsp_t sched_response[2];
+  NR_Sched_Rsp_t *sched = &sched_response[slot_tx & 1];
+  ifi->NR_slot_indication(&ind, sched);
   stop_meas(&gNB->slot_indication_stats);
 
   info->gNB = gNB;
@@ -134,7 +171,7 @@ static void tx_func(processingData_L1tx_t *info)
   // The RX job must stay on this thread: dispatching it from ru_thread lets
   // NR_UL_indication(slot_rx) race NR_slot_indication(slot_tx) for sched_lock, which
   // measurably destabilises the UE.  Queuing here keeps their order fixed.
-  nr_save_ul_tti_req(gNB, &sched_response.UL_tti_req);
+  nr_save_ul_tti_req(gNB, &sched->UL_tti_req);
   LOG_D(NR_PHY, "Trigger RX for %d.%d\n", frame_rx, slot_rx);
   notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->resp_L1, NULL);
   processingData_L1_t *syncMsg = NotifiedFifoData(res);
@@ -148,33 +185,85 @@ static void tx_func(processingData_L1tx_t *info)
 
   int tx_slot_type = nr_slot_select(cfg, frame_tx, slot_tx);
   // TODO check for analog_bf_vendor_ext set to 1 is a workaround while no beam API for beam selection is implemented
-  if (tx_slot_type == NR_DOWNLINK_SLOT || tx_slot_type == NR_MIXED_SLOT || get_softmodem_params()->continuous_tx
-      || IS_SOFTMODEM_RFSIM || cfg->analog_beamforming_ve.analog_bf_vendor_ext.value) {
-    START_MEAS_FULL_SLOT(&info->gNB->phy_proc_tx, tx_slot_type, NR_DOWNLINK_SLOT);
-    START_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, tx_slot_type, NR_DOWNLINK_SLOT);
+  const bool tx_this_slot = tx_slot_type == NR_DOWNLINK_SLOT || tx_slot_type == NR_MIXED_SLOT
+                            || get_softmodem_params()->continuous_tx || IS_SOFTMODEM_RFSIM
+                            || cfg->analog_beamforming_ve.analog_bf_vendor_ext.value;
+
+  /* Which slot's grid is filled and handed to the RU in this call.  Serially it is this
+   * one; pipelined it is the previous TX slot, whose encoding was launched last call and
+   * completed before that call returned. */
+  static tx_pending_t pend;
+  bool do_generate = tx_this_slot;
+  int gen_frame = frame_tx;
+  int gen_slot = slot_tx;
+  openair0_timestamp_t gen_ts = info->timestamp_tx;
+  if (gNB->tx_pipeline) {
+    do_generate = pend.valid;
+    gen_frame = pend.frame;
+    gen_slot = pend.slot;
+    gen_ts = pend.timestamp_tx;
+  }
+  const NR_Sched_Rsp_t *gen_sched = &sched_response[gen_slot & 1];
+
+  if (do_generate || (gNB->tx_pipeline && tx_this_slot)) {
+    start_meas(&info->gNB->phy_proc_tx);
     /* Split the measured region so the overrun alarm can say WHICH half was slow: PDCCH/PDSCH
      * generation, or the RU path (precoding + fronthaul BFP compression).  One aggregate
      * number cannot distinguish them, and they have entirely different causes. */
     const uint64_t t_gen_start = rdtsc_oai();
-    phy_procedures_gNB_TX(info->gNB, &sched_response.DL_req, &sched_response.TX_req, &sched_response.UL_dci_req, frame_tx,slot_tx);
-    const uint64_t t_gen_end = rdtsc_oai();
-    STOP_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, tx_slot_type, NR_DOWNLINK_SLOT);
 
-    PHY_VARS_gNB *gNB = info->gNB;
-    processingData_RU_t syncMsgRU;
-    syncMsgRU.frame_tx = frame_tx;
-    syncMsgRU.slot_tx = slot_tx;
-    syncMsgRU.ru = gNB->RU_list[0];
-    syncMsgRU.timestamp_tx = info->timestamp_tx;
-    LOG_D(PHY, "gNB: %d.%d : calling RU TX function\n", syncMsgRU.frame_tx, syncMsgRU.slot_tx);
+    /* Start this slot's encoding, then spend the wait for it filling the previous slot's
+     * grid.  The two stages are gated separately on purpose: tx_func() runs on every slot,
+     * so a UL slot must still push out the DL slot left sitting in the pipeline. */
+    task_ans_t enc_ans;
+    tx_encode_arg_t enc_arg;
+    bool encoding = false;
+    if (gNB->tx_pipeline && tx_this_slot) {
+      init_task_ans(&enc_ans, 1);
+      enc_arg = (tx_encode_arg_t){.gNB = gNB,
+                                  .DL_req = &sched->DL_req,
+                                  .TX_req = &sched->TX_req,
+                                  .frame = frame_tx,
+                                  .slot = slot_tx,
+                                  .enc = &gNB->dlsch_encoded[slot_tx & 1],
+                                  .ans = &enc_ans};
+      task_t t = {.func = tx_encode_task, .args = &enc_arg};
+      pushTpool(gNB->threadPoolEnc, t);
+      encoding = true;
+    }
 
-    START_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, tx_slot_type, NR_DOWNLINK_SLOT);
+    uint64_t t_gen_end = t_gen_start;
+    uint64_t t_ru_end = t_gen_start;
+    if (do_generate) {
+      const int gen_slot_type = nr_slot_select(cfg, gen_frame, gen_slot);
+      START_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      if (gNB->tx_pipeline)
+        phy_procedures_gNB_TX_generate(gNB,
+                                       &gen_sched->DL_req,
+                                       &gen_sched->UL_dci_req,
+                                       gen_frame,
+                                       gen_slot,
+                                       &gNB->dlsch_encoded[gen_slot & 1]);
+      else
+        phy_procedures_gNB_TX(gNB, &sched->DL_req, &sched->TX_req, &sched->UL_dci_req, frame_tx, slot_tx);
+      t_gen_end = rdtsc_oai();
+      STOP_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
 
-    ru_tx_func((void *)&syncMsgRU);
-    const uint64_t t_ru_end = rdtsc_oai();
+      processingData_RU_t syncMsgRU;
+      syncMsgRU.frame_tx = gen_frame;
+      syncMsgRU.slot_tx = gen_slot;
+      syncMsgRU.ru = gNB->RU_list[0];
+      syncMsgRU.timestamp_tx = gen_ts;
+      LOG_D(PHY, "gNB: %d.%d : calling RU TX function\n", syncMsgRU.frame_tx, syncMsgRU.slot_tx);
+      START_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      ru_tx_func((void *)&syncMsgRU);
+      t_ru_end = rdtsc_oai();
+      STOP_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+    }
 
-    STOP_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, tx_slot_type, NR_DOWNLINK_SLOT);
-    STOP_MEAS_FULL_SLOT(&info->gNB->phy_proc_tx, tx_slot_type, NR_DOWNLINK_SLOT);
+    if (encoding)
+      join_task_ans(&enc_ans);
+    stop_meas(&info->gNB->phy_proc_tx);
 
     /* L1 TX overrun alarm.  A TX that misses its deadline still hands xran a buffer on
      * time, so the O-RU reports nothing wrong (RX_LATE ~0, RX_CORRUPT 0) -- only the
@@ -182,12 +271,12 @@ static void tx_func(processingData_L1tx_t *info)
      * time_stats cannot show this: it reports a mean plus a max that start_meas() zeroes
      * every 16384 trials, so an outlier is visible but its cause is not.  Report the
      * configuration that produced the overrun instead. */
-    if (cpu_meas_enabled) {
+    if (do_generate && cpu_meas_enabled) {
       const double ghz_ = 1000.0 * get_cpu_freq_GHz();
       const double tot_ = (double)gNB->phy_proc_tx.p_time / ghz_;
       const double gen_ = (double)(t_gen_end - t_gen_start) / ghz_;
-      AssertFatal(slot_tx < NR_MAX_SLOTS_PER_FRAME, "slot_tx %d out of range\n", slot_tx);
-      typeof(gNB->tx_slot_stats[0]) *st = &gNB->tx_slot_stats[slot_tx];
+      AssertFatal(gen_slot < NR_MAX_SLOTS_PER_FRAME, "gen_slot %d out of range\n", gen_slot);
+      typeof(gNB->tx_slot_stats[0]) *st = &gNB->tx_slot_stats[gen_slot];
       st->n++;
       st->tot_us += (uint64_t)tot_;
       st->gen_us += (uint64_t)gen_;
@@ -198,7 +287,7 @@ static void tx_func(processingData_L1tx_t *info)
         st->max_gen_us = (uint32_t)gen_;
     }
 
-    if (gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
+    if (do_generate && gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
       const double us = (double)gNB->phy_proc_tx.p_time / (1000.0 * get_cpu_freq_GHz());
       if (us > gNB->tx_overrun_us) {
         gNB->tx_overrun_count++;
@@ -217,10 +306,10 @@ static void tx_func(processingData_L1tx_t *info)
              them here put an unbounded blocking syscall on L1_tx_thread. */
           const double ghz = 1000.0 * get_cpu_freq_GHz();
           const RU_t *ru = gNB->RU_list[0];
-          const nfapi_nr_dl_tti_request_body_t *b = &sched_response.DL_req.dl_tti_request_body;
+          const nfapi_nr_dl_tti_request_body_t *b = &gen_sched->DL_req.dl_tti_request_body;
           l1_alarm_rec_t *e = l1_alarm_claim(&gNB->tx_alarms);
-          e->frame = frame_tx;
-          e->slot = slot_tx;
+          e->frame = gen_frame;
+          e->slot = gen_slot;
           e->count = gNB->tx_overrun_count;
           e->a = us;
           e->b = (double)(t_gen_end - t_gen_start) / ghz;
@@ -245,6 +334,13 @@ static void tx_func(processingData_L1tx_t *info)
         }
       }
     }
+  }
+
+  if (gNB->tx_pipeline) {
+    pend.valid = tx_this_slot;
+    pend.frame = frame_tx;
+    pend.slot = slot_tx;
+    pend.timestamp_tx = info->timestamp_tx;
   }
 }
 
@@ -731,6 +827,28 @@ void init_gNB_Tpool(int inst)
     gNB->threadPoolEnc = &gNB->threadPoolEncOwn;
   } else {
     gNB->threadPoolEnc = &gNB->threadPool;
+  }
+
+  if (gNB->tx_pipeline) {
+    /* The encode wrapper task blocks in join_task_ans() while its own ceil(C/8) sub-tasks
+     * run, so a single-worker pool would deadlock: the wrapper holds the only thread and
+     * the sub-tasks never get one.  Two workers merely serialise one sub-task; three run
+     * the whole encode concurrently, which is what the budget needs.
+     *
+     * A shared pool is refused outright.  The point of the pipeline is that encoding and
+     * grid filling proceed at once, and the thread pool is FIFO with no priority: on one
+     * pool the generation tasks queue behind an encode task that no core count shortens. */
+    AssertFatal(gNB->threadPoolEnc == &gNB->threadPoolEncOwn,
+                "L1_tx_pipeline needs L1_enc_pool_cores: on the shared pool the grid fill just queues behind the encode\n");
+    AssertFatal(gNB->threadPoolEnc->len_thr >= 2,
+                "L1_tx_pipeline needs at least 2 cores in L1_enc_pool_cores (\"%s\" gives %zu): the encode task blocks while its sub-tasks run\n",
+                gNB->enc_pool_cores,
+                gNB->threadPoolEnc->len_thr);
+    if (gNB->threadPoolEnc->len_thr < 3)
+      LOG_W(NR_PHY,
+            "L1_enc_pool_cores has %zu cores; 3 lets the encode wrapper and both of its sub-tasks run at once\n",
+            gNB->threadPoolEnc->len_thr);
+    LOG_I(NR_PHY, "L1 TX pipeline on: encoding slot N overlaps the grid fill of slot N-1 (costs one slot of sl_ahead)\n");
   }
 
   // L1 RX result FIFO

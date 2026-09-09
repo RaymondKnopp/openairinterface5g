@@ -442,8 +442,14 @@ typedef struct PHY_VARS_gNB_s {
   spsc_q_t prach_l1rx_queue;
   // TODO: can we remove c from NR_gNB_DLSCH_t and put it on the stack?
   NR_gNB_DLSCH_t *dlsch;
-  /* Handoff buffer between DLSCH encoding and PDSCH generation. */
-  nr_dlsch_encoded_t dlsch_encoded;
+  /* Handoff buffers between DLSCH encoding and PDSCH generation, indexed by slot parity.
+   * Two are needed for L1_tx_pipeline: the encode of slot N fills one while the generate
+   * of slot N-1 is still reading the other.  slots_per_frame is even, so consecutive
+   * slots always differ in parity, frame wrap included. */
+  nr_dlsch_encoded_t dlsch_encoded[2];
+  /* L1_tx_pipeline: overlap the encoding of slot N with the grid fill of slot N-1.
+   * Costs one slot of sl_ahead and requires a separate L1_enc_pool_cores. */
+  int tx_pipeline;
   NR_gNB_PRS prs_vars;
   NR_gNB_PUSCH *pusch_vars;
   spsc_q_t pucch_queue;
