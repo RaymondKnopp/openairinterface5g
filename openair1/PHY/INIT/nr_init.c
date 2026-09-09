@@ -386,6 +386,18 @@ static void init_DLSCH_struct(PHY_VARS_gNB *gNB)
     LOG_D(PHY, "Allocating Transport Channel Buffers for DLSCH %d/%d\n", i, gNB->max_nb_pdsch);
     gNB->dlsch[i] = new_gNB_dlsch(fp, grid_size);
   }
+
+  /* Worst case over the whole band: every DLSCH of a slot together occupies at most
+   * N_RB_DL (their PRB allocations are disjoint), at the largest Qm and layer count,
+   * plus the per-TB rounding to 8*64 bits.  See nr_dlsch_encoded_t. */
+  const size_t max_bits = (size_t)fp->N_RB_DL * NR_SYMBOLS_PER_SLOT * NR_NB_SC_PER_RB * 8 * NR_MAX_NB_LAYERS
+                          + (size_t)gNB->max_nb_pdsch * 8 * 64;
+  gNB->dlsch_encoded.capacity = (max_bits + 7) >> 3;
+  gNB->dlsch_encoded.output = malloc16(gNB->dlsch_encoded.capacity);
+  AssertFatal(gNB->dlsch_encoded.output != NULL,
+              "could not allocate %zu bytes for the DLSCH encoding output\n",
+              gNB->dlsch_encoded.capacity);
+  LOG_I(PHY, "DLSCH encoding output buffer: %zu bytes\n", gNB->dlsch_encoded.capacity);
 }
 
 static void destroy_DLSCH_struct(const PHY_VARS_gNB *gNB)
@@ -397,6 +409,7 @@ static void destroy_DLSCH_struct(const PHY_VARS_gNB *gNB)
     free_gNB_dlsch(&gNB->dlsch[i], grid_size, fp);
   }
   free(gNB->dlsch);
+  free16(gNB->dlsch_encoded.output, gNB->dlsch_encoded.capacity);
 }
 
 void init_nr_transport(PHY_VARS_gNB *gNB)

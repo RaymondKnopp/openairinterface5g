@@ -1210,7 +1210,7 @@ static int do_one_dlsch(unsigned char *input_ptr,
     merge_meas(&gNB->dlsch_resource_mapping_stats, &arr[i].dlsch_resource_mapping_stats);
     merge_meas(&gNB->dlsch_precoding_stats, &arr[i].dlsch_precoding_stats);
   }
-  STOP_MEAS_FULL_SLOT(&gNB->dlsch_pdsch_generation_stats, slot_type, NR_DOWNLINK_SLOT);
+  stop_meas(&gNB->dlsch_pdsch_generation_stats);
   /* output and its parts for each dlsch should be aligned on 64 bytes (or 8 * 64 bits)
    * should remain a multiple of 8 * 64 with enough offset to fit each dlsch
    */
@@ -1218,13 +1218,20 @@ static int do_one_dlsch(unsigned char *input_ptr,
   return ((size_output_tb + 511) >> 9) << 6;
 }
 
-void nr_generate_pdsch(PHY_VARS_gNB *gNB,
-                       int n_dlsch,
-                       NR_gNB_DLSCH_t *dlsch_array,
-                       int frame,
-                       int slot,
-                       uint64_t *pdsch_phase_comp_prb_mask,
-                       int prb_mask_words)
+/* First half of the old nr_generate_pdsch(): CRC, segmentation, LDPC, rate matching and
+   interleaving, with the result left in enc->output for nr_dlsch_generate() to map onto
+   the grid.  Split out because the two halves do not scale the same way -- encoding is
+   pinned at ceil(C/8) tasks and is flat against pool width, generation scales -- so the
+   only way to fit both in a slot at high MCS is to run them on different slots at once,
+   and that needs the handoff to be a buffer rather than a stack VLA.
+
+   Returns false if encoding failed, in which case enc->output holds nothing usable. */
+bool nr_dlsch_encode(PHY_VARS_gNB *gNB,
+                     int n_dlsch,
+                     NR_gNB_DLSCH_t *dlsch_array,
+                     int frame,
+                     int slot,
+                     nr_dlsch_encoded_t *enc)
 {
   time_stats_t *dlsch_encoding_stats = &gNB->dlsch_encoding_stats;
   time_stats_t *tinput = &gNB->tinput;
@@ -1282,8 +1289,17 @@ void nr_generate_pdsch(PHY_VARS_gNB *gNB,
     size_output += ceil_mod(size_output_tb, 8 * 64);
   }
 
-  unsigned char output[size_output >> 3] __attribute__((aligned(64)));
-  bzero(output, sizeof(output));
+  const size_t size_output_bytes = size_output >> 3;
+  AssertFatal(size_output_bytes <= enc->capacity,
+              "%4d.%2d DLSCH encoding needs %zu bytes but only %zu were allocated for the band\n",
+              frame,
+              slot,
+              size_output_bytes,
+              enc->capacity);
+  unsigned char *output = enc->output;
+  bzero(output, size_output_bytes);
+  enc->frame = frame;
+  enc->slot = slot;
 
   int slot_type = nr_slot_select(&gNB->gNB_config, frame, slot);
   START_MEAS_FULL_SLOT(dlsch_encoding_stats, slot_type, NR_DOWNLINK_SLOT);
@@ -1304,14 +1320,42 @@ void nr_generate_pdsch(PHY_VARS_gNB *gNB,
                         dlsch_segmentation_stats,
 			dlsch_crc_stats)
       == -1) {
-    return;
+    return false;
   }
   STOP_MEAS_FULL_SLOT(dlsch_encoding_stats, slot_type, NR_DOWNLINK_SLOT);
+  return true;
+}
 
-  unsigned char *output_ptr = output;
+/* Second half of the old nr_generate_pdsch(): scrambling, modulation, layer mapping,
+   resource mapping and precoding of the bits nr_dlsch_encode() left in enc->output.
+   Reads dlsch_array[i].freq_alloc / unav_res / pdsch_pdu, which the encode half sets, so
+   both halves must be given the same slot's dlsch_array. */
+void nr_dlsch_generate(PHY_VARS_gNB *gNB,
+                       int n_dlsch,
+                       NR_gNB_DLSCH_t *dlsch_array,
+                       int slot,
+                       const nr_dlsch_encoded_t *enc,
+                       uint64_t *pdsch_phase_comp_prb_mask,
+                       int prb_mask_words)
+{
+  unsigned char *output_ptr = enc->output;
   for (int i = 0; i < n_dlsch; i++) {
     output_ptr += do_one_dlsch(output_ptr, gNB, &dlsch_array[i], slot, pdsch_phase_comp_prb_mask, prb_mask_words);
   }
+}
+
+void nr_generate_pdsch(PHY_VARS_gNB *gNB,
+                       int n_dlsch,
+                       NR_gNB_DLSCH_t *dlsch_array,
+                       int frame,
+                       int slot,
+                       uint64_t *pdsch_phase_comp_prb_mask,
+                       int prb_mask_words)
+{
+  nr_dlsch_encoded_t *enc = &gNB->dlsch_encoded;
+  if (!nr_dlsch_encode(gNB, n_dlsch, dlsch_array, frame, slot, enc))
+    return;
+  nr_dlsch_generate(gNB, n_dlsch, dlsch_array, slot, enc, pdsch_phase_comp_prb_mask, prb_mask_words);
 }
 
 void dump_pdsch_stats(FILE *fd, PHY_VARS_gNB *gNB)

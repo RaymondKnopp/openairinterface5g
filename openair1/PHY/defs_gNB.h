@@ -386,6 +386,21 @@ typedef struct {
   uint64_t drained; /* consumer only */
 } l1_alarm_ring_t;
 
+/* The encoded DLSCH bits of one slot, handed from the encoding stage to the generation
+   stage.  This used to be a stack VLA inside nr_generate_pdsch(), which forced the two
+   stages to live in one call; holding it here lets them run on different slots at once.
+
+   Sized once at init for the whole band, so nothing is allocated on the L1 TX thread.
+   The bound holds because PDSCH allocations within a slot are disjoint in frequency, so
+   the num_rbs of every DLSCH in the slot sums to at most N_RB_DL, and the per-TB
+   rounding to 8*64 bits adds at most 511 bits each. */
+typedef struct {
+  unsigned char *output; /* concatenated encoded bits of every DLSCH in the slot */
+  size_t capacity;       /* bytes allocated; never grows, exceeding it is fatal */
+  int frame;
+  int slot;
+} nr_dlsch_encoded_t;
+
 typedef struct PHY_VARS_gNB_s {
   /// Module ID indicator for this instance
   module_id_t Mod_id;
@@ -412,6 +427,8 @@ typedef struct PHY_VARS_gNB_s {
   spsc_q_t prach_l1rx_queue;
   // TODO: can we remove c from NR_gNB_DLSCH_t and put it on the stack?
   NR_gNB_DLSCH_t *dlsch;
+  /* Handoff buffer between DLSCH encoding and PDSCH generation. */
+  nr_dlsch_encoded_t dlsch_encoded;
   NR_gNB_PRS prs_vars;
   NR_gNB_PUSCH *pusch_vars;
   spsc_q_t pucch_queue;
