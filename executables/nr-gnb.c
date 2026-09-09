@@ -723,6 +723,15 @@ void init_gNB_Tpool(int inst)
   } else {
     gNB->threadPoolRx = &gNB->threadPool;
   }
+  /* DLSCH encoding gets its own pool when L1_enc_pool_cores says so.  See threadPoolEnc
+   * in defs_gNB.h for why a wider shared pool cannot substitute for this. */
+  if (gNB->enc_pool_cores != NULL && strlen(gNB->enc_pool_cores) > 0) {
+    LOG_I(NR_PHY, "separate DLSCH encoding thread pool on cores %s\n", gNB->enc_pool_cores);
+    initTpool(gNB->enc_pool_cores, &gNB->threadPoolEncOwn, cpumeas(CPUMEAS_GETSTATE));
+    gNB->threadPoolEnc = &gNB->threadPoolEncOwn;
+  } else {
+    gNB->threadPoolEnc = &gNB->threadPool;
+  }
 
   // L1 RX result FIFO
   initNotifiedFIFO(&gNB->resp_L1);
@@ -748,6 +757,8 @@ void term_gNB_Tpool(int inst) {
 
   if (gNB->threadPoolRx == &gNB->threadPoolRxOwn)
     abortTpool(&gNB->threadPoolRxOwn);
+  if (gNB->threadPoolEnc == &gNB->threadPoolEncOwn)
+    abortTpool(&gNB->threadPoolEncOwn);
   abortTpool(&gNB->threadPool);
   abortNotifiedFIFO(&gNB->L1_rx_out);
 

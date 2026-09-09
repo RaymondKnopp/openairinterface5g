@@ -33,7 +33,9 @@
 #define L1_NUM_TX_SYM_PER_THREAD             "L1_num_tx_sym_per_thread"
 #define HLP_L1_NUM_TX_SYM_PER_THREAD         "number of symbols processed per PDSCH generation thread"
 #define L1_RX_POOL_CORES                     "L1_rx_pool_cores"
+#define L1_ENC_POOL_CORES                    "L1_enc_pool_cores"
 #define HLP_L1_RX_POOL_CORES                 "cores for a separate UL thread pool, e.g. \"0,6\" (empty = share the --thread-pool one). The shared pool is FIFO, and one UL slot pushes a task per symbol, so DL work queued behind it waits for the whole batch."
+#define HLP_L1_ENC_POOL_CORES                "cores for a separate DLSCH encoding thread pool, e.g. \"2,3,4\" (empty = share the --thread-pool one). Needed to overlap encoding with the previous slot's PDSCH generation: encoding does not scale past 2 tasks, so it cannot use a wider shared pool, but it must not queue behind generation either."
 #define L1_TX_OVERRUN_US                     "L1_tx_overrun_us"
 #define L1_RX_OVERRUN_US                     "L1_rx_overrun_us"
 #define HLP_L1_RX_OVERRUN_US                 "log the split of the feprx->rx_func path whenever it exceeds this many us (0 = off). Exceeding the rxdataF ring budget is what destroys UL samples."
@@ -71,6 +73,7 @@
   {L1_NUM_RX_SYM_PER_THREAD,             HLP_L1_NUM_RX_SYM_PER_THREAD, 0, .iptr=NULL, .defintval=1,               TYPE_INT,      0},         \
   {L1_NUM_TX_SYM_PER_THREAD,             HLP_L1_NUM_TX_SYM_PER_THREAD, 0, .iptr=NULL, .defintval=0,               TYPE_INT,      0},         \
   {L1_RX_POOL_CORES,                     HLP_L1_RX_POOL_CORES, 0,       .strptr=NULL, .defstrval="",              TYPE_STRING,   0},         \
+  {L1_ENC_POOL_CORES,                    HLP_L1_ENC_POOL_CORES, 0,      .strptr=NULL, .defstrval="",              TYPE_STRING,   0},         \
   {L1_TX_OVERRUN_US,                     HLP_L1_TX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_RX_OVERRUN_US,                     HLP_L1_RX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_AMP_BACKOFF_dB,                 HLP_L1TX_BO,0,         .uptr=NULL,           .defintval=36,              TYPE_UINT,     0},         \

@@ -546,6 +546,24 @@ typedef struct PHY_VARS_gNB_s {
   tpool_t *threadPoolRx;
   /* L1_rx_pool_cores: core list for threadPoolRxOwn, NULL/empty to share threadPool. */
   char *rx_pool_cores;
+  /* Storage for the encoding pool; only initialised when L1_enc_pool_cores is set. */
+  tpool_t threadPoolEncOwn;
+  /* Where DLSCH encoding is pushed: &threadPool by default, &threadPoolEncOwn when
+   * L1_enc_pool_cores is configured.
+   *
+   * Encoding wants its own pool for the opposite reason to RX.  It is not that it floods
+   * the queue -- it cannot even fill one: nrLDPC_launch_TB_encoding() pushes
+   * ceil(C/8) tasks, which is 2 for every C from 9 to 16, so at 273 PRB / 1 layer it is
+   * 2 tasks whatever the MCS.  Measured on an A72 at MCS 12, encoding is 251/248/250 us
+   * on a 2/4/6-core pool: completely flat, because 8 is the ldpc8blocks SIMD width and
+   * not a chunk size that can be reduced.  Generation over the same pools is 228/158/141
+   * us.  So no core count fixes the ~420 us per-slot budget while the two run in series
+   * (461 us total even on 6 cores), and the only way out is to overlap encoding of slot N
+   * with generation of slot N-1 -- which needs the two stages on disjoint workers, or
+   * generation queues behind an encode task that no amount of parallelism shortens. */
+  tpool_t *threadPoolEnc;
+  /* L1_enc_pool_cores: core list for threadPoolEncOwn, NULL/empty to share threadPool. */
+  char *enc_pool_cores;
   int num_pusch_symbols_per_thread;
   int num_pdsch_symbols_per_thread;
   int dmrs_num_antennas_per_thread;

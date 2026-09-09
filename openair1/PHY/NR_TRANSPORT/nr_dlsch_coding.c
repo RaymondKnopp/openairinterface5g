@@ -287,7 +287,9 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
   nrLDPC_slot_encoding_parameters_t slot_parameters = {.frame = frame,
                                                        .slot = slot,
                                                        .nb_TBs = n_dlsch,
-                                                       .threadPool = &gNB->threadPool,
+                                                       /* NULL for callers that never ran the L1 init (the simulators):
+                                                          fall back to the one pool they do set up. */
+                                                       .threadPool = gNB->threadPoolEnc ? gNB->threadPoolEnc : &gNB->threadPool,
                                                        .TBs = TBs};
   gNB->nrLDPC_coding_interface.nrLDPC_coding_encoder(&slot_parameters);
 
