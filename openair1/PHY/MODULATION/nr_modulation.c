@@ -1158,6 +1158,68 @@ void nr_layer_precoder_2x4_simd(const int symSz,
 #endif
 }
 
+/* General cross-polar fast path for 2-4 layers onto 4 antenna ports.  Every 4-port
+ * Type-I codebook entry has the block form W = [[A],[Phi.A]]: ports {p, p+2} are the two
+ * polarisations and differ, per layer, by a co-phasing phi_l in {+-1,+-j}.  So
+ *   out[p]   = sum_l  W[l][p].x_l            (the r beam products)
+ *   out[p+2] = sum_l  phi_l . (W[l][p].x_l)  (the same products, co-phased)
+ * sharing the r complex multiplies between both ports of a pair -- 2r MACs for the pair
+ * instead of 4r for the generic per-port kernel.  Like nr_layer_precoder_2x4_simd() this
+ * is NOT bit-exact vs the generic kernel (W[l][p+2] is rounded independently of W[l][p],
+ * so deriving one from the other differs by up to ~1 LSB per layer): validate with a
+ * tolerance.  phi_swap[l]/phi_neg[l] encode phi_l: {f,f}=+1 {f,t}=-1 {t,f}=+j {t,t}=-j. */
+void nr_layer_precoder_Nx4_simd(const int n_layers,
+                                const int symSz,
+                                const c16_t txdataF_res_mapped[n_layers][symSz],
+                                c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
+                                const int p,
+                                const bool phi_swap[NR_MAX_NB_LAYERS],
+                                const bool phi_neg[NR_MAX_NB_LAYERS],
+                                const int sc_offset,
+                                const int re_cnt,
+                                c16_t *out_lo,
+                                c16_t *out_hi)
+{
+#ifdef __aarch64__
+  int16x8_t wr[NR_MAX_NB_LAYERS], wi[NR_MAX_NB_LAYERS];
+  const c16_t *in[NR_MAX_NB_LAYERS];
+  for (int l = 0; l < n_layers; l++) {
+    wr[l] = vdupq_n_s16(weights[l][p].r);
+    wi[l] = vdupq_n_s16(weights[l][p].i);
+    in[l] = txdataF_res_mapped[l] + sc_offset;
+  }
+  c16_t *o_lo = out_lo + sc_offset;
+  c16_t *o_hi = out_hi + sc_offset;
+  const uint16x8_t even = {0xffff, 0, 0xffff, 0, 0xffff, 0, 0xffff, 0};
+
+  int done = 0;
+  for (; done + 4 <= re_cnt; done += 4) {
+    int16x8_t lo = vdupq_n_s16(0), hi = vdupq_n_s16(0);
+    for (int l = 0; l < n_layers; l++) {
+      const int16x8_t x = vld1q_s16((const int16_t *)(in[l] + done));
+      const int16x8_t t = cmac0_prec128(x, wr[l], wi[l]);
+      int16x8_t tphi = t;
+      if (phi_swap[l]) {
+        const int16x8_t sw = vrev32q_s16(t);
+        const int16x8_t neg = vnegq_s16(sw);
+        tphi = phi_neg[l] ? vbslq_s16(even, sw, neg) : vbslq_s16(even, neg, sw);
+      } else if (phi_neg[l]) {
+        tphi = vnegq_s16(t);
+      }
+      lo = vqaddq_s16(lo, t);
+      hi = vqaddq_s16(hi, tphi);
+    }
+    vst1q_s16((int16_t *)(o_lo + done), lo);
+    vst1q_s16((int16_t *)(o_hi + done), hi);
+  }
+  DevAssert(done == re_cnt);
+#else
+  (void)n_layers; (void)symSz; (void)txdataF_res_mapped; (void)weights; (void)p;
+  (void)phi_swap; (void)phi_neg; (void)sc_offset; (void)re_cnt; (void)out_lo; (void)out_hi;
+  AssertFatal(false, "nr_layer_precoder_Nx4_simd: aarch64 only\n");
+#endif
+}
+
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],
                                 c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],

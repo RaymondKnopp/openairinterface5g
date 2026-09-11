@@ -187,6 +187,18 @@ void nr_layer_precoder_2x4_simd(const int symSz,
                                 c16_t *out_lo,
                                 c16_t *out_hi);
 
+void nr_layer_precoder_Nx4_simd(const int n_layers,
+                                const int symSz,
+                                const c16_t txdataF_res_mapped[n_layers][symSz],
+                                c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
+                                const int p,
+                                const bool phi_swap[NR_MAX_NB_LAYERS],
+                                const bool phi_neg[NR_MAX_NB_LAYERS],
+                                const int sc_offset,
+                                const int re_cnt,
+                                c16_t *out_lo,
+                                c16_t *out_hi);
+
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],
                                 c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],

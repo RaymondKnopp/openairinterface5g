@@ -671,6 +671,112 @@ static inline bool do_txdataF_2x4(c16_t **txdataF,
   return true;
 }
 
+#ifdef NR_PDSCH_2X4_FASTPATH
+/* Rank 3-4 generalisation of nr_prec2x4_classify(): for port pair (p, p+2) find the
+   per-layer co-phasing phi_l in {+-1,+-j} with W[l][p+2] = phi_l . W[l][p].  Fills
+   phi_swap[l]/phi_neg[l] for every layer; returns false (caller falls back to the generic
+   kernel) if any layer does not fit the cross-polar form. */
+static inline bool nr_precNx4_classify(const nfapi_nr_pm_pdu_t *pm, int p, int n_layers,
+                                       bool phi_swap[NR_MAX_NB_LAYERS], bool phi_neg[NR_MAX_NB_LAYERS])
+{
+  const int TOL = 2; /* LSB; independent rounding of the two entries costs about 1 */
+  static const bool cand_swap[4] = {false, false, true, true};
+  static const bool cand_neg[4] = {false, true, false, true};
+  for (int l = 0; l < n_layers; l++) {
+    const c16_t a0 = pm->weights[l][p], a2 = pm->weights[l][p + 2];
+    bool found = false;
+    for (int c = 0; c < 4 && !found; c++) {
+      /* phi*(r,i): +1->(r,i) -1->(-r,-i) +j->(-i,r) -j->(i,-r) */
+      c16_t pa;
+      if (!cand_swap[c])
+        pa = cand_neg[c] ? (c16_t){-a0.r, -a0.i} : a0;
+      else
+        pa = cand_neg[c] ? (c16_t){a0.i, -a0.r} : (c16_t){-a0.i, a0.r};
+      if (abs(pa.r - a2.r) <= TOL && abs(pa.i - a2.i) <= TOL) {
+        phi_swap[l] = cand_swap[c];
+        phi_neg[l] = cand_neg[c];
+        found = true;
+      }
+    }
+    if (!found)
+      return false;
+  }
+  return true;
+}
+
+/* Can the Nx4 fast path handle this PDU? Single PMI for the whole allocation
+   (prg_size = rbSize), r layers onto 4 ports, every port pair cross-polar. */
+static inline bool nr_pdsch_Nx4_usable(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15)
+{
+  const nfapi_nr_tx_precoding_and_beamforming_t *pb = &rel15->precodingAndBeamforming;
+  if (pb->prg_size == 0)
+    return true;
+  const int pmi = pb->prgs_list[0].pm_idx;
+  if (pmi == 0)
+    return true;
+  if (pmi - 1 >= gNB->gNB_config.pmi_list.num_pm_idx)
+    return false;
+  const nfapi_nr_pm_pdu_t *pm = &gNB->gNB_config.pmi_list.pmi_pdu[pmi - 1];
+  if (pmi != pm->pm_idx || pm->num_ant_ports != 4 || pm->numLayers != rel15->nrOfLayers)
+    return false;
+  bool sw[NR_MAX_NB_LAYERS], ng[NR_MAX_NB_LAYERS];
+  return nr_precNx4_classify(pm, 0, rel15->nrOfLayers, sw, ng)
+      && nr_precNx4_classify(pm, 1, rel15->nrOfLayers, sw, ng);
+}
+
+/* Fast path of do_txdataF() for r layers (2..4) onto 4 antenna ports: fills each port
+   pair (p, p+2) in one pass via nr_layer_precoder_Nx4_simd(), sharing the r layer MACs. */
+static inline bool do_txdataF_Nx4(c16_t **txdataF,
+                                  int symbol_sz,
+                                  c16_t txdataF_precoding[][symbol_sz],
+                                  PHY_VARS_gNB *gNB,
+                                  const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15,
+                                  const uint16_t *ant_to_map,
+                                  int rb_start,
+                                  int rb_size,
+                                  int txdataF_offset_per_symbol)
+{
+  const int r = rel15->nrOfLayers;
+  int rb = 0;
+  uint16_t subCarrier = get_block_start_sc(rb_start, rel15->BWPStart, symbol_sz);
+  const nfapi_nr_tx_precoding_and_beamforming_t *pb = &rel15->precodingAndBeamforming;
+  while (rb < rb_size) {
+    const int pmi = (pb->prg_size > 0) ? (pb->prgs_list[(int)rb / pb->prg_size].pm_idx) : 0;
+    const int pmi2 = (rb < (rb_size - 1) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 1) / pb->prg_size].pm_idx) : -1;
+    const int pmi3 = (rb < (rb_size - 2) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 2) / pb->prg_size].pm_idx) : -1;
+    const int pmi4 = (rb < (rb_size - 3) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 3) / pb->prg_size].pm_idx) : -1;
+    int rb_step0 = pmi == pmi2 ? 2 : 1;
+    const int rb_step = rb_step0 == 2 && pmi3 == pmi && pmi4 == pmi ? 4 : rb_step0;
+    const int re_cnt = NR_NB_SC_PER_RB * rb_step;
+    if (pmi == 0) {
+      for (int a = 0; a < 4; a++) {
+        c16_t *dst = &txdataF[ant_to_map[a]][txdataF_offset_per_symbol + subCarrier];
+        if (a < r)
+          memcpy(dst, &txdataF_precoding[a][subCarrier], re_cnt * sizeof(**txdataF));
+        else
+          memset(dst, 0, re_cnt * sizeof(**txdataF));
+      }
+    } else {
+      nfapi_nr_pm_pdu_t *pmi_pdu = &gNB->gNB_config.pmi_list.pmi_pdu[pmi - 1];
+      if (pmi != pmi_pdu->pm_idx || pmi_pdu->num_ant_ports != 4 || pmi_pdu->numLayers != r)
+        return false;
+      for (int p = 0; p < 2; p++) {
+        bool phi_swap[NR_MAX_NB_LAYERS], phi_neg[NR_MAX_NB_LAYERS];
+        if (!nr_precNx4_classify(pmi_pdu, p, r, phi_swap, phi_neg))
+          return false;
+        nr_layer_precoder_Nx4_simd(r, symbol_sz, txdataF_precoding, pmi_pdu->weights, p,
+                                   phi_swap, phi_neg, subCarrier, re_cnt,
+                                   &txdataF[ant_to_map[p]][txdataF_offset_per_symbol],
+                                   &txdataF[ant_to_map[p + 2]][txdataF_offset_per_symbol]);
+      }
+    }
+    subCarrier += re_cnt;
+    rb += rb_step;
+  }
+  return true;
+}
+#endif // NR_PDSCH_2X4_FASTPATH
+
 /* Parallel scramble + modulate + layer-map.
  *
  * All three stages are elementwise/strided with no cross-element dependency:
@@ -925,6 +1031,55 @@ static void nr_pdsch_symbol_processing(void *arg)
                                  block_end - block_start + 1,
                                  txdataF_offset_per_symbol);
         DevAssert(ok); /* nr_pdsch_2x4_usable() already vetted the PMI */
+        if (gNB->phase_comp) {
+          const int start_sc = get_block_start_sc(block_start, rel15->BWPStart, symbol_sz);
+          const int nsc = (block_end - block_start + 1) * NR_NB_SC_PER_RB;
+          const c16_t rot = frame_parms->symbol_rotation[0][symb_offset + l_symbol];
+          for (int a = 0; a < 4; a++) {
+            c16_t *psc = &txdataF[rdata->ant_to_map[a]][txdataF_offset_per_symbol + start_sc];
+            rotate_cpx_vector(psc, rot, psc, nsc, 15);
+          }
+          mark_prb_range(rdata->pdsch_phase_comp_prb_mask, rdata->prb_mask_words, l_symbol, block_start, block_end - block_start + 1);
+        }
+      }
+    } else
+#endif // NR_PDSCH_2X4_FASTPATH
+#ifdef NR_PDSCH_2X4_FASTPATH
+    /* 3-4 layers onto 4 ports: same cross-polar sharing as the 2x4 path, generalised to
+     * rank r (halves the MACs: 2r instead of 4r per RE-pair). Decided once per symbol; if
+     * the single PMI is not cross-polar the generic kernel below is used. */
+    if ((rel15->nrOfLayers == 3 || rel15->nrOfLayers == 4) && num_log_ports == 4 && !getenv("NR_PDSCH_NO_NX4") && nr_pdsch_Nx4_usable(gNB, rel15)) {
+      int pos = 0;
+      int block_start, block_end;
+      while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
+#ifdef NR_PDSCH_NX4_VERIFY
+        {
+          const int nsc_v = (block_end - block_start + 1) * NR_NB_SC_PER_RB;
+          const int sc0_v = get_block_start_sc(block_start, rel15->BWPStart, symbol_sz);
+          c16_t ref[4][nsc_v];
+          for (int a = 0; a < 4; a++) {
+            do_txdataF(txdataF, symbol_sz, txdataF_precoding, gNB, rel15, rdata->ant_to_map[a],
+                       block_start, block_end - block_start + 1, txdataF_offset_per_symbol);
+            memcpy(ref[a], &txdataF[rdata->ant_to_map[a]][txdataF_offset_per_symbol + sc0_v], nsc_v * sizeof(c16_t));
+          }
+          do_txdataF_Nx4(txdataF, symbol_sz, txdataF_precoding, gNB, rel15, rdata->ant_to_map,
+                         block_start, block_end - block_start + 1, txdataF_offset_per_symbol);
+          static int worst = 0;
+          for (int a = 0; a < 4; a++) {
+            const c16_t *got = &txdataF[rdata->ant_to_map[a]][txdataF_offset_per_symbol + sc0_v];
+            for (int i = 0; i < nsc_v; i++) {
+              int dr = abs(got[i].r - ref[a][i].r), di = abs(got[i].i - ref[a][i].i);
+              int d = dr > di ? dr : di;
+              if (d > worst) { worst = d;
+                printf("NX4VERIFY worst deviation %d LSB (layers %d ant %d re %d: ref %d %d got %d %d)\n",
+                       worst, rel15->nrOfLayers, a, i, ref[a][i].r, ref[a][i].i, got[i].r, got[i].i); }
+            }
+          }
+        }
+#endif
+        bool ok = do_txdataF_Nx4(txdataF, symbol_sz, txdataF_precoding, gNB, rel15, rdata->ant_to_map,
+                                 block_start, block_end - block_start + 1, txdataF_offset_per_symbol);
+        DevAssert(ok);
         if (gNB->phase_comp) {
           const int start_sc = get_block_start_sc(block_start, rel15->BWPStart, symbol_sz);
           const int nsc = (block_end - block_start + 1) * NR_NB_SC_PER_RB;
