@@ -143,6 +143,7 @@ int nr_ulsch_encoding(PHY_VARS_NR_UE *ue,
     TB_parameters->G = G[pusch_id];
     TB_parameters->tbslbrm = pusch_pdu->tbslbrm;
     TB_parameters->A = pusch_pdu->pusch_data.tb_size / 8;
+    TB_parameters->a = harq_process->payload_AB; /* payload + TB CRC, before segmentation */
     TB_parameters->segments = segments[pusch_id];
 
     memset(harq_process->f, 0, 14 * nb_rb * 12 * 16);

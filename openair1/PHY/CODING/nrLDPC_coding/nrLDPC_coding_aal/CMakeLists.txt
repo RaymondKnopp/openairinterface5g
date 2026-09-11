@@ -18,7 +18,21 @@ if (ENABLE_LDPC_AAL)
     endif()
   endif()
 
+  # NXP LA12xx: the device is a vdev, not a PCI function, and its vendor calls
+  # (queue-to-e200-core binding, hugepage mapping for the modem's DMA) have no
+  # generic BBDEV equivalent. DPDK >= 20.11 names the PMD
+  # librte_baseband_la12xx.so; the old 19.11 fork used librte_pmd_bbdev_la12xx.a.
+  find_library(PMD_LA12XX NAMES rte_baseband_la12xx rte_pmd_bbdev_la12xx
+               HINTS ${LIBDPDK_AAL_LIBRARY_DIRS})
+  if (PMD_LA12XX)
+    message(STATUS "found poll-mode driver for NXP LA12xx LDPC/FECA offload (${PMD_LA12XX})")
+  endif()
+
   add_library(ldpc_aal MODULE nrLDPC_coding_aal.c)
+  if (PMD_LA12XX)
+    target_compile_definitions(ldpc_aal PRIVATE LDPC_AAL_HAVE_LA12XX)
+    target_link_libraries(ldpc_aal PRIVATE ${PMD_LA12XX})
+  endif()
 
   set_target_properties(ldpc_aal PROPERTIES COMPILE_FLAGS "-DALLOW_EXPERIMENTAL_API")
   set_target_properties(ldpc_aal PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})

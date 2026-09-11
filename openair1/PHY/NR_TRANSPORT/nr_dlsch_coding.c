@@ -170,13 +170,21 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
 
     start_meas(dlsch_crc_stats);
     int max_bytes = MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER * rel15->nrOfLayers * 1056;
+    /* TB-mode offload: the LA1200 attaches the TB CRC, segments and adds the per-CB
+     * CRC itself from the raw payload A, so this CPU CRC+segmentation is redundant.
+     * Skip it (geometry only) when TB-mode offload is active. Gated so CPU/T2 and the
+     * CB-mode fallback -- which need dlsch->c[] filled -- are untouched. */
+    int noseg = (getenv("LDPC_AAL_TB") != NULL) && (getenv("LDPC_AAL_NOSEG") != NULL);
+    start_meas(&gNB->dlsch_crc_stats);
     int B;
     if (A > NR_MAX_PDSCH_TBS) {
       // Add 24-bit crc (polynomial A) to payload
+      if (!noseg) {
       crc = crc24a(a, A) >> 8;
       a[A >> 3] = ((uint8_t *)&crc)[2];
       a[1 + (A >> 3)] = ((uint8_t *)&crc)[1];
       a[2 + (A >> 3)] = ((uint8_t *)&crc)[0];
+      }
       // printf("CRC %x (A %d)\n",crc,A);
       // printf("a0 %d a1 %d a2 %d\n", a[A>>3], a[1+(A>>3)], a[2+(A>>3)]);
       B = A + 24;
@@ -184,9 +192,11 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
       memcpy(dlsch->b, a, (A / 8) + 4); // why is this +4 if the CRC is only 3 bytes?
     } else {
       // Add 16-bit crc (polynomial A) to payload
+      if (!noseg) {
       crc = crc16(a, A) >> 16;
       a[A >> 3] = ((uint8_t *)&crc)[1];
       a[1 + (A >> 3)] = ((uint8_t *)&crc)[0];
+      }
       // printf("CRC %x (A %d)\n",crc,A);
       // printf("a0 %d a1 %d \n", a[A>>3], a[1+(A>>3)]);
       B = A + 16;
@@ -198,17 +208,21 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
     nrLDPC_TB_encoding_parameters_t *TB_parameters = &TBs[i];
 
     // The harq_pid is not unique among the active HARQ processes in the instance so we use i instead
+    stop_meas(&gNB->dlsch_crc_stats);
     TB_parameters->harq_unique_pid = i;
     TB_parameters->BG = rel15->maintenance_parms_v3.ldpcBaseGraph;
     TB_parameters->A = A;
-    TB_parameters->Kb = nr_segmentation(dlsch->b,
-                                        dlsch->c,
+    TB_parameters->a = dlsch->b; /* payload + TB CRC, before segmentation */
+    start_meas(&gNB->dlsch_segmentation_stats);
+    TB_parameters->Kb = nr_segmentation(noseg ? NULL : dlsch->b,
+                                        noseg ? NULL : dlsch->c,
                                         B,
                                         &TB_parameters->C,
                                         &TB_parameters->K,
                                         &TB_parameters->Z,
                                         &TB_parameters->F,
                                         TB_parameters->BG);
+    stop_meas(&gNB->dlsch_segmentation_stats);
 
     if (TB_parameters->C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER * rel15->nrOfLayers) {
       LOG_E(PHY, "nr_segmentation.c: too many segments %d, B %d\n", TB_parameters->C, B);

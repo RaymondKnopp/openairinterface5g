@@ -162,6 +162,13 @@ typedef struct nrLDPC_TB_encoding_parameters_s{
   nrLDPC_segment_encoding_parameters_t *segments;
   unsigned char *output;
   uint8_t **c_dev;
+  /* Transport block before segmentation: the A payload bits followed by the
+   * attached TB CRC. Set by the caller when it has one contiguous buffer.
+   * An accelerator that performs 38.212 5.2.2 segmentation and CRC attachment
+   * itself can then take the whole TB in a single operation instead of one
+   * operation per code block. NULL means the implementation must work from
+   * segments[] as before. */
+  uint8_t *a;
 } nrLDPC_TB_encoding_parameters_t;
 
 /**
