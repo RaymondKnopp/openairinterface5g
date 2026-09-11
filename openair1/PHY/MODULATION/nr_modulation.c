@@ -918,87 +918,57 @@ static inline __attribute__((always_inline)) __m256i cmac_prec256(__m256i y, __m
 }
 #endif
 #ifdef __aarch64__
-#ifdef NEWOPTIM
-static inline __attribute__((always_inline)) int16x4x2_t cmac0_prec4(int16x8_t x, int16x4_t wr, int16x4_t wi) {
-    const int16x4_t x_lo = vget_low_s16(x);
-    const int16x4_t x_hi = vget_high_s16(x);
-    const int16x4_t xr = vuzp1_s16(x_lo, x_hi);
-    const int16x4_t xi = vuzp2_s16(x_lo, x_hi);
-#else
-static inline __attribute__((always_inline)) int16x8_t cmac0_prec128(int16x8_t x, int16x8_t wr, int16x8_t wi) {
-    //
-    int16x8_t xr = vuzp1q_s16(x, x);  // even lanes
-    int16x8_t xi = vuzp2q_s16(x, x);  // odd  lanes
-#endif
+/* Complex multiply-accumulate for the precoders, in DEINTERLEAVED (split real /
+ * imaginary) form: 4 REs per call, reals in x.val[0] and imaginaries in x.val[1].
+ *
+ * Deinterleaved is the right form on aarch64 for two reasons.  ld2/st2 split and
+ * re-merge the c16_t stream for free in the load and the store, and without it the
+ * products get computed TWICE: the natural interleaved formulation is
+ * xr = vuzp1q_s16(x, x), whose two halves are identical, so multiplying the full
+ * vector does every lane's work in both halves.  That is invisible on ARMv8.1 cores,
+ * where the QRDMX path below folds the rounding into one instruction, but on ARMv8.0
+ * (Cortex-A72) it doubles the multiply-longs.  Split form also makes a multiply by
+ * +-j free -- (r,i) -> (-i,r) is just naming the other register -- which the
+ * cross-polar precoders exploit.
+ *
+ * Q15: the result is round((x * w) / 2^15) per component, saturating. */
+static inline __attribute__((always_inline)) int16x4x2_t cmac0_prec4(int16x4x2_t x, int16x4_t wr, int16x4_t wi)
+{
+  const int16x4_t xr = x.val[0];
+  const int16x4_t xi = x.val[1];
 #ifdef __ARM_FEATURE_QRDMX
-    // ARMv8.1-A: Use RDM instructions
-#ifdef NEWOPTIM
-    // real = ar*br - ai*bi  (Q15 scaling via high-half doubling muls)
-    int16x4_t real = vqdmulh_s16(xr, wr);      // ≈ round((2*xr*wr)/2^16)
-    real = vqrdmlsh_s16(real, xi, wi);         // real -= round((2*xi*wi)/2^16)
-    // imag = ar*bi + ai*br
-    int16x4_t imag = vqdmulh_s16(xr, wi);
-    imag = vqrdmlah_s16(imag, xi, wr);         // imag += round((2*xi*wr)/2^16)
+  // ARMv8.1-A: use the rounding doubling multiply-accumulate instructions
+  // real = xr*wr - xi*wi
+  int16x4_t real = vqdmulh_s16(xr, wr); // ~ round((2*xr*wr)/2^16)
+  real = vqrdmlsh_s16(real, xi, wi);
+  // imag = xr*wi + xi*wr
+  int16x4_t imag = vqdmulh_s16(xr, wi);
+  imag = vqrdmlah_s16(imag, xi, wr);
 #else
-    // real = ar*br - ai*bi  (Q15 scaling via high-half doubling muls)
-    int16x8_t real = vqdmulhq_s16(xr, wr);      // ≈ round((2*xr*wr)/2^16)
-    real = vqrdmlshq_s16(real, xi, wi);         // real -= round((2*xi*wi)/2^16)
-    // imag = ar*bi + ai*br
-    int16x8_t imag = vqdmulhq_s16(xr, wi);
-    imag = vqrdmlahq_s16(imag, xi, wr);         // imag += round((2*xi*wr)/2^16)
+  // ARMv8.0-A: widening multiplies, then round and narrow
+  int32x4_t real_prod = vmull_s16(xr, wr);
+  real_prod = vmlsl_s16(real_prod, xi, wi);
+
+  int32x4_t imag_prod = vmull_s16(xr, wi);
+  imag_prod = vmlal_s16(imag_prod, xi, wr);
+
+  const int16x4_t real = vqrshrn_n_s32(real_prod, 15);
+  const int16x4_t imag = vqrshrn_n_s32(imag_prod, 15);
 #endif
-#else
-    // ARMv8.0-A fallback: Use standard 32-bit multiply
-#ifdef NEWOPTIM 
-    int32x4_t real_prod = vmull_s16(xr, wr);
-    real_prod = vmlsl_s16(real_prod, xi, wi);
-
-    int32x4_t imag_prod = vmull_s16(xr, wi);
-    imag_prod = vmlal_s16(imag_prod, xi, wr);
-
-    int16x4_t real = vqrshrn_n_s32(real_prod, 15);
-    int16x4_t imag = vqrshrn_n_s32(imag_prod, 15);
-#else
-    int32x4_t real_lo = vmull_s16(vget_low_s16(xr), vget_low_s16(wr));
-    int32x4_t real_hi = vmull_s16(vget_high_s16(xr), vget_high_s16(wr));
-    real_lo = vmlsl_s16(real_lo, vget_low_s16(xi), vget_low_s16(wi));
-    real_hi = vmlsl_s16(real_hi, vget_high_s16(xi), vget_high_s16(wi));
-
-    int32x4_t imag_lo = vmull_s16(vget_low_s16(xr), vget_low_s16(wi));
-    int32x4_t imag_hi = vmull_s16(vget_high_s16(xr), vget_high_s16(wi));
-    imag_lo = vmlal_s16(imag_lo, vget_low_s16(xi), vget_low_s16(wr));
-    imag_hi = vmlal_s16(imag_hi, vget_high_s16(xi), vget_high_s16(wr));
-
-    int16x8_t real = vcombine_s16(vqrshrn_n_s32(real_lo, 15), vqrshrn_n_s32(real_hi, 15));
-    int16x8_t imag = vcombine_s16(vqrshrn_n_s32(imag_lo, 15), vqrshrn_n_s32(imag_hi, 15));
-#endif
-#endif
-#ifdef NEWOPTIM
-    int16x4x2_t produ;
-    produ.val[0] = real;
-    produ.val[1] = imag;
-    return produ;
-#else
-    // Re-interleave [real, imag]
-    int16x8x2_t produ = vzipq_s16(real, imag);
-    return produ.val[0];
-#endif    
+  int16x4x2_t produ;
+  produ.val[0] = real;
+  produ.val[1] = imag;
+  return produ;
 }
-#ifdef NEWOPTIM
-static inline __attribute__((always_inline)) int16x4x2_t cmac_prec4(int16x4x2_t y, int16x8_t x, int16x4_t wr, int16x4_t wi) {
+
+static inline __attribute__((always_inline)) int16x4x2_t cmac_prec4(int16x4x2_t y, int16x4x2_t x, int16x4_t wr, int16x4_t wi)
+{
   const int16x4x2_t produ = cmac0_prec4(x, wr, wi);
   // saturating add to match the x86 path (adds_epi16); plain vadd_s16 wraps on overflow
   y.val[0] = vqadd_s16(y.val[0], produ.val[0]);
   y.val[1] = vqadd_s16(y.val[1], produ.val[1]);
   return y;
 }
-#else
-static inline __attribute__((always_inline)) int16x8_t cmac_prec128(int16x8_t y, int16x8_t x, int16x8_t wr, int16x8_t wi) {
-  int16x8_t produ = cmac0_prec128(x, wr, wi);
-  // saturating add to match the x86 path (adds_epi16); plain vaddq_s16 wraps on overflow
-  return vqaddq_s16(y, produ);
-}
-#endif
 
 #else // __x86 128-bit
 static inline __attribute__((always_inline)) simde__m128i cmac0_prec128(simde__m128i x, simde__m128i w_c, simde__m128i w_s)
@@ -1031,11 +1001,11 @@ static inline __attribute__((always_inline)) __m128i cmac_prec128(__m128i y, __m
   const Type w_c##Rank = Instruct(c16toI32(c16conj(weights[Rank][ant]))); \
   const Type w_s##Rank = Instruct(c16toI32(c16swap(weights[Rank][ant]))); \
   const Type *in##Rank = (Type *)(txdataF_res_mapped[Rank] + sc_offset + (out-beginning));
-#if defined(NEWOPTIM) && defined(__aarch64__)
-#define load_consts_arm(Rank) \
-  const int16x4_t wr##Rank = vdup_n_s16(weights[Rank][ant].r); \
-  const int16x4_t wi##Rank = vdup_n_s16(weights[Rank][ant].i); \
-  const int16x8_t *in##Rank = (const int16x8_t *)(txdataF_res_mapped[Rank] + sc_offset + (out - beginning));
+#ifdef __aarch64__
+#define load_consts_arm(Rank)                                                                          \
+  const int16x4_t wr##Rank = vdup_n_s16(weights[Rank][ant].r);                                         \
+  const int16x4_t wi##Rank = vdup_n_s16(weights[Rank][ant].i);                                         \
+  const int16_t *in##Rank = (const int16_t *)(txdataF_res_mapped[Rank] + sc_offset + (out - beginning));
 #endif
 
 /* Fast path for the 2 antenna-port / 2-layer precoder.
@@ -1119,35 +1089,44 @@ void nr_layer_precoder_2x4_simd(const int symSz,
 {
 #ifdef __aarch64__
   const c16_t w0 = weights[0][p], w1 = weights[1][p];
-  /* same operand form the generic kernel feeds cmac0_prec128(): real parts then imag */
-  const int16x8_t w0r = vdupq_n_s16(w0.r), w0i = vdupq_n_s16(w0.i);
-  const int16x8_t w1r = vdupq_n_s16(w1.r), w1i = vdupq_n_s16(w1.i);
+  const int16x4_t w0r = vdup_n_s16(w0.r), w0i = vdup_n_s16(w0.i);
+  const int16x4_t w1r = vdup_n_s16(w1.r), w1i = vdup_n_s16(w1.i);
 
-  const int16x8_t *in0 = (const int16x8_t *)(txdataF_res_mapped[0] + sc_offset);
-  const int16x8_t *in1 = (const int16x8_t *)(txdataF_res_mapped[1] + sc_offset);
-  c16_t *o_lo = out_lo + sc_offset;
-  c16_t *o_hi = out_hi + sc_offset;
+  /* deinterleaved throughout: ld2/st2 split and merge for free, each product is computed
+     once (see cmac0_prec4()), and the phi rotation below is a register naming, not work */
+  const int16_t *in0 = (const int16_t *)(txdataF_res_mapped[0] + sc_offset);
+  const int16_t *in1 = (const int16_t *)(txdataF_res_mapped[1] + sc_offset);
+  int16_t *o_lo = (int16_t *)(out_lo + sc_offset);
+  int16_t *o_hi = (int16_t *)(out_hi + sc_offset);
 
   int done = 0;
   for (; done + 4 <= re_cnt; done += 4) {
-    const int16x8_t x0 = vld1q_s16((const int16_t *)in0++);
-    const int16x8_t x1 = vld1q_s16((const int16_t *)in1++);
-    const int16x8_t a = cmac0_prec128(x0, w0r, w0i);
-    const int16x8_t b = cmac0_prec128(x1, w1r, w1i);
-    /* saturating, to match the generic path's vqaddq_s16 accumulation */
-    const int16x8_t sum = vqaddq_s16(a, b);
-    int16x8_t dif = vqsubq_s16(a, b);
+    const int16x4x2_t a = cmac0_prec4(vld2_s16(in0), w0r, w0i);
+    const int16x4x2_t b = cmac0_prec4(vld2_s16(in1), w1r, w1i);
+    in0 += 8;
+    in1 += 8;
+    /* saturating, to match the generic path's accumulation */
+    int16x4x2_t sum, dif;
+    sum.val[0] = vqadd_s16(a.val[0], b.val[0]);
+    sum.val[1] = vqadd_s16(a.val[1], b.val[1]);
+    const int16x4_t dr = vqsub_s16(a.val[0], b.val[0]);
+    const int16x4_t di = vqsub_s16(a.val[1], b.val[1]);
     if (phi_swap) { /* multiply by +/-j: (r,i) -> (-i, r) or (i, -r) */
-      const int16x8_t sw = vrev32q_s16(dif);
-      const int16x8_t neg = vnegq_s16(sw);
-      /* +j: real = -i, imag = +r  => take neg on even lanes, sw on odd lanes */
-      const uint16x8_t even = {0xffff, 0, 0xffff, 0, 0xffff, 0, 0xffff, 0};
-      dif = phi_neg ? vbslq_s16(even, sw, neg) : vbslq_s16(even, neg, sw);
+      if (phi_neg) {
+        dif.val[0] = di;
+        dif.val[1] = vqneg_s16(dr);
+      } else {
+        dif.val[0] = vqneg_s16(di);
+        dif.val[1] = dr;
+      }
     } else if (phi_neg) {
-      dif = vnegq_s16(dif);
+      dif.val[0] = vqneg_s16(dr);
+      dif.val[1] = vqneg_s16(di);
+    } else {
+      dif = (int16x4x2_t){{dr, di}};
     }
-    vst1q_s16((int16_t *)(o_lo + done), sum);
-    vst1q_s16((int16_t *)(o_hi + done), dif);
+    vst2_s16(o_lo + 2 * done, sum);
+    vst2_s16(o_hi + 2 * done, dif);
   }
   /* re_cnt is always a multiple of NR_NB_SC_PER_RB = 12, so the SIMD loop is exact */
   DevAssert(done == re_cnt);
@@ -1169,11 +1148,9 @@ void nr_layer_precoder_2x4_simd(const int symSz,
  * Everything here is kept in DEINTERLEAVED (separate real / imaginary) form, which is what
  * makes the saving real rather than nominal:
  *
- *  - the products are 4-lane (D form).  cmac0_prec128() works on an int16x8_t of 4 complex
- *    REs, but without ARMv8.1 QRDMX it forms xr = vuzp1q_s16(x, x), whose two halves are
- *    IDENTICAL, and then multiplies both -- so on this core (A72, ARMv8.0) it computes
- *    every product twice.  ld2/st2 deinterleave and re-interleave for free in the load and
- *    store, so 4 multiply-longs per layer suffice instead of 8.
+ *  - the products are 4-lane (D form), through the shared cmac0_prec4(): ld2/st2
+ *    deinterleave and re-interleave for free in the load and the store, and each lane is
+ *    multiplied once (the interleaved form computes every product twice on ARMv8.0).
  *  - the co-phasing costs nothing.  phi_l takes only 4 values, so with the layers grouped
  *    by phi the second polarisation is
  *      out[p+2] = P + j.Q,  P = sum_{phi=+1} t - sum_{phi=-1} t,  Q = sum_{phi=+j} t - sum_{phi=-j} t
@@ -1229,14 +1206,9 @@ void nr_layer_precoder_Nx4_simd(const int n_layers,
   /* one sorted layer: the group tests are on constants and loop-invariant bounds */
 #define NX4_LAYER(I)                                                            \
   do {                                                                          \
-    const int16x4x2_t x = vld2_s16(in##I);                                      \
+    const int16x4x2_t t = cmac0_prec4(vld2_s16(in##I), wr[I], wi[I]);           \
     in##I += 8;                                                                 \
-    int32x4_t re = vmull_s16(x.val[0], wr[I]);                                  \
-    re = vmlsl_s16(re, x.val[1], wi[I]);                                        \
-    int32x4_t im = vmull_s16(x.val[0], wi[I]);                                  \
-    im = vmlal_s16(im, x.val[1], wr[I]);                                        \
-    const int16x4_t tr = vqrshrn_n_s32(re, 15);                                 \
-    const int16x4_t ti = vqrshrn_n_s32(im, 15);                                 \
+    const int16x4_t tr = t.val[0], ti = t.val[1];                               \
     lo_r = vqadd_s16(lo_r, tr);                                                 \
     lo_i = vqadd_s16(lo_i, ti);                                                 \
     if ((I) < e0) {                                                             \
@@ -1553,104 +1525,58 @@ void nr_layer_precoder_simd(const int n_layers,
   }
 #endif
 #ifdef __aarch64__
-#ifdef NEWOPTIM
+  /* Deinterleaved: ld2 splits the c16_t stream into reals and imaginaries in the load,
+     st2 merges them back in the store, and cmac0_prec4() then multiplies each lane once.
+     Doing it on interleaved vectors computes every product twice on ARMv8.0 (see cmac0_prec4). */
   load_consts_arm(0);
-#else
-  load_consts(int16x8_t, vdupq_n_s16, 0);  
-#endif
   if (n_layers == 1) {
     for (; out < end; out += sizeof(int16x8_t) / sizeof(*out)) {
-#ifdef NEWOPTIM
-      const int16x4x2_t y = cmac0_prec4(vld1q_s16((const int16_t *)in0++), wr0, wi0);
-      vst2_s16((int16_t *)out, y);
-#else
-      const int16x8_t x0 = vld1q_s16((const int16_t *)in0++);
-      // Accumulate the product
-      int16x8_t y = cmac0_prec128(x0, w_c0, w_s0);
+      const int16x4x2_t y = cmac0_prec4(vld2_s16(in0), wr0, wi0);
+      in0 += 8;
       // Store the result to txdataF
-      *(int16x8_t *)out = y;
-#endif
+      vst2_s16((int16_t *)out, y);
     }
   }
   if (n_layers == 2) {
-#ifdef NEWOPTIM
     load_consts_arm(1);
-#else
-    load_consts(int16x8_t, vdupq_n_s16, 1);  
-#endif
     for (; out < end; out += sizeof(int16x8_t) / sizeof(*out)) {
-#ifdef NEWOPTIM
-      int16x4x2_t y = cmac0_prec4(vld1q_s16((const int16_t *)in0++), wr0, wi0);
-      y = cmac_prec4(y, vld1q_s16((const int16_t *)in1++), wr1, wi1);
-      vst2_s16((int16_t *)out, y);
-#else
-      const int16x8_t x0 = vld1q_s16((const int16_t *)in0++);
-      const int16x8_t x1 = vld1q_s16((const int16_t *)in1++);
-      // Accumulate the product
-      int16x8_t y = cmac0_prec128(x0, w_c0, w_s0);
-      y = cmac_prec128(y, x1, w_c1, w_s1);
+      int16x4x2_t y = cmac0_prec4(vld2_s16(in0), wr0, wi0);
+      in0 += 8;
+      y = cmac_prec4(y, vld2_s16(in1), wr1, wi1);
+      in1 += 8;
       // Store the result to txdataF
-      *(int16x8_t *)out = y;
-#endif
+      vst2_s16((int16_t *)out, y);
     }
   }
   if (n_layers == 3) {
-#ifdef NEWOPTIM
     load_consts_arm(1);
     load_consts_arm(2);
-#else
-    load_consts(int16x8_t, vdupq_n_s16, 1);
-    load_consts(int16x8_t, vdupq_n_s16, 2);
-#endif
     for (; out < end; out += sizeof(int16x8_t) / sizeof(*out)) {
-#ifdef NEWOPTIM
-      int16x4x2_t y = cmac0_prec4(vld1q_s16((const int16_t *)in0++), wr0, wi0);
-      y = cmac_prec4(y, vld1q_s16((const int16_t *)in1++), wr1, wi1);
-      y = cmac_prec4(y, vld1q_s16((const int16_t *)in2++), wr2, wi2);
-      vst2_s16((int16_t *)out, y);
-#else
-      const int16x8_t x0 = vld1q_s16((const int16_t *)in0++);
-      const int16x8_t x1 = vld1q_s16((const int16_t *)in1++);
-      const int16x8_t x2 = vld1q_s16((const int16_t *)in2++);
-      // Accumulate the product
-      int16x8_t y = cmac0_prec128(x0, w_c0, w_s0);
-      y = cmac_prec128(y, x1, w_c1, w_s1);
-      y = cmac_prec128(y, x2, w_c2, w_s2);
+      int16x4x2_t y = cmac0_prec4(vld2_s16(in0), wr0, wi0);
+      in0 += 8;
+      y = cmac_prec4(y, vld2_s16(in1), wr1, wi1);
+      in1 += 8;
+      y = cmac_prec4(y, vld2_s16(in2), wr2, wi2);
+      in2 += 8;
       // Store the result to txdataF
-      *(int16x8_t *)out = y;
-#endif
+      vst2_s16((int16_t *)out, y);
     }
   }
   if (n_layers == 4) {
-#ifdef NEWOPTIM
     load_consts_arm(1);
     load_consts_arm(2);
     load_consts_arm(3);
-#else
-    load_consts(int16x8_t, vdupq_n_s16, 1);
-    load_consts(int16x8_t, vdupq_n_s16, 2);
-    load_consts(int16x8_t, vdupq_n_s16, 3);
-#endif
     for (; out < end; out += sizeof(int16x8_t) / sizeof(*out)) {
-#ifdef NEWOPTIM
-      int16x4x2_t y = cmac0_prec4(vld1q_s16((const int16_t *)in0++), wr0, wi0);
-      y = cmac_prec4(y, vld1q_s16((const int16_t *)in1++), wr1, wi1);
-      y = cmac_prec4(y, vld1q_s16((const int16_t *)in2++), wr2, wi2);
-      y = cmac_prec4(y, vld1q_s16((const int16_t *)in3++), wr3, wi3);
-      vst2_s16((int16_t *)out, y);
-#else
-      const int16x8_t x0 = vld1q_s16((const int16_t *)in0++);
-      const int16x8_t x1 = vld1q_s16((const int16_t *)in1++);
-      const int16x8_t x2 = vld1q_s16((const int16_t *)in2++);
-      const int16x8_t x3 = vld1q_s16((const int16_t *)in3++);
-      // Accumulate the product
-      int16x8_t y = cmac0_prec128(x0, w_c0, w_s0);
-      y = cmac_prec128(y, x1, w_c1, w_s1);
-      y = cmac_prec128(y, x2, w_c2, w_s2);
-      y = cmac_prec128(y, x3, w_c3, w_s3);
+      int16x4x2_t y = cmac0_prec4(vld2_s16(in0), wr0, wi0);
+      in0 += 8;
+      y = cmac_prec4(y, vld2_s16(in1), wr1, wi1);
+      in1 += 8;
+      y = cmac_prec4(y, vld2_s16(in2), wr2, wi2);
+      in2 += 8;
+      y = cmac_prec4(y, vld2_s16(in3), wr3, wi3);
+      in3 += 8;
       // Store the result to txdataF
-      *(int16x8_t *)out = y;      
-#endif
+      vst2_s16((int16_t *)out, y);
     }
   }
 #else

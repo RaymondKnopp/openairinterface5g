@@ -994,7 +994,7 @@ static void nr_pdsch_symbol_processing(void *arg)
      * polarisations.  Decided once per symbol, never partway through: the scheduler sets
      * prg_size = rbSize, so the whole allocation carries a single PMI, and if that PMI is
      * not of the expected cross-polar form we simply use the generic kernel below. */
-    if (rel15->nrOfLayers == 2 && num_log_ports == 4 && nr_pdsch_2x4_usable(gNB, rel15)) {
+    if (rel15->nrOfLayers == 2 && num_log_ports == 4 && !getenv("NR_PDSCH_NO_2X4") && nr_pdsch_2x4_usable(gNB, rel15)) {
       int pos = 0;
       int block_start, block_end;
       while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
