@@ -725,7 +725,13 @@ static inline bool nr_pdsch_Nx4_usable(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_
 }
 
 /* Fast path of do_txdataF() for r layers (2..4) onto 4 antenna ports: fills each port
-   pair (p, p+2) in one pass via nr_layer_precoder_Nx4_simd(), sharing the r layer MACs. */
+   pair (p, p+2) in one pass via nr_layer_precoder_Nx4_simd(), sharing the r layer MACs.
+
+   Unlike do_txdataF(), which walks the allocation in runs of at most 4 RBs, this covers
+   each maximal run of constant PMI in ONE call. The kernel has a real prologue -- classify
+   phi per layer, splat the weights, group the layers -- so calling it 68 times per symbol
+   for a single-PMI 273 RB allocation costs more than the MACs it saves; one call per run
+   amortises it away and gives the SIMD loop a long, well-pipelined run. */
 static inline bool do_txdataF_Nx4(c16_t **txdataF,
                                   int symbol_sz,
                                   c16_t txdataF_precoding[][symbol_sz],
@@ -738,15 +744,18 @@ static inline bool do_txdataF_Nx4(c16_t **txdataF,
 {
   const int r = rel15->nrOfLayers;
   int rb = 0;
-  uint16_t subCarrier = get_block_start_sc(rb_start, rel15->BWPStart, symbol_sz);
+  uint32_t subCarrier = get_block_start_sc(rb_start, rel15->BWPStart, symbol_sz);
   const nfapi_nr_tx_precoding_and_beamforming_t *pb = &rel15->precodingAndBeamforming;
   while (rb < rb_size) {
     const int pmi = (pb->prg_size > 0) ? (pb->prgs_list[(int)rb / pb->prg_size].pm_idx) : 0;
-    const int pmi2 = (rb < (rb_size - 1) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 1) / pb->prg_size].pm_idx) : -1;
-    const int pmi3 = (rb < (rb_size - 2) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 2) / pb->prg_size].pm_idx) : -1;
-    const int pmi4 = (rb < (rb_size - 3) && pb->prg_size > 0) ? (pb->prgs_list[(int)(rb + 3) / pb->prg_size].pm_idx) : -1;
-    int rb_step0 = pmi == pmi2 ? 2 : 1;
-    const int rb_step = rb_step0 == 2 && pmi3 == pmi && pmi4 == pmi ? 4 : rb_step0;
+    /* maximal run of RBs sharing this PMI */
+    int rb_step = 1;
+    if (pb->prg_size > 0) {
+      while (rb + rb_step < rb_size && pb->prgs_list[(int)(rb + rb_step) / pb->prg_size].pm_idx == pmi)
+        rb_step++;
+    } else {
+      rb_step = rb_size - rb;
+    }
     const int re_cnt = NR_NB_SC_PER_RB * rb_step;
     if (pmi == 0) {
       for (int a = 0; a < 4; a++) {
