@@ -42,6 +42,9 @@ typedef struct {
   time_stats_t *tprep;
   time_stats_t *tparity;
   time_stats_t *toutput;
+  /// measures the pre-rotated input replication inside the parity check part; left
+  /// NULL by the DU path, set by ldpctest, and guarded at every use
+  time_stats_t *tinput_memcpy;
   /// Size in bits of the code segments
   uint32_t K;
   /// Number of lifting sizes to fit the payload
