@@ -284,7 +284,12 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                      time_stats_t *pusch_ch_comp,
                      time_stats_t *ulsch_llr,
                      int16_t *llr_cw,
-                     const int16_t *scramble)
+                     const int16_t *scramble,
+                     c16_t *maga_slot,
+                     c16_t *magb_slot,
+                     c16_t *magc_slot,
+                     c16_t *rho_slot,
+                     bool build_ch_terms)
 {
   int nb_layer = rel15_ul->nrOfLayers;
   int nb_rx_ant = rel15_ul->param_v4.numSpatialStreamIndices;
@@ -332,10 +337,21 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
 #endif
     }
   }
-  c16_t rho[nb_layer][nb_layer][buffer_length] __attribute__((aligned(64)));
-  c16_t rxF_ch_maga[nb_layer][buffer_length] __attribute__((aligned(64)));
-  c16_t rxF_ch_magb[nb_layer][buffer_length] __attribute__((aligned(64)));
-  c16_t rxF_ch_magc[nb_layer][buffer_length] __attribute__((aligned(64)));
+  /* chest_time == 1: ch_mag[abc] and rho depend only on chFext, which is extracted at one fixed
+     DMRS symbol for the whole slot, so they are slot-invariant. The caller then hands us
+     slot-lifetime buffers and marks the one symbol that builds them; every other symbol
+     reads them and does only the MRC. With chest_time == 0 the pointers are NULL and these
+     stay per-symbol scratch, rebuilt every symbol as before. */
+  c16_t rho_stack[nb_layer][nb_layer][buffer_length] __attribute__((aligned(64)));
+  c16_t maga_stack[nb_layer][buffer_length] __attribute__((aligned(64)));
+  c16_t magb_stack[nb_layer][buffer_length] __attribute__((aligned(64)));
+  c16_t magc_stack[nb_layer][buffer_length] __attribute__((aligned(64)));
+  const bool hoist = (rho_slot != NULL);
+  c16_t (*rho)[nb_layer][buffer_length] = hoist ? (c16_t (*)[nb_layer][buffer_length])rho_slot : rho_stack;
+  c16_t (*rxF_ch_maga)[buffer_length] = hoist ? (c16_t (*)[buffer_length])maga_slot : maga_stack;
+  c16_t (*rxF_ch_magb)[buffer_length] = hoist ? (c16_t (*)[buffer_length])magb_slot : magb_stack;
+  c16_t (*rxF_ch_magc)[buffer_length] = hoist ? (c16_t (*)[buffer_length])magc_slot : magc_stack;
+  const bool compute_ch_terms = !hoist || build_ch_terms;
 
   // Fused single-layer inner RX (OAI_FUSE): skip the standalone MRC compensation; nr_inner_rx_1layer
   // in the LLR stage below does MRC+LLR tiled in L1 (no rxComp/mag round-trip). Same shared kernel as
@@ -368,14 +384,10 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
   // memsets were previously unconditional and showed up as the residual ~9 µs "channel compensation"
   // time in fused runs; PTRS and transform-precoding, which read rxdataF_comp, are excluded from the
   // fuse gates above so they always fall in this branch.)
-  /* PROBE (temporary): OAI_SKIP_CHTERMS=1 skips the channel-only terms for every symbol to
-     size the chest_time==1 hoist. Output is WRONG with it set -- mag/rho are never built. */
-  static int skip_chterms = -1;
-  if (skip_chterms < 0) { const char *e = getenv("OAI_SKIP_CHTERMS"); skip_chterms = e ? atoi(e) : 0; }
-  const bool ch_terms_on = !skip_chterms;
   start_meas(pusch_ch_comp);
   if (!fuse_skip_comp) {
-    memset(rho, 0, sizeof(rho));
+    if (compute_ch_terms)
+      memset(rho, 0, sizeof(c16_t) * nb_layer * nb_layer * buffer_length);
     for (int i = 0; i < nb_layer; i++)
       memset(&pusch_vars->rxdataF_comp[i][symbol * buffer_length], 0, sizeof(int32_t) * buffer_length);
     nr_channel_compensation(buffer_length,
@@ -390,7 +402,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                             pusch_vars->rxdataF_comp,
                             (nb_layer > 1) ? rho : NULL,
                             cpe,
-                            /*compute_ch_terms=*/ch_terms_on,
+                            /*compute_ch_terms=*/compute_ch_terms,
                             rel15_ul->qam_mod_order,
                             symbol,
                             output_shift);
@@ -473,6 +485,16 @@ typedef struct puschSymbolProc_s {
   time_stats_t pusch_extr;
   time_stats_t pusch_ch_comp;
   time_stats_t ulsch_llr;
+  /* chest_time == 1 hoist: slot-lifetime channel-only terms shared by every symbol of the
+     slot. NULL => rebuild them per symbol. compute_terms_task marks the one task that
+     builds them; it is run inline before the others are dispatched, so the readers cannot
+     race it. */
+  c16_t *maga_slot;
+  c16_t *magb_slot;
+  c16_t *magc_slot;
+  c16_t *rho_slot;
+  bool compute_terms_task;
+  bool *terms_ready; // set by the builder before any reader is dispatched
   int beam_nb;
   // TODO: Remove assumption of contiguous ports after DAS is properly handled in beamforming
   uint16_t ant_port_start;
@@ -496,6 +518,12 @@ static void nr_pusch_symbol_processing(void *arg)
   const nfapi_nr_pusch_pdu_t *rel15_ul = rdata->rel15_ul;
   int slot = rdata->slot;
   NR_gNB_PUSCH *pusch_vars = rdata->pusch_vars;
+  /* Only the designated task builds the slot-invariant terms, and only on a *uniform* data
+     symbol. chest_time == 1 makes the channel estimate slot-constant, but extraction does
+     not produce the same RE set for every symbol: DMRS-bearing symbols and PTRS symbols
+     drop REs, so their chFext -- and therefore their ch_mag[abc] and rho -- have a
+     different layout. Those symbols keep their own per-symbol scratch. */
+  bool terms_built = false;
   for (int symbol = rdata->startSymbol; symbol < rdata->startSymbol + rdata->numSymbols; symbol++) {
     if (pusch_vars->ul_valid_re_per_slot[symbol] == 0)
       continue;
@@ -524,6 +552,12 @@ static void nr_pusch_symbol_processing(void *arg)
       scramble = &rdata->scrambling_sequences[0][sym_bit_off];
     }
 
+    const bool uniform_sym = !((rel15_ul->ul_dmrs_symb_pos >> symbol) & 0x01)
+                             && !IS_BIT_SET(rdata->ptrs_symb_pos, symbol);
+    const bool build_terms = rdata->rho_slot && uniform_sym && rdata->compute_terms_task && !terms_built;
+    // readers may only share the slot terms once the builder has actually filled them
+    const bool use_slot_terms = rdata->rho_slot && uniform_sym && (build_terms || *rdata->terms_ready);
+
     const bool descr_fused = inner_rx(gNB,
              slot,
              frame_parms,
@@ -543,7 +577,16 @@ static void nr_pusch_symbol_processing(void *arg)
              &rdata->pusch_ch_comp,
              &rdata->ulsch_llr,
              llr_cw,
-             scramble);
+             scramble,
+             use_slot_terms ? rdata->maga_slot : NULL,
+             use_slot_terms ? rdata->magb_slot : NULL,
+             use_slot_terms ? rdata->magc_slot : NULL,
+             use_slot_terms ? rdata->rho_slot : NULL,
+             /*build_ch_terms=*/build_terms);
+    if (build_terms) {
+      terms_built = true;
+      *rdata->terms_ready = true;
+    }
     if (descr_fused)
       continue; // layer demap + descramble already folded into the store
 
@@ -993,6 +1036,19 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   task_ans_t ans;
   init_task_ans(&ans, loop_iter);
 
+  /* chest_time == 1: chFext comes from one fixed DMRS symbol for the whole slot, so
+     ch_mag[abc] and rho are slot-invariant. Build them once, in the first task, and let every other
+     symbol read them instead of rebuilding 6 of the 10 products per RE. Sized as inner_rx
+     sizes its own scratch. */
+  const bool hoist_terms = (gNB->chest_time == 1);
+  const int term_len = ceil_mod(rel15_ul_ref->rb_size * NR_NB_SC_PER_RB, 16);
+  c16_t maga_slot[total_layers][term_len] __attribute__((aligned(64)));
+  c16_t magb_slot[total_layers][term_len] __attribute__((aligned(64)));
+  c16_t magc_slot[total_layers][term_len] __attribute__((aligned(64)));
+  c16_t rho_slot[total_layers][total_layers][term_len] __attribute__((aligned(64)));
+  bool terms_ready = false;
+  bool builder_assigned = false;
+
   int sz_arr = 0;
   for (uint8_t task_index = 0; task_index < loop_iter; task_index++) {
     int symbol = task_index * numSymbols + rel15_ul_ref->start_symbol_index;
@@ -1042,8 +1098,31 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       rdata->scrambling_sequences = scrambling_sequences_arr;
       rdata->layer_offsets = layer_offset;
       rdata->layers_attenuation = total_layers ? log2_approx(max_ch >> 11) : 0;
+      rdata->maga_slot = hoist_terms ? &maga_slot[0][0] : NULL;
+      rdata->magb_slot = hoist_terms ? &magb_slot[0][0] : NULL;
+      rdata->magc_slot = hoist_terms ? &magc_slot[0][0] : NULL;
+      rdata->rho_slot = hoist_terms ? &rho_slot[0][0][0] : NULL;
+      /* The builder must be the first task that actually owns a *uniform* data symbol --
+         with one symbol per task the first task is usually the DMRS symbol, which extracts
+         a different RE set and so cannot build the shared terms. */
+      bool task_has_uniform = false;
+      if (hoist_terms && !builder_assigned) {
+        for (int s2 = 0; s2 < rdata->numSymbols; s2++) {
+          const int sym2 = rdata->startSymbol + s2;
+          if (!((rel15_ul_ref->ul_dmrs_symb_pos >> sym2) & 0x01) && !IS_BIT_SET(ptrs_symb_pos, sym2)) {
+            task_has_uniform = true;
+            break;
+          }
+        }
+      }
+      rdata->compute_terms_task = task_has_uniform;
+      if (task_has_uniform)
+        builder_assigned = true;
+      rdata->terms_ready = &terms_ready;
 
-      if (rel15_ul_ref->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS) {
+      if ((rel15_ul_ref->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS)
+          || (hoist_terms && rdata->compute_terms_task)) {
+        // run the terms-building task here: the readers dispatched below depend on it
         nr_pusch_symbol_processing(rdata);
       } else {
         task_t t = {.func = &nr_pusch_symbol_processing, .args = rdata};
