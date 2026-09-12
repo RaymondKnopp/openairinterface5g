@@ -1091,7 +1091,9 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     const uint8_t qamModOrder = dlsch->cw_info.qamModOrder;
     const int this_re = dl_valid_re[symbol];
     const int this_llr_size = (this_re * qamModOrder) > 0 ? (this_re * qamModOrder) : 1;
-    __attribute__((aligned(32))) int16_t layer_llr[nl][this_llr_size];
+    /* 64-byte aligned for the AVX-512 stores (upstream 5bbd0e9f3); their w33-based
+       per-symbol rework of this buffer predates that fix */
+    __attribute__((aligned(64))) int16_t layer_llr[nl][this_llr_size];
     // Codeword bit offset of this symbol's first bit (== the layer-demapped position); computed up
     // front so the fused kernels can write the demapped (+ descrambled) codeword straight into llr.
     int llr_bit_offset = 0;
