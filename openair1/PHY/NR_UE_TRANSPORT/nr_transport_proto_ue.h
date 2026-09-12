@@ -258,7 +258,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 pdsch_scope_req_t *scope_req,
                 c16_t rho_dl[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 const int16_t *scramble,
-                uint16_t is_ptrs);
+                uint16_t is_ptrs,
+                bool *ch_terms_valid);
 
 int32_t generate_nr_prach(PHY_VARS_NR_UE *ue, uint8_t gNB_id, int frame, uint8_t slot, int16_t tx_amp, c16_t **txData);
 void apply_ntn_config(PHY_VARS_NR_UE *UE,

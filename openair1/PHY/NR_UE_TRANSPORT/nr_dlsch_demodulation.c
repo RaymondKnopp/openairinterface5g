@@ -754,7 +754,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 pdsch_scope_req_t *scope_req,
                 c16_t rho_dl[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 const int16_t *scramble,
-                uint16_t is_ptrs)
+                uint16_t is_ptrs,
+                bool *ch_terms_valid)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int nl = dlsch->cw_info.Nl;
@@ -847,6 +848,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                        dlsch->rnti,
                        is_ptrs);
   stop_meas_nr_ue_phy(ue, DLSCH_EXTRACT_RBS_STATS);
+
+  // chest_time == 1 hoist: the estimate is taken from the first DMRS symbol for every symbol
+  // (see validDmrsEst above), so on symbols that extract the *same* RE set the channel-derived
+  // terms (ch_mag A/B/C, rho) are identical and need to be built once per slot. Only plain data
+  // symbols qualify: DMRS, CSI-RS-overlapped and PTRS symbols extract a different RE set, so they
+  // rebuild and invalidate the cache. (chest_time == 1 already forbids PTRS upstream.)
+  const bool uniform_sym = (ue->chest_time == 1) && (pilots == 0) && (csi_res_bitmap == 0) && !is_ptrs;
+  const bool reuse_ch_terms = uniform_sym && ch_terms_valid && *ch_terms_valid;
+  const bool build_ch_terms = !reuse_ch_terms;
   if (scope_req->copy_chanest_to_scope) {
     size_t size = sizeof(c16_t) * nb_rb_pdsch * NR_NB_SC_PER_RB;
     int copy_index = symbol - dlsch_config->start_symbol;
@@ -1002,11 +1012,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                             p_rxComp,
                             need_rho ? (c16_t(*)[nl][pdsch_buf_size_max])rho_dl : NULL,
                             ptrs_phase,
-                            /*compute_ch_terms=*/true,
+                            /*compute_ch_terms=*/build_ch_terms,
                             dlsch->cw_info.qamModOrder,
                             0, // symbol already baked into p_rxComp
                             *log2_maxh);
   stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_COMPENSATION_STATS);
+  // The terms in dl_ch_mag*/rho_dl now belong to this symbol's RE set: reusable by later symbols
+  // only if that set is the uniform (data-only) one.
+  if (!fuse_skip_comp && ch_terms_valid)
+    *ch_terms_valid = uniform_sym;
   if (meas_enabled) {
     LOG_D(PHY,
           "[AbsSFN %u.%d] Slot%d Symbol %d log2_maxh %d Channel Comp  %5.2f \n",
@@ -1129,8 +1143,10 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                     rxComp, mag_a, mag_b, mag_c,
                     (nl == 2) ? rho_dl[1] : NULL, (nl == 2) ? rho_dl[nl] : NULL,
                     *log2_maxh, fuse_mode, do_ml, ml256, layer_scratch, seq_sym, llr_cw,
-                    /*terms_slot=*/false, /*build_terms=*/false)) {
+                    /*terms_slot=*/uniform_sym, /*build_terms=*/uniform_sym && build_ch_terms)) {
       cw_written = true; // shared dispatch wrote the demapped + descrambled codeword directly
+      if (ch_terms_valid)
+        *ch_terms_valid = uniform_sym; // fused build wrote through to dl_ch_mag*/rho_dl
     } else if (fuse_1layer) {
       // Register-fused single-layer inner RX (OAI_FUSE=2): no tile scratch / per-tile call; per-layer.
       nr_inner_rx_1layer_reg(this_re, rx_size_symbol, nbRx, rxdataF_ext, chFext[0], qamModOrder, ptrs_phase, *log2_maxh, layer_llr[0]);
