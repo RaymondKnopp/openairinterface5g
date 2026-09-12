@@ -305,6 +305,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
 
   for (int aarx = 0; aarx < nb_rx_ant; aarx++) {
     for (int aatx = 0; aatx < nb_layer; aatx++) {
+      start_meas(pusch_extr);
       nr_ulsch_extract_rbs(rxF[aarx] + soffset + symbol * frame_parms->ofdm_symbol_size,
                            (c16_t *)pusch_vars->ul_ch_estimates[aatx * nb_rx_ant + aarx],
                            rxFext[aarx],
@@ -315,6 +316,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                            frame_parms,
                            rel15_ul->rnti,
                            IS_BIT_SET(ptrs_symb_pos, symbol));
+      stop_meas(pusch_extr);
 #if T_TRACER
       // Data Recording application supports only 1 layer and 1 Tx antenna, so only record the first layer and first Tx antenna
       if (aatx == 0 && aarx == 0) {
@@ -366,6 +368,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
   // memsets were previously unconditional and showed up as the residual ~9 µs "channel compensation"
   // time in fused runs; PTRS and transform-precoding, which read rxdataF_comp, are excluded from the
   // fuse gates above so they always fall in this branch.)
+  start_meas(pusch_ch_comp);
   if (!fuse_skip_comp) {
     memset(rho, 0, sizeof(rho));
     for (int i = 0; i < nb_layer; i++)
@@ -1089,6 +1092,21 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
 #endif
 
   join_task_ans(&ans);
+
+  /* Fold the per-worker RX timers into the gNB-level counters the -P printout reads.
+     The symbol procs time into their own rdata copies so parallel tasks do not contend
+     on shared counters, which left "RX PUSCH channel compensation" and "RX PUSCH LLR"
+     reporting 0.00 once the work moved into the symbol tasks.
+     Note what each window now covers: with the fused inner RX the standalone compensation
+     is skipped, so its counter is ~0 by design and the MRC lands inside the LLR window;
+     layer demapping and unscrambling are folded into the inner-RX store and no longer
+     exist as separate stages, so those two counters stay at zero. */
+  for (int i = 0; i < sz_arr; i++) {
+    merge_meas(&gNB->pusch_extraction_stats, &arr[i].pusch_extr);
+    merge_meas(&gNB->pusch_channel_compensation_stats, &arr[i].pusch_ch_comp);
+    merge_meas(&gNB->ulsch_llr_stats, &arr[i].ulsch_llr);
+  }
+
   for (int u = 0; u < group_size; u++) {
     NR_gNB_PUSCH *pv = pusch_vars_group[u];
     // Copy unavailable resources per UE
