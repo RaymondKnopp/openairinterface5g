@@ -175,7 +175,10 @@ static void nr_ulsch_extract_rbs(c16_t *const rxF,
           idx++;
         }
       }
-      k += NR_NB_SC_PER_RB;
+      /* wrap: the DC-crossing branch above derives neg from (k + 12 - fft_size), so k must
+         stay inside the FFT. Without this it keeps growing past fft_size, neg exceeds 12 on
+         the next RB, and (NR_NB_SC_PER_RB - neg) underflows into a ~17 GB memcpy. */
+      k = (k + NR_NB_SC_PER_RB) % fft_size;
     }
   } else if (is_dmrs_symbol == 0) {
     if (start_re + nb_re_pusch <= frame_parms->ofdm_symbol_size)
@@ -258,7 +261,11 @@ static int get_nb_re_pusch (NR_DL_FRAME_PARMS *frame_parms, const nfapi_nr_pusch
     return (rel15_ul->rb_size * NR_NB_SC_PER_RB);
 }
 
-static void inner_rx(PHY_VARS_gNB *gNB,
+// Returns true iff it wrote the final layer-demapped (+ optionally descrambled) codeword LLR
+// straight into llr_cw at the store; the caller then skips the demap+unscramble pass. llr_cw is the
+// per-symbol codeword-buffer slice (or NULL to keep the raw per-layer path via llr[]); scramble is
+// the matching descrambling-sequence slice (or NULL to leave the codeword un-descrambled).
+static bool inner_rx(PHY_VARS_gNB *gNB,
                      int slot,
                      NR_DL_FRAME_PARMS *frame_parms,
                      NR_gNB_PUSCH *pusch_vars,
@@ -272,7 +279,12 @@ static void inner_rx(PHY_VARS_gNB *gNB,
                      uint16_t ptrs_symb_pos,
                      c16_t cpe,
                      c16_t *rxFext_slot,
-                     c16_t *chFext_slot)
+                     c16_t *chFext_slot,
+                     time_stats_t *pusch_extr,
+                     time_stats_t *pusch_ch_comp,
+                     time_stats_t *ulsch_llr,
+                     int16_t *llr_cw,
+                     const int16_t *scramble)
 {
   int nb_layer = rel15_ul->nrOfLayers;
   int nb_rx_ant = rel15_ul->param_v4.numSpatialStreamIndices;
@@ -323,25 +335,58 @@ static void inner_rx(PHY_VARS_gNB *gNB,
   c16_t rxF_ch_magb[nb_layer][buffer_length] __attribute__((aligned(64)));
   c16_t rxF_ch_magc[nb_layer][buffer_length] __attribute__((aligned(64)));
 
-  memset(rho, 0, sizeof(rho));
-  for (int i = 0; i < nb_layer; i++)
-    memset(&pusch_vars->rxdataF_comp[i][symbol * buffer_length], 0, sizeof(int32_t) * buffer_length);
-
-  nr_channel_compensation(buffer_length,
-                          buffer_length,
-                          nb_rx_ant,
-                          nb_layer,
-                          rxFext,
-                          chFext,
-                          rxF_ch_maga,
-                          rxF_ch_magb,
-                          rxF_ch_magc,
-                          pusch_vars->rxdataF_comp,
-                          (nb_layer > 1) ? rho : NULL,
-                          cpe,
-                          rel15_ul->qam_mod_order,
-                          symbol,
-                          output_shift);
+  // Fused single-layer inner RX (OAI_FUSE): skip the standalone MRC compensation; nr_inner_rx_1layer
+  // in the LLR stage below does MRC+LLR tiled in L1 (no rxComp/mag round-trip). Same shared kernel as
+  // the UE. CP-OFDM single-layer non-PTRS only: transform precoding's freq-eq/idft and PTRS both sit
+  // between compensation and LLR.
+  static int fuse_env = -1;
+  if (fuse_env < 0) {
+    const char *e = getenv("OAI_FUSE");
+    fuse_env = e ? atoi(e) : 0;
+  }
+  static int gnb_lbest_fuse = -1;
+  if (gnb_lbest_fuse < 0) {
+    const char *e = getenv("OAI_LBEST");
+    gnb_lbest_fuse = e ? atoi(e) : 0;
+  }
+  const bool ptrs_fuse = (rel15_ul->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS);
+  const bool fuse_1layer = fuse_env && (nb_layer == 1)
+                           && (rel15_ul->transform_precoding != transformPrecoder_enabled)
+                           && !ptrs_fuse;
+  // 2-layer near-ML path: QPSK/16QAM/64QAM, or 256QAM under the L-best gate (matches the LLR
+  // dispatch below). The 256QAM-MMSE path is not fused here.
+  const bool fuse_2layer_ml = fuse_env && (nb_layer == 2)
+                              && (rel15_ul->qam_mod_order <= 6 || (rel15_ul->qam_mod_order == 8 && gnb_lbest_fuse))
+                              && !ptrs_fuse;
+  const bool fuse_skip_comp = fuse_1layer || fuse_2layer_ml;
+  // Only the standalone-compensation path needs these buffers: nr_channel_compensation writes the
+  // valid REs (and rho accumulates across Rx antennas), while the padding REs must be pre-zeroed for
+  // the downstream LLR SIMD over-read. The fused kernels build rho in L1 tiles and write LLR
+  // RE-exactly, never touching rho / rxdataF_comp — so skip the zeroing AND the compensation. (The
+  // memsets were previously unconditional and showed up as the residual ~9 µs "channel compensation"
+  // time in fused runs; PTRS and transform-precoding, which read rxdataF_comp, are excluded from the
+  // fuse gates above so they always fall in this branch.)
+  if (!fuse_skip_comp) {
+    memset(rho, 0, sizeof(rho));
+    for (int i = 0; i < nb_layer; i++)
+      memset(&pusch_vars->rxdataF_comp[i][symbol * buffer_length], 0, sizeof(int32_t) * buffer_length);
+    nr_channel_compensation(buffer_length,
+                            buffer_length,
+                            nb_rx_ant,
+                            nb_layer,
+                            rxFext,
+                            chFext,
+                            rxF_ch_maga,
+                            rxF_ch_magb,
+                            rxF_ch_magc,
+                            pusch_vars->rxdataF_comp,
+                            (nb_layer > 1) ? rho : NULL,
+                            cpe,
+                            rel15_ul->qam_mod_order,
+                            symbol,
+                            output_shift);
+  }
+  stop_meas(pusch_ch_comp);
 
   if (nb_layer == 1 && rel15_ul->transform_precoding == transformPrecoder_enabled && rel15_ul->qam_mod_order <= 6) {
     if (rel15_ul->qam_mod_order > 2)
@@ -354,47 +399,52 @@ static void inner_rx(PHY_VARS_gNB *gNB,
                            rel15_ul->qam_mod_order);
     nr_idft((int32_t *)&pusch_vars->rxdataF_comp[0][symbol * buffer_length], pusch_vars->ul_valid_re_per_slot[symbol]);
   }
-  if (nb_layer == 2) {
-    if (rel15_ul->qam_mod_order <= 6) {
-      nr_compute_ML_llr((c16_t *)&pusch_vars->rxdataF_comp[0][symbol * buffer_length],
-                        (c16_t *)&pusch_vars->rxdataF_comp[1][symbol * buffer_length],
-                        rxF_ch_maga[0],
-                        rxF_ch_maga[1],
-                        llr[0],
-                        llr[1],
-                        rho[0][1],
-                        rho[1][0],
-                        pusch_vars->ul_valid_re_per_slot[symbol],
-                        rel15_ul->qam_mod_order);
-    }
-    else {
-      nr_mmse_2layers(pusch_vars->rxdataF_comp,
-                      buffer_length,
-                      buffer_length,
-                      nb_rx_ant,
-                      nb_layer,
-                      rxF_ch_maga,
-                      rxF_ch_magb,
-                      rxF_ch_magc,
-                      chFext,
-                      rel15_ul->rb_size,
-                      rel15_ul->qam_mod_order,
-                      pusch_vars->log2_maxh,
-                      symbol,
-                      pusch_vars->ul_valid_re_per_slot[symbol],
-                      nvar);
+  /* No post-hoc PTRS pass here any more: upstream's ptrs refactor applies the phase inside
+     the channel compensation (the cpe argument above) and drops PTRS REs during extraction
+     (the is_ptrs path), so ul_valid_re_per_slot is already correct. The old code estimated
+     the offset from MRCed rxdataF_comp, which was noted as broken for multiple ports. */
+  start_meas(ulsch_llr);
+  static int gnb_lbest = -1;
+  if (gnb_lbest < 0) { const char *e = getenv("OAI_LBEST"); gnb_lbest = e ? atoi(e) : 0; }
+  const uint32_t valid_re = pusch_vars->ul_valid_re_per_slot[symbol];
+  const int mod = rel15_ul->qam_mod_order;
+  // Per-layer pointers into the compensated buffers (used by the shared dispatch's non-fused paths).
+  c16_t *rxComp[nb_layer], *mag_a[nb_layer], *mag_b[nb_layer], *mag_c[nb_layer];
+  int16_t *layer_scratch[nb_layer];
+  for (int l = 0; l < nb_layer; l++) {
+    rxComp[l] = &pusch_vars->rxdataF_comp[l][symbol * buffer_length];
+    mag_a[l] = rxF_ch_maga[l];
+    mag_b[l] = rxF_ch_magb[l];
+    mag_c[l] = rxF_ch_magc[l];
+    layer_scratch[l] = llr[l];
+  }
+  const int fuse_mode = (fuse_1layer || fuse_2layer_ml) ? 1 : 0;
+  // Shared inner RX (comp already done above for the non-fused paths). gNB 2-layer uses ML for
+  // qam<=6 always and 256QAM under the L-best gate (do_ml=true, lbest256=gnb_lbest); the else
+  // (2-layer 256QAM without L-best) and >2 layers fall through to the caller-specific fallbacks.
+  const bool handled = nr_inner_rx(valid_re, buffer_length, nb_rx_ant, nb_layer, mod, cpe, rxFext, chFext,
+                                   rxComp, mag_a, mag_b, mag_c,
+                                   (nb_layer == 2) ? rho[0][1] : NULL,
+                                   (nb_layer == 2) ? rho[1][0] : NULL,
+                                   output_shift, fuse_mode, /*do_ml=*/true, /*lbest256=*/gnb_lbest != 0,
+                                   layer_scratch, llr_cw ? scramble : NULL, llr_cw);
+  const bool did_fused = handled && (llr_cw != NULL); // codeword written directly => skip post-pass
+  if (!handled) {
+    if (nb_layer == 2) {
+      // Fused Gram-fed 2-layer MMSE + scalar LLR (L=1), 256QAM without L-best. Writes per-layer.
+      nr_compute_MMSE_llr(pusch_vars->rxdataF_comp, buffer_length, buffer_length, nb_rx_ant, nb_layer,
+                          rxF_ch_maga, rxF_ch_magb, rxF_ch_magc, chFext, rel15_ul->rb_size, mod,
+                          pusch_vars->log2_maxh, symbol, valid_re, nvar,
+                          rho[0][0], rho[0][1], rho[1][0], rho[1][1], llr);
+    } else {
+      for (int aatx = 0; aatx < nb_layer; aatx++) // >2 layers: per-layer LLR on the MRC'd stream
+        nr_compute_llr(&pusch_vars->rxdataF_comp[aatx][symbol * buffer_length],
+                       rxF_ch_maga[aatx], rxF_ch_magb[aatx], rxF_ch_magc[aatx],
+                       llr[aatx], valid_re, symbol, mod);
     }
   }
-  if (nb_layer != 2 || rel15_ul->qam_mod_order > 6)
-    for (int aatx = 0; aatx < nb_layer; aatx++)
-           nr_compute_llr(&pusch_vars->rxdataF_comp[aatx][symbol * buffer_length],
-                     rxF_ch_maga[aatx],
-                     rxF_ch_magb[aatx],
-                     rxF_ch_magc[aatx],
-                     llr[aatx],
-                     pusch_vars->ul_valid_re_per_slot[symbol],
-                     symbol,
-                     rel15_ul->qam_mod_order);
+  stop_meas(ulsch_llr);
+  return did_fused; // true iff the shared dispatch wrote the final codeword directly into llr_cw
 }
 
 typedef struct puschSymbolProc_s {
@@ -409,6 +459,11 @@ typedef struct puschSymbolProc_s {
   uint32_t nvar;
   uint16_t ptrs_symb_pos;
   c16_t *ptrs_cpe;
+  /* per-worker timing: the symbol proc takes these by pointer rather than sharing the
+     gNB-level counters, so parallel symbol tasks do not contend on them */
+  time_stats_t pusch_extr;
+  time_stats_t pusch_ch_comp;
+  time_stats_t ulsch_llr;
   int beam_nb;
   // TODO: Remove assumption of contiguous ports after DAS is properly handled in beamforming
   uint16_t ant_port_start;
@@ -442,7 +497,25 @@ static void nr_pusch_symbol_processing(void *arg)
     for (int l = 0; l < rel15_ul->nrOfLayers; l++)
       llrss[l] = llrs[l];
 
-    inner_rx(gNB,
+    // Fused layer-demap + descramble at store: for a single-UE, non-PTRS, non-transform-precoding
+    // symbol, inner_rx can write the final layer-demapped (+ descrambled) codeword straight into the
+    // final buffer, skipping the demap+unscramble pass below. group_size==1 => pusch_vars ==
+    // pusch_vars_group[0] and pusch_vars->llr IS that UE's codeword buffer (see joint_pv). inner_rx
+    // returns whether it actually fused (only its fused kernels do); otherwise it writes per-layer
+    // into llrss and the post-pass runs (llr_cw passed but unused) -- always correct.
+    static int fuse_env2 = -1;
+    if (fuse_env2 < 0) { const char *e = getenv("OAI_FUSE"); fuse_env2 = e ? atoi(e) : 0; }
+    int16_t *llr_cw = NULL;
+    const int16_t *scramble = NULL;
+    if (fuse_env2 && rdata->group_size == 1
+        && !(rel15_ul->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS)
+        && rel15_ul->transform_precoding != transformPrecoder_enabled) {
+      const int sym_bit_off = pusch_vars->llr_offset[symbol] * rel15_ul->nrOfLayers;
+      llr_cw = &pusch_vars->llr[sym_bit_off];
+      scramble = &rdata->scrambling_sequences[0][sym_bit_off];
+    }
+
+    const bool descr_fused = inner_rx(gNB,
              slot,
              frame_parms,
              pusch_vars,
@@ -456,7 +529,14 @@ static void nr_pusch_symbol_processing(void *arg)
              rdata->ptrs_symb_pos,
              rdata->ptrs_cpe[symbol],
              rdata->rxFext_slot_mem,
-             rdata->pusch_ch_est_dmrs_interpl_slot_mem);
+             rdata->pusch_ch_est_dmrs_interpl_slot_mem,
+             &rdata->pusch_extr,
+             &rdata->pusch_ch_comp,
+             &rdata->ulsch_llr,
+             llr_cw,
+             scramble);
+    if (descr_fused)
+      continue; // layer demap + descramble already folded into the store
 
     int nb_re_pusch = pusch_vars->ul_valid_re_per_slot[symbol];
     for (int u = 0; u < rdata->group_size; u++) {
@@ -870,10 +950,22 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
     for (int aarx = 0; aarx < num_sp_streams; aarx++)
       avgs = cmax(avgs, avg[nl][aarx]);
 
-  if (total_layers == 2 && rel15_ul_ref->qam_mod_order > 6)
-    joint_pv->log2_maxh = (log2_approx(avgs) >> 1) - 3; // for MMSE
-  else if (total_layers == 2)
-    joint_pv->log2_maxh = (log2_approx(avgs) >> 1) - 2 + log2_approx(num_sp_streams >> 1);
+  if (total_layers == 2 && rel15_ul_ref->qam_mod_order > 6) {
+    // 256QAM 2-layer: the full-ML detector wants a cooler LLR scale (-2) than the
+    // linear MMSE receiver (-3); -3 saturates the ML metric and loses ~1 dB, while
+    // -2 recovers the full ML gain over MMSE (verified on TDL-A). Selected by OAI_LBEST.
+    static int ml256 = -1;
+    if (ml256 < 0) { const char *e = getenv("OAI_LBEST"); ml256 = e ? atoi(e) : 0; }
+    // ML (ml256): same mod-order correction + antenna term as the qam<=6 2-layer branch below
+    // (nr_ml_llr_maxh_off(8) + log2_approx(num_sp_streams>>1)); at nb=4 that is -3+1 = -2, matching
+    // the prior fixed -2, but it now tracks the antenna count and matches the UE. MMSE (!ml256) -3.
+    joint_pv->log2_maxh = (log2_approx(avgs) >> 1)
+        + (ml256 ? nr_ml_llr_maxh_off(rel15_ul_ref->qam_mod_order) + log2_approx(num_sp_streams >> 1) : -3);
+  } else if (total_layers == 2)
+    // 2-layer QPSK/16QAM/64QAM near-ML: mod-order-dependent LLR-hotness offset (a uniform -2 tuned
+    // for 256QAM over-heats the lower orders and loses the ML gain). Same table as the UE.
+    joint_pv->log2_maxh =
+        (log2_approx(avgs) >> 1) + nr_ml_llr_maxh_off(rel15_ul_ref->qam_mod_order) + log2_approx(num_sp_streams >> 1);
   else
     joint_pv->log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(num_sp_streams >> 1);
 
@@ -932,6 +1024,9 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       rdata->ant_port_start = ant_port_start;
       rdata->rxFext_slot_mem = rxFext_slot_mem;
       rdata->pusch_ch_est_dmrs_interpl_slot_mem = pusch_ch_est_dmrs_interpl_slot_mem;
+      reset_meas(&rdata->pusch_extr);
+      reset_meas(&rdata->pusch_ch_comp);
+      reset_meas(&rdata->ulsch_llr);
       rdata->group_size = group_size;
       rdata->rel15_ul_group = rel15_ul_group;
       rdata->pusch_vars_group = pusch_vars_group;

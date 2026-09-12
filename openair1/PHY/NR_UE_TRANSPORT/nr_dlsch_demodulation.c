@@ -529,7 +529,8 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
                           unsigned char mod_order,
                           int shift,
                           int length,
-                          uint32_t noise_var)
+                          uint32_t noise_var,
+                          c16_t rho[nl * nl][pdsch_buf_size_max])
 {
   uint32_t nb_rb_0 = (length + 11) / 12;
   c16_t determ_fin[12 * nb_rb_0] __attribute__((aligned(32)));
@@ -543,19 +544,32 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
       for (int ctx = 0; ctx < nl; ctx++)
         conjH_H_elements[aarx][rtx][ctx] = conjH_H_elements_data[aarx][rtx][ctx];
 
-  //Compute H^*H matrix elements and sub elements:(1/2^log2_maxh)*conjH_H_elements
-  for (int rtx = 0; rtx < nl; rtx++) {//row
-    for (int ctx = 0; ctx < nl; ctx++) {//column
-      for (int aarx = 0; aarx < n_rx; aarx++)  {
-        c16_t *ch0r = dl_ch_estimates_ext[rtx * n_rx + aarx];
-        c16_t *ch0c = dl_ch_estimates_ext[ctx * n_rx + aarx];
-        mult_cpx_conj_vector(ch0r,
-                            ch0c,
-                            conjH_H_elements[aarx][ctx][rtx], // sic
-                            nb_rb_0 * NR_NB_SC_PER_RB,
-                            shift);
-        if (aarx != 0)
-          nr_a_sum_b(conjH_H_elements[0][ctx][rtx], conjH_H_elements[aarx][ctx][rtx], nb_rb_0);
+  // Compute H^*H matrix elements and sub elements:(1/2^log2_maxh)*conjH_H_elements
+  if (rho) {
+    // Gram-based: rho already holds Sum_rx conj(ch_i)*ch_j >> log2_maxh (the full nl x nl Gram,
+    // diagonal included), at the same scale conjH_H uses. The chFext-based build below re-derives
+    // exactly this. conjH_H[ctx][rtx] = conj(ch_rtx)*ch_ctx = rho[rtx][ctx] (flat: rho[rtx*nl+ctx]).
+    // (Conjugate/transpose direction validated against the chFext path in dlsim.)
+    for (int rtx = 0; rtx < nl; rtx++)
+      for (int ctx = 0; ctx < nl; ctx++)
+        memcpy(conjH_H_elements[0][ctx][rtx], rho[rtx * nl + ctx], length * sizeof(c16_t));
+  } else {
+    for (int rtx = 0; rtx < nl; rtx++) { // row
+      for (int ctx = 0; ctx < nl; ctx++) { // column
+        for (int aarx = 0; aarx < n_rx; aarx++) {
+          c16_t *ch0r = dl_ch_estimates_ext[rtx * n_rx + aarx];
+          c16_t *ch0c = dl_ch_estimates_ext[ctx * n_rx + aarx];
+          /* upstream replaced nr_conjch0_mult_ch1() here: it is now static in
+             nr_compute_llr.c, and mult_cpx_conj_vector() takes the length in
+             subcarriers rather than RBs */
+          mult_cpx_conj_vector(ch0r,
+                               ch0c,
+                               conjH_H_elements[aarx][ctx][rtx], // sic
+                               nb_rb_0 * NR_NB_SC_PER_RB,
+                               shift);
+          if (aarx != 0)
+            nr_a_sum_b(conjH_H_elements[0][ctx][rtx], conjH_H_elements[aarx][ctx][rtx], nb_rb_0);
+        }
       }
     }
   }
@@ -669,27 +683,6 @@ static void nr_dlsch_mmse(uint32_t pdsch_buf_size_max,
   }
 }
 
-static void nr_dlsch_layer_demapping(const uint8_t Nl,
-                                     const uint8_t mod_order,
-                                     const int llrLayerSize,
-                                     const int16_t llr_layers[NR_SYMBOLS_PER_SLOT][Nl][llrLayerSize],
-                                     const fapi_nr_dl_config_dlsch_pdu_rel15_t *dlsch_config,
-                                     const uint32_t re_len[NR_SYMBOLS_PER_SLOT],
-                                     int16_t *llr)
-{
-  const int s0 = dlsch_config->start_symbol;
-  const int s1 = dlsch_config->number_symbols;
-  int k = 0;
-
-  for (int i = s0; i < (s0 + s1); i++) {
-    int16_t *p_layer[Nl];
-    for (int l = 0; l < Nl; l++)
-      p_layer[l] = (int16_t *)llr_layers[i][l];
-    nr_layer_demapping(Nl, mod_order, re_len[i], p_layer, llr + k);
-    k += re_len[i] * mod_order * Nl;
-  }
-}
-
 /* Computes LLRs from compensated PDSCH signal per OFDM symbol for all layers */
 static int nr_dlsch_llr(const NR_UE_DLSCH_t *dlsch,
                         const int len,
@@ -752,14 +745,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 uint32_t pdsch_buf_size_max,
                 int nbRx,
                 c16_t rxdataF_comp[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                c16_t dl_ch_mag[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                c16_t dl_ch_magb[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                c16_t dl_ch_magr[][NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                c16_t dl_ch_mag[NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                c16_t dl_ch_magb[NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                c16_t dl_ch_magr[NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t ptrs_phase,
                 uint ptrs_re_per_symbol,
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
-                c16_t rho_dl[][NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                c16_t rho_dl[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
+                const int16_t *scramble,
                 uint16_t is_ptrs)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
@@ -772,6 +766,16 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   // Controlled by ue->do_ml (set via -E flag in dlsim, or ue->do_ml in the UE struct).
   // When false (default), MMSE equalization is used for all configurations.
   bool do_ml = ue->do_ml;
+  // ANALYSIS gate (OAI_LBEST): route 2-layer 256QAM (Qm=8) to the float L-best ML kernel
+  // (nr_compute_ML_llr case 8) instead of the MMSE+single-layer fallback. Off by default.
+  static int lbest_gate = -1;
+  if (lbest_gate < 0) { const char *e = getenv("OAI_LBEST"); lbest_gate = e ? atoi(e) : 0; }
+  const bool ml256 = do_ml && lbest_gate;
+  // 3-layer detector selection mirrors the 2-layer path: MMSE is the default (fast linear,
+  // works for all modulations), and the hybrid ML detector (Schur-deflate one nuisance, keep
+  // the other discrete, 2-layer conditional-slice LLR) is opt-in via the do_ml/OAI_LBEST gate.
+  // The hybrid covers QPSK/16/64/256QAM. (4-layer: MMSE only for now; hybrid is a later effort.)
+  const bool ml3 = do_ml && lbest_gate && nl == 3;
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
   c16_t(*chFext)[nbRx][rx_size_symbol] = (void *)dl_ch_estimates_ext;
@@ -805,7 +809,12 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   uint8_t pilots = (dlsch_config->dlDmrsSymbPos >> symbol) & 1;
   uint8_t config_type = dlsch_config->dmrsConfigType;
 
-  const bool need_rho = do_ml ? (nl == 2 && dlsch_config->cw_info->qamModOrder <= 6) : false;
+  // rho = full nl x nl Gram (H^H H). Needed by the ML LLR kernels AND now by the Gram-based linear
+  // MMSE: nr_dlsch_mmse builds H^H H from rho instead of re-deriving it from the (per-symbol) channel
+  // estimates. Covers the linear-MMSE cases (nl>2 non-ml3; nl==2 non-ML) as well as the ML cases.
+  // Every multi-layer path (ML search, linear nl>2 / 2-layer MMSE, 2-layer 256QAM MMSE) now reads the
+  // Gram from rho, so retain it for all nl >= 2. Single-layer (nl==1, MRC) needs no rho.
+  const bool need_rho = (nl >= 2);
 
   //----------------------------------------------------------
   //--------------------- RBs extraction ---------------------
@@ -924,10 +933,15 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     }
     // Output shift: half channel energy (log2|h|^2/2) + MRC antenna gain.
     // Single-layer adds +1 guard bit (raw peak); multi-layer uses median so no guard needed.
+    // ML branch offset is mod-order-dependent (nr_ml_llr_maxh_off) so the near-ML LLRs don't
+    // saturate at low mod orders; OAI_ML_MAXH_OFF overrides it for the hotness sweep.
     if (nl == 1)
       *log2_maxh = (log2_approx(avgs) >> 1) + 1 + log2_approx(nbRx >> 1);
-    else
+    else if (!do_ml)
       *log2_maxh = (log2_approx(avgs) >> 1) + log2_approx(nbRx >> 1);
+    else
+      *log2_maxh = (log2_approx(avgs) >> 1) + nr_ml_llr_maxh_off(dlsch->cw_info.qamModOrder) + log2_approx(nbRx >> 1);
+
     LOG_D(PHY, "[DLSCH] AbsSubframe %d.%d log2_maxh = %d (%d)\n", frame % 1024, nr_slot_rx, *log2_maxh, avgs);
 #if T_TRACER
     T(T_UE_PHY_PDSCH_ENERGY,
@@ -955,22 +969,42 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   //----------------------------------------------------------
   //--------------------- channel compensation ---------------
   //----------------------------------------------------------
+  // Fused single-layer inner RX (OAI_FUSE): when enabled for a single-layer, non-PTRS PDSCH we
+  // skip the standalone MRC compensation here; nr_inner_rx_1layer in the LLR block below does
+  // MRC+LLR tiled in L1, so rxComp/dl_ch_mag are never materialized as full-symbol arrays.
+  // PTRS is excluded because its phase processing sits between compensation and LLR.
+  static int fuse_env = -1;
+  if (fuse_env < 0) {
+    const char *e = getenv("OAI_FUSE");
+    fuse_env = e ? atoi(e) : 0;
+  }
+  const bool ptrs_active_fuse =
+      (dlsch_harq->status == NR_ACTIVE) && (dlsch_config->pduBitmap & 0x1) && (dlsch->rnti_type == TYPE_C_RNTI_);
+  const bool fuse_1layer = fuse_env && (nl == 1) && !ptrs_active_fuse;
+  // 2-layer near-ML path (matches the block-B nr_compute_ML_llr gate): QPSK/16QAM/64QAM, or 256QAM
+  // under the L-best (ml256) gate. The 256QAM-MMSE and do_ml-off paths are not fused here.
+  const uint8_t qam_fuse = dlsch->cw_info.qamModOrder;
+  const bool fuse_2layer_ml =
+      fuse_env && (nl == 2) && do_ml && (qam_fuse <= 6 || (qam_fuse == 8 && ml256)) && !ptrs_active_fuse;
+  const bool fuse_skip_comp = fuse_1layer || fuse_2layer_ml;
+
   start_meas_nr_ue_phy(ue, DLSCH_CHANNEL_COMPENSATION_STATS);
-  nr_channel_compensation(rx_size_symbol,
-                          pdsch_buf_size_max,
-                          nbRx,
-                          nl,
-                          rxdataF_ext,
-                          chFext,
-                          dl_ch_mag[symbol],
-                          dl_ch_magb[symbol],
-                          dl_ch_magr[symbol],
-                          p_rxComp,
-                          need_rho ? (c16_t(*)[nl][pdsch_buf_size_max])rho_dl[symbol] : NULL,
-                          ptrs_phase,
-                          dlsch->cw_info.qamModOrder,
-                          0, // symbol already baked into p_rxComp
-                          *log2_maxh);
+  if (!fuse_skip_comp)
+    nr_channel_compensation(rx_size_symbol,
+                            pdsch_buf_size_max,
+                            nbRx,
+                            nl,
+                            rxdataF_ext,
+                            chFext,
+                            dl_ch_mag,
+                            dl_ch_magb,
+                            dl_ch_magr,
+                            p_rxComp,
+                            need_rho ? (c16_t(*)[nl][pdsch_buf_size_max])rho_dl : NULL,
+                            ptrs_phase,
+                            dlsch->cw_info.qamModOrder,
+                            0, // symbol already baked into p_rxComp
+                            *log2_maxh);
   stop_meas_nr_ue_phy(ue, DLSCH_CHANNEL_COMPENSATION_STATS);
   if (meas_enabled) {
     LOG_D(PHY,
@@ -1001,38 +1035,30 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   start_meas_nr_ue_phy(ue, DLSCH_MRC_MMSE_STATS);
   if (nb_re_pdsch) {
     const uint8_t qamModOrder = dlsch->cw_info.qamModOrder;
+    // A/B validation toggle: OAI_MMSE_GRAM=0 forces the legacy chFext Gram build (default 1 = Gram).
+    static int mmse_gram = -1;
+    if (mmse_gram < 0) { const char *e = getenv("OAI_MMSE_GRAM"); mmse_gram = e ? atoi(e) : 1; }
 
-    if ((nl > 2) || (nl == 2 && !do_ml)) {
+    if (nl > 2 && !ml3) {
       nr_dlsch_mmse(pdsch_buf_size_max,
-                    rx_size_symbol,
+		    rx_size_symbol,
                     nbRx,
                     nl,
                     rxdataF_comp[symbol],
-                    dl_ch_mag[symbol],
-                    dl_ch_magb[symbol],
-                    dl_ch_magr[symbol],
+                    dl_ch_mag,
+                    dl_ch_magb,
+                    dl_ch_magr,
                     dl_ch_estimates_ext,
                     qamModOrder,
                     *log2_maxh,
                     nb_re_pdsch,
-                    nvar);
-    } else if ((nl == 2) && (qamModOrder > 6) && do_ml) {
-      nr_mmse_2layers(p_rxComp,
-                      rx_size_symbol,
-                      pdsch_buf_size_max,
-                      nbRx,
-                      nl,
-                      dl_ch_mag[symbol],
-                      dl_ch_magb[symbol],
-                      dl_ch_magr[symbol],
-                      chFext,
-                      freq_alloc->num_rbs,
-                      qamModOrder,
-                      *log2_maxh,
-                      0,
-                      nb_re_pdsch,
-                      nvar);
+                    nvar,
+                    (need_rho && mmse_gram) ? rho_dl : NULL); // Gram-based build; OAI_MMSE_GRAM=0 -> legacy chFext
     }
+    // The 2-layer per-PRB MMSE that used to live here (both 256QAM-non-lbest and, now, the do_ml-off
+    // case) is fused per-RE with its LLR in block B via nr_compute_MMSE_llr, mirroring the gNB
+    // inner_rx. The channel-compensated (MRC) rxdataF_comp is left untouched for those paths here;
+    // only the nl>2 linear-MMSE path still equalizes in place above (no per-RE nl>2 MMSE yet).
   }
   stop_meas_nr_ue_phy(ue, DLSCH_MRC_MMSE_STATS);
 
@@ -1056,49 +1082,164 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     nbSymb = dlsch_config->number_symbols;
   }
 
-  /* at last symbol in a slot calculate LLR's for whole slot */
-  if (symbol == (startSymbIdx + nbSymb - 1)) {
-    /* create LLR layer buffer */
-    int max_symb_re = 0;
-    GET_ARRAY_MAX(dl_valid_re, NR_SYMBOLS_PER_SLOT, max_symb_re);
-    const int llr_per_symbol = max_symb_re * dlsch->cw_info.qamModOrder;
-    __attribute__((aligned(64))) int16_t layer_llr[NR_SYMBOLS_PER_SLOT][nl][llr_per_symbol];
-
-    // Generate LLR from PTRS compensated signal
+  /* R1 (DL inner_rx): compute this symbol's LLRs and demap them into the final llr
+     buffer right away, instead of deferring the whole slot to the last symbol. This
+     shrinks the compensation-output buffers to per-symbol lifetime and puts PDSCH in
+     the same per-symbol shape as the gNB PUSCH inner_rx (and enables symbol-level
+     threading). The llr write offset is the cumulative demapped bits of the earlier
+     symbols; dl_valid_re[] for symbols < symbol is already populated because
+     nr_rx_pdsch is called in ascending symbol order. */
+  {
     const uint8_t qamModOrder = dlsch->cw_info.qamModOrder;
+    const int this_re = dl_valid_re[symbol];
+    const int this_llr_size = (this_re * qamModOrder) > 0 ? (this_re * qamModOrder) : 1;
+    /* 64-byte aligned for the AVX-512 stores (upstream 5bbd0e9f3); their w33-based
+       per-symbol rework of this buffer predates that fix */
+    __attribute__((aligned(64))) int16_t layer_llr[nl][this_llr_size];
+    // Codeword bit offset of this symbol's first bit (== the layer-demapped position); computed up
+    // front so the fused kernels can write the demapped (+ descrambled) codeword straight into llr.
+    int llr_bit_offset = 0;
+    for (int i = startSymbIdx; i < symbol; i++)
+      llr_bit_offset += dl_valid_re[i] * qamModOrder * nl;
+    int16_t *llr_cw = llr + llr_bit_offset;
+    const int16_t *seq_sym = scramble ? scramble + llr_bit_offset : NULL;
+    bool cw_written = false; // a fused path wrote the demapped (+descrambled) codeword directly
+
     start_meas_nr_ue_phy(ue, DLSCH_LLR_STATS);
-    for (int llr_sym = startSymbIdx; llr_sym < startSymbIdx + nbSymb; llr_sym++) {
-      if (nl == 2 && qamModOrder <= 6 && do_ml) {
-        // 2-layer QPSK/16QAM/64QAM: joint ML-LLR using inter-layer Tx correlation
-        // rho_dl[llr_sym] is laid out as [nl*nl][rx_size_symbol]:
-        // index 1 = rho[0][1], index nl (=2) = rho[1][0]
-        nr_compute_ML_llr(rxdataF_comp[llr_sym][0],
-                          rxdataF_comp[llr_sym][1],
-                          dl_ch_mag[llr_sym][0],
-                          dl_ch_mag[llr_sym][1],
-                          layer_llr[llr_sym][0],
-                          layer_llr[llr_sym][1],
-                          rho_dl[llr_sym][1],
-                          rho_dl[llr_sym][nl],
-                          dl_valid_re[llr_sym],
-                          qamModOrder);
-      } else {
-        nr_dlsch_llr(dlsch,
-                     dl_valid_re[llr_sym],
-                     pdsch_buf_size_max,
-                     dl_ch_mag[llr_sym][0],
-                     dl_ch_magb[llr_sym][0],
-                     dl_ch_magr[llr_sym][0],
-                     nbRx,
-                     rxdataF_comp[llr_sym],
-                     llr_per_symbol,
-                     layer_llr[llr_sym]);
+    // Shared inner-RX dispatch for the common detector set (comp already done above for non-fused).
+    // fuse_mode: 1-layer -> reg(2) / tiled(1) / none(0); 2-layer -> fused(1) / none(0). Returns false
+    // for the UE-only paths (register-fused, 2-layer 256QAM MMSE without ml256, 3-layer, 2L !do_ml /
+    // >2 layers), handled in the fallback below (writes per-layer; the demap+descramble block runs).
+    int fuse_mode;
+    if (nl == 1)
+      fuse_mode = fuse_1layer ? (fuse_env == 2 ? 2 : 1) : 0;
+    else
+      fuse_mode = fuse_2layer_ml ? 1 : 0;
+    c16_t *rxComp[nl], *mag_a[nl], *mag_b[nl], *mag_c[nl];
+    int16_t *layer_scratch[nl];
+    for (int l = 0; l < nl; l++) {
+      rxComp[l] = rxdataF_comp[symbol][l];
+      mag_a[l] = dl_ch_mag[l];
+      mag_b[l] = dl_ch_magb[l];
+      mag_c[l] = dl_ch_magr[l];
+      layer_scratch[l] = layer_llr[l];
+    }
+    if (nr_inner_rx(this_re, rx_size_symbol, nbRx, nl, qamModOrder, ptrs_phase, rxdataF_ext, chFext,
+                    rxComp, mag_a, mag_b, mag_c,
+                    (nl == 2) ? rho_dl[1] : NULL, (nl == 2) ? rho_dl[nl] : NULL,
+                    *log2_maxh, fuse_mode, do_ml, ml256, layer_scratch, seq_sym, llr_cw)) {
+      cw_written = true; // shared dispatch wrote the demapped + descrambled codeword directly
+    } else if (fuse_1layer) {
+      // Register-fused single-layer inner RX (OAI_FUSE=2): no tile scratch / per-tile call; per-layer.
+      nr_inner_rx_1layer_reg(this_re, rx_size_symbol, nbRx, rxdataF_ext, chFext[0], qamModOrder, ptrs_phase, *log2_maxh, layer_llr[0]);
+    } else if (nl == 2) {
+      // 2-layer linear MMSE — every nl==2 case the shared dispatch didn't handle: do_ml off (any
+      // mod order) or 256QAM without ml256. Fused per-RE MMSE (L=1) + per-layer LLR
+      // (nr_compute_MMSE_llr = nr_mmse_2layers per-RE Gram inversion on the MRC'd p_rxComp +
+      // nr_compute_llr), replacing the old {nr_dlsch_mmse per-PRB pre-pass + nr_dlsch_llr} split.
+      int16_t *llr_ptrs[nl];
+      for (int l = 0; l < nl; l++)
+        llr_ptrs[l] = layer_llr[l];
+      nr_compute_MMSE_llr(p_rxComp,
+                          rx_size_symbol,
+                          pdsch_buf_size_max,
+                          nbRx,
+                          nl,
+                          dl_ch_mag,
+                          dl_ch_magb,
+                          dl_ch_magr,
+                          chFext,
+                          freq_alloc->num_rbs,
+                          qamModOrder,
+                          *log2_maxh,
+                          0, // symbol already baked into p_rxComp
+                          this_re,
+                          nvar,
+                          rho_dl[0],
+                          rho_dl[1],
+                          rho_dl[nl],
+                          rho_dl[nl + 1],
+                          llr_ptrs);
+    } else if (ml3) {
+      // 3-layer hybrid ML (gated, float reference). For each target layer t, project the
+      // most-orthogonal nuisance + Schur-deflate, then 2-layer conditional-slice on the kept
+      // pair. rho_dl is [nl*nl][rx]: rho[i][j] at index i*nl+j (= h_i^H h_j).
+      // OAI_LBEST3=2 -> exact full-ML reference instead of the hybrid; OAI_LBEST_L3 -> L.
+      static int mode3 = -1, L3 = 256;
+      if (mode3 < 0) {
+        const char *e = getenv("OAI_LBEST3");
+        mode3 = e ? atoi(e) : 1;
+        const char *el = getenv("OAI_LBEST_L3");
+        L3 = el ? atoi(el) : 256;
       }
+      for (int t = 0; t < 3; t++) {
+        const int n1 = (t + 1) % 3, n2 = (t + 2) % 3;
+        c16_t *r_tn1 = rho_dl[t * nl + n1];
+        c16_t *r_tn2 = rho_dl[t * nl + n2];
+        c16_t *r_n1n2 = rho_dl[n1 * nl + n2];
+        if (mode3 == 2)
+          nr_qam_llr_3layer_ml(rxdataF_comp[symbol][t],
+                               rxdataF_comp[symbol][n1],
+                               rxdataF_comp[symbol][n2],
+                               dl_ch_mag[t],
+                               dl_ch_mag[n1],
+                               dl_ch_mag[n2],
+                               r_tn1,
+                               r_tn2,
+                               r_n1n2,
+                               layer_llr[t],
+                               this_re,
+                               qamModOrder);
+        else
+          nr_qam_llr_3layer_hybrid(rxdataF_comp[symbol][t],
+                                   rxdataF_comp[symbol][n1],
+                                   rxdataF_comp[symbol][n2],
+                                   dl_ch_mag[t],
+                                   dl_ch_mag[n1],
+                                   dl_ch_mag[n2],
+                                   r_tn1,
+                                   r_tn2,
+                                   r_n1n2,
+                                   layer_llr[t],
+                                   this_re,
+                                   qamModOrder,
+                                   L3,
+                                   0.0f);
+      }
+    } else {
+      nr_dlsch_llr(dlsch,
+                   this_re,
+                   pdsch_buf_size_max,
+                   dl_ch_mag[0],
+                   dl_ch_magb[0],
+                   dl_ch_magr[0],
+                   nbRx,
+                   rxdataF_comp[symbol],
+                   this_llr_size,
+                   layer_llr);
     }
     stop_meas_nr_ue_phy(ue, DLSCH_LLR_STATS);
+
     start_meas_nr_ue_phy(ue, DLSCH_LAYER_DEMAPPING);
-    nr_dlsch_layer_demapping(nl, dlsch->cw_info.qamModOrder, llr_per_symbol, layer_llr, dlsch_config, dl_valid_re, llr);
+    if (!cw_written) {
+      // Non-fused (and register-fused) paths produced per-layer LLRs: layer-demap into the codeword
+      // buffer, then descramble that slice (the fused paths above folded both into the store).
+      int16_t *p_layer[nl];
+      for (int l = 0; l < nl; l++)
+        p_layer[l] = layer_llr[l];
+      nr_layer_demapping(nl, qamModOrder, this_re, p_layer, llr_cw);
+      if (seq_sym) {
+        const int n = this_re * qamModOrder * nl;
+        for (int k = 0; k < n; k++)
+          llr_cw[k] = (int16_t)(llr_cw[k] * seq_sym[k]);
+      }
+    }
     stop_meas_nr_ue_phy(ue, DLSCH_LAYER_DEMAPPING);
+  }
+
+  /* Full-slot matched-filter scope export still runs once at the last symbol
+     (R1.2 will relocate this per-symbol). */
+  if (symbol == (startSymbIdx + nbSymb - 1)) {
 
     if (UEScopeHasTryLock(ue)) {
       metadata mt = {.frame = proc->frame_rx, .slot = proc->nr_slot_rx };

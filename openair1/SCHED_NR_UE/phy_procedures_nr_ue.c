@@ -397,7 +397,8 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                                   fapi_nr_dl_config_dlsch_pdu_rel15_t *dlschCfg,
                                   int16_t *llr,
                                   c16_t rxdataF[][ue->frame_parms.samples_per_slot_wCP],
-                                  freq_alloc_bitmap_t *freq_alloc)
+                                  freq_alloc_bitmap_t *freq_alloc,
+                                  const int16_t *scramble)
 {
   int frame_rx = proc->frame_rx;
   int nr_slot_rx = proc->nr_slot_rx;
@@ -433,10 +434,12 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
   const uint32_t pdsch_buf_size_max = scratch->pdsch_buf_size_max;
   int32_t (*pdsch_dl_ch_estimates)[pdsch_est_size] = (int32_t (*)[pdsch_est_size])scratch->pdsch_dl_ch_estimates;
   c16_t (*rxdataF_comp)[NR_MAX_NB_LAYERS][pdsch_buf_size_max] = (c16_t (*)[NR_MAX_NB_LAYERS][pdsch_buf_size_max])scratch->rxdataF_comp;
-  c16_t (*dl_ch_mag)[NR_MAX_NB_LAYERS][pdsch_buf_size_max]    = (c16_t (*)[NR_MAX_NB_LAYERS][pdsch_buf_size_max])scratch->dl_ch_mag;
-  c16_t (*dl_ch_magb)[NR_MAX_NB_LAYERS][pdsch_buf_size_max]   = (c16_t (*)[NR_MAX_NB_LAYERS][pdsch_buf_size_max])scratch->dl_ch_magb;
-  c16_t (*dl_ch_magr)[NR_MAX_NB_LAYERS][pdsch_buf_size_max]   = (c16_t (*)[NR_MAX_NB_LAYERS][pdsch_buf_size_max])scratch->dl_ch_magr;
-  c16_t (*rho_dl)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max] = (c16_t (*)[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max])scratch->rho_dl;
+  // R1.2a: dl_ch_mag*/rho_dl are single-symbol (consumed within each per-symbol
+  // nr_rx_pdsch call, not deferred, not exported).
+  c16_t (*dl_ch_mag)[pdsch_buf_size_max]  = (c16_t (*)[pdsch_buf_size_max])scratch->dl_ch_mag;
+  c16_t (*dl_ch_magb)[pdsch_buf_size_max] = (c16_t (*)[pdsch_buf_size_max])scratch->dl_ch_magb;
+  c16_t (*dl_ch_magr)[pdsch_buf_size_max] = (c16_t (*)[pdsch_buf_size_max])scratch->dl_ch_magr;
+  c16_t (*rho_dl)[pdsch_buf_size_max]     = (c16_t (*)[pdsch_buf_size_max])scratch->rho_dl;
 
   NR_DL_FRAME_PARMS *frame_parms = &ue->frame_parms;
   uint32_t nvar = 0;
@@ -550,6 +553,10 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                                                          freq_alloc->num_rbs * NR_NB_SC_PER_RB * dlschCfg->number_symbols,
                                                          &mt);
   }
+  // OAI_LBEST analysis gate: also allocate rho for 2-layer 256QAM (Qm=8) so the float
+  // L-best ML path in the demod can use it (off by default).
+  static int lbest256 = -1;
+  if (lbest256 < 0) { const char *e = getenv("OAI_LBEST"); lbest256 = e ? atoi(e) : 0; }
 
   for (int m = dlschCfg->start_symbol; m < (dlschCfg->number_symbols + dlschCfg->start_symbol); m++) {
     bool first_symbol_flag = false;
@@ -584,7 +591,8 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                     nvar,
                     &scope_req,
                     rho_dl,
-                    IS_BIT_SET(ptrs_symb_pos, m))
+                    scramble,
+                    is_ptrs)
         < 0) {
       if (scope_req.copy_chanest_to_scope) {
         UEunlockScopeData(ue, pdschChanEstimates);
@@ -690,10 +698,8 @@ static void nr_ue_dlsch_procedures(PHY_VARS_NR_UE *ue,
     return;
   }
 
-  start_meas_nr_ue_phy(ue, DLSCH_UNSCRAMBLING_STATS);
-  nr_dlsch_unscrambling(llr, G, 0, config->dlDataScramblingId, dlsch->rnti);
-  stop_meas_nr_ue_phy(ue, DLSCH_UNSCRAMBLING_STATS);
-
+  // Descrambling is folded into the demod LLR store (per symbol) now — see nr_ue_pdsch_procedures
+  // / nr_rx_pdsch — so llr already holds the descrambled codeword. (Was a whole-codeword pass here.)
   start_meas_nr_ue_phy(ue, DLSCH_DECODING_STATS);
   uint8_t output[lenWithCrc(1, dlsch->cw_info.TBS) / 8];
   nr_dlsch_decoding(ue, proc, dlsch, cw_idx, config, llr, output, freq_alloc->num_rbs, G);
@@ -1271,10 +1277,16 @@ void pdsch_processing(PHY_VARS_NR_UE *ue, const UE_nr_rxtx_proc_t *proc, nr_phy_
                      dlsch->cw_info.Nl);
     const uint32_t rx_llr_buf_sz = ALIGNARRAYSIZE(G, 32); // each LLR is 2 bytes hence 64 byte aligned
 
+    // Precompute the codeword descrambling sequence (+-1 per bit) once for this slot so the
+    // demod can fold it into the LLR store per symbol (symmetric with the gNB PUSCH inner_rx),
+    // replacing the standalone whole-codeword unscrambling pass below. q=0 as in the old pass.
+    int16_t *scramble = ue->pdsch_scratch[actor_idx_llr].scramble;
+    nr_codeword_unscrambling_init(scramble, G, 0, dlsch_config->dlDataScramblingId, dlsch->rnti);
+
     // dlsch_harq contains the previous transmissions data for this harq pid
     NR_DL_UE_HARQ_t *harq = &ue->dl_harq_processes[c][dlsch_config->harq_process_nbr];
     // it returns -1 in case of internal failure, or 0 in case of normal result
-    int ret_pdsch = nr_ue_pdsch_procedures(ue, proc, dlsch, harq, dlsch_config, llr[c], rxdataF, &freq_alloc);
+    int ret_pdsch = nr_ue_pdsch_procedures(ue, proc, dlsch, harq, dlsch_config, llr[c], rxdataF, &freq_alloc, scramble);
     TracyCPlot("pdsch mcs", dlsch->cw_info.mcs);
 
     UEscopeCopy(ue, pdschLlr, llr[c], sizeof(int16_t), 1, G, 0);

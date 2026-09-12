@@ -3,6 +3,7 @@
  */
 
 #include "nr_channel_compensation.h"
+#include "nr_phy_common.h"
 #include "bits.h"
 #include <complex.h>
 #include "PHY/sse_intrin.h"
@@ -11,6 +12,54 @@
 #ifdef __aarch64__
 #define USE_128BIT
 #endif
+
+// ---- width-parameterized MRC compensation core (AVX2 / SSE->NEON; +AVX-512 later) ----
+// Same source instantiated per width from nr_channel_comp_simd.c.inc; the public entry dispatches.
+#define NRLB_W 256
+#include "nr_lbest_simd_width.h"
+#include "nr_channel_comp_simd.c.inc"
+#include "nr_inner_rx_1layer_simd.c.inc"
+#include "nr_inner_rx_1layer_reg_simd.c.inc"
+#include "nr_inner_rx_2layer_ml_simd.c.inc"
+#undef NRLB_W
+#define NRLB_W 128
+#include "nr_lbest_simd_width.h"
+#include "nr_channel_comp_simd.c.inc"
+#include "nr_inner_rx_1layer_simd.c.inc"
+#include "nr_inner_rx_1layer_reg_simd.c.inc"
+#include "nr_inner_rx_2layer_ml_simd.c.inc"
+#undef NRLB_W
+// AVX-512 (W=512) instantiation of the compensation core only: same gating as the L-best
+// kernels in nr_compute_llr.c -- only when 512 is a real compile target, else SIMDe emulates
+// it as 2x256 and loses. The inner_rx .c.inc kernels are not instantiated at 512 here; they
+// carry cross-lane helpers that have not been validated at that width yet.
+#if defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512F__)
+#include <simde/x86/avx512.h>
+#define NRLB_W 512
+#include "nr_lbest_simd_width.h"
+#include "nr_channel_comp_simd.c.inc"
+#undef NRLB_W
+#define NR_COMP_HAVE_W512 1
+#endif
+
+// x86 width selection (cached): 1 = w128 (SSE->NEON regression path, OAI_COMP_W128), 0 = w256 (default).
+// aarch64 always runs w128 (SIMDe maps 256-bit to 2x128 NEON, slower than native 128).
+static int nr_comp_simd_width_mode(void)
+{
+  static int m = -1;
+  if (m < 0) {
+    if (getenv("OAI_COMP_W128"))
+      m = 1;
+#ifdef NR_COMP_HAVE_W512
+    else if (getenv("OAI_COMP_W512"))
+      m = 2;
+#endif
+    else
+      m = 0; // w256 stays the default: on double-pumped AVX-512 parts (Zen4/Zen5-mobile)
+             // the 512 path issues as 2x256 uops with no datapath gain.
+  }
+  return m;
+}
 
 void nr_channel_compensation(uint32_t buffer_length,
                              uint32_t pdsch_buf_size_max,
@@ -28,197 +77,179 @@ void nr_channel_compensation(uint32_t buffer_length,
                              uint32_t symbol,
                              uint32_t output_shift)
 {
-#ifndef USE_128BIT
-  simde__m256i QAM_ampa_256 = simde_mm256_setzero_si256();
-  simde__m256i QAM_ampb_256 = simde_mm256_setzero_si256();
-  simde__m256i QAM_ampc_256 = simde_mm256_setzero_si256();
-
-  if (mod_order == 4) {
-    QAM_ampa_256 = simde_mm256_set1_epi16(QAM16_n1);
-  } else if (mod_order == 6) {
-    QAM_ampa_256 = simde_mm256_set1_epi16(QAM64_n1);
-    QAM_ampb_256 = simde_mm256_set1_epi16(QAM64_n2);
-  } else if (mod_order == 8) {
-    QAM_ampa_256 = simde_mm256_set1_epi16(QAM256_n1);
-    QAM_ampb_256 = simde_mm256_set1_epi16(QAM256_n2);
-    QAM_ampc_256 = simde_mm256_set1_epi16(QAM256_n3);
-  }
-
-  const simde__m256i cpe256 = simde_mm256_set_epi16(cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r,
-                                                    cpe.i,
-                                                    cpe.r);
-  for (int aatx = 0; aatx < nb_layers; aatx++) {
-    simde__m256i *rxComp_256 = (simde__m256i *)&rxComp[aatx][symbol * buffer_length];
-    simde__m256i *ch_maga_256 = (simde__m256i *)ch_maga[aatx];
-    simde__m256i *ch_magb_256 = (simde__m256i *)ch_magb[aatx];
-    simde__m256i *ch_magc_256 = (simde__m256i *)ch_magc[aatx];
-
-    // First Rx antenna: direct store — eliminates need to pre memset the output buffers
-    {
-      simde__m256i *rxF_256 = (simde__m256i *)rxFext[0];
-      simde__m256i *chF_256 = (simde__m256i *)chFext[aatx][0];
-
-      for (uint32_t i = 0; i < buffer_length >> 3; i++) {
-        const simde__m256i chF_cpe256 = oai_mm256_cpx_mult(chF_256[i], cpe256, 15);
-        rxComp_256[i] = oai_mm256_cpx_mult_conj(chF_cpe256, rxF_256[i], output_shift);
-
-        if (mod_order > 2) {
-          simde__m256i mag = oai_mm256_smadd(chF_256[i], chF_256[i], output_shift);
-          mag = simde_mm256_packs_epi32(mag, mag);
-          mag = simde_mm256_unpacklo_epi16(mag, mag);
-          ch_maga_256[i] = simde_mm256_mulhrs_epi16(mag, QAM_ampa_256);
-
-          if (mod_order > 4)
-            ch_magb_256[i] = simde_mm256_mulhrs_epi16(mag, QAM_ampb_256);
-
-          if (mod_order > 6)
-            ch_magc_256[i] = simde_mm256_mulhrs_epi16(mag, QAM_ampc_256);
-        }
-      }
-
-      if (rho) {
-        for (int atx = 0; atx < nb_layers; atx++) {
-          simde__m256i *rho_256 = (simde__m256i *)rho[aatx][atx];
-          simde__m256i *chF2_256 = (simde__m256i *)chFext[atx][0];
-          for (uint32_t i = 0; i < buffer_length >> 3; i++)
-            rho_256[i] = oai_mm256_cpx_mult_conj(chF_256[i], chF2_256[i], output_shift);
-        }
-      }
-    }
-
-    // Remaining Rx antennas: accumulate (MRC)
-    for (int aarx = 1; aarx < nb_rx_ant; aarx++) {
-      simde__m256i *rxF_256 = (simde__m256i *)rxFext[aarx];
-      simde__m256i *chF_256 = (simde__m256i *)chFext[aatx][aarx];
-
-      for (uint32_t i = 0; i < buffer_length >> 3; i++) {
-        const simde__m256i chF_cpe256 = oai_mm256_cpx_mult(chF_256[i], cpe256, 15);
-        const simde__m256i comp = oai_mm256_cpx_mult_conj(chF_cpe256, rxF_256[i], output_shift);
-        rxComp_256[i] = simde_mm256_add_epi16(rxComp_256[i], comp);
-
-        if (mod_order > 2) {
-          simde__m256i mag = oai_mm256_smadd(chF_256[i], chF_256[i], output_shift);
-          mag = simde_mm256_packs_epi32(mag, mag);
-          mag = simde_mm256_unpacklo_epi16(mag, mag);
-          ch_maga_256[i] = simde_mm256_add_epi16(ch_maga_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampa_256));
-
-          if (mod_order > 4)
-            ch_magb_256[i] = simde_mm256_add_epi16(ch_magb_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampb_256));
-
-          if (mod_order > 6)
-            ch_magc_256[i] = simde_mm256_add_epi16(ch_magc_256[i], simde_mm256_mulhrs_epi16(mag, QAM_ampc_256));
-        }
-      }
-
-      if (rho) {
-        for (int atx = 0; atx < nb_layers; atx++) {
-          simde__m256i *rho_256 = (simde__m256i *)rho[aatx][atx];
-          simde__m256i *chF2_256 = (simde__m256i *)chFext[atx][aarx];
-          for (uint32_t i = 0; i < buffer_length >> 3; i++)
-            rho_256[i] = simde_mm256_adds_epi16(rho_256[i], oai_mm256_cpx_mult_conj(chF_256[i], chF2_256[i], output_shift));
-        }
-      }
-    }
-  }
+#if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
+  nr_channel_compensation_w128(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
+                               ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
 #else
-  simde__m128i QAM_ampa_128 = simde_mm_setzero_si128();
-  simde__m128i QAM_ampb_128 = simde_mm_setzero_si128();
-  simde__m128i QAM_ampc_128 = simde_mm_setzero_si128();
-
-  if (mod_order == 4) {
-    QAM_ampa_128 = simde_mm_set1_epi16(QAM16_n1);
-  } else if (mod_order == 6) {
-    QAM_ampa_128 = simde_mm_set1_epi16(QAM64_n1);
-    QAM_ampb_128 = simde_mm_set1_epi16(QAM64_n2);
-  } else if (mod_order == 8) {
-    QAM_ampa_128 = simde_mm_set1_epi16(QAM256_n1);
-    QAM_ampb_128 = simde_mm_set1_epi16(QAM256_n2);
-    QAM_ampc_128 = simde_mm_set1_epi16(QAM256_n3);
-  }
-
-  for (int aatx = 0; aatx < nb_layers; aatx++) {
-    simde__m128i *rxComp_128 = (simde__m128i *)&rxComp[aatx][symbol * buffer_length];
-    simde__m128i *ch_maga_128 = (simde__m128i *)ch_maga[aatx];
-    simde__m128i *ch_magb_128 = (simde__m128i *)ch_magb[aatx];
-    simde__m128i *ch_magc_128 = (simde__m128i *)ch_magc[aatx];
-
-    // First Rx antenna: direct store — eliminates need to pre memset the output buffers
-    {
-      simde__m128i *rxF_128 = (simde__m128i *)rxFext[0];
-      simde__m128i *chF_128 = (simde__m128i *)chFext[aatx][0];
-
-      for (uint32_t i = 0; i < buffer_length >> 2; i++) {
-        rxComp_128[i] = oai_mm_cpx_mult_conj(chF_128[i], rxF_128[i], output_shift);
-
-        if (mod_order > 2) {
-          simde__m128i mag = oai_mm_smadd(chF_128[i], chF_128[i], output_shift);
-          mag = simde_mm_packs_epi32(mag, mag);
-          mag = simde_mm_unpacklo_epi16(mag, mag);
-          ch_maga_128[i] = simde_mm_mulhrs_epi16(mag, QAM_ampa_128);
-
-          if (mod_order > 4)
-            ch_magb_128[i] = simde_mm_mulhrs_epi16(mag, QAM_ampb_128);
-
-          if (mod_order > 6)
-            ch_magc_128[i] = simde_mm_mulhrs_epi16(mag, QAM_ampc_128);
-        }
-      }
-
-      if (rho) {
-        for (int atx = 0; atx < nb_layers; atx++) {
-          simde__m128i *rho_128 = (simde__m128i *)rho[aatx][atx];
-          simde__m128i *chF2_128 = (simde__m128i *)chFext[atx][0];
-          for (uint32_t i = 0; i < buffer_length >> 2; i++)
-            rho_128[i] = oai_mm_cpx_mult_conj(chF_128[i], chF2_128[i], output_shift);
-        }
-      }
-    }
-
-    // Remaining Rx antennas: accumulate (MRC)
-    for (int aarx = 1; aarx < nb_rx_ant; aarx++) {
-      simde__m128i *rxF_128 = (simde__m128i *)rxFext[aarx];
-      simde__m128i *chF_128 = (simde__m128i *)chFext[aatx][aarx];
-
-      for (uint32_t i = 0; i < buffer_length >> 2; i++) {
-        simde__m128i comp = oai_mm_cpx_mult_conj(chF_128[i], rxF_128[i], output_shift);
-        rxComp_128[i] = simde_mm_add_epi16(rxComp_128[i], comp);
-
-        if (mod_order > 2) {
-          simde__m128i mag = oai_mm_smadd(chF_128[i], chF_128[i], output_shift);
-          mag = simde_mm_packs_epi32(mag, mag);
-          mag = simde_mm_unpacklo_epi16(mag, mag);
-          ch_maga_128[i] = simde_mm_add_epi16(ch_maga_128[i], simde_mm_mulhrs_epi16(mag, QAM_ampa_128));
-
-          if (mod_order > 4)
-            ch_magb_128[i] = simde_mm_add_epi16(ch_magb_128[i], simde_mm_mulhrs_epi16(mag, QAM_ampb_128));
-
-          if (mod_order > 6)
-            ch_magc_128[i] = simde_mm_add_epi16(ch_magc_128[i], simde_mm_mulhrs_epi16(mag, QAM_ampc_128));
-        }
-      }
-
-      if (rho) {
-        for (int atx = 0; atx < nb_layers; atx++) {
-          simde__m128i *rho_128 = (simde__m128i *)rho[aatx][atx];
-          simde__m128i *chF2_128 = (simde__m128i *)chFext[atx][aarx];
-          for (uint32_t i = 0; i < buffer_length >> 2; i++)
-            rho_128[i] = simde_mm_adds_epi16(rho_128[i], oai_mm_cpx_mult_conj(chF_128[i], chF2_128[i], output_shift));
-        }
-      }
-    }
-  }
+  const int w = nr_comp_simd_width_mode();
+  if (w == 1)
+    nr_channel_compensation_w128(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+#ifdef NR_COMP_HAVE_W512
+  else if (w == 2)
+    nr_channel_compensation_w512(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
 #endif
+  else
+    nr_channel_compensation_w256(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+#endif
+}
+
+/* Fused single-layer inner RX: MRC channel compensation + per-RE LLR, TILED so the compensated
+ * symbols and channel magnitudes live only in L1 scratch and are never materialized as
+ * full-symbol arrays (no rxComp/mag DRAM round-trip). Bit-exact with the unfused
+ * {nr_channel_compensation(nb_layers==1) + nr_dlsch_llr} path: identical per-RE math, identical
+ * Rx-antenna accumulation order. Single-layer only (no rho, no MMSE inversion); the caller must
+ * gate out the PTRS case, which sits between compensation and LLR. */
+void nr_inner_rx_1layer(uint32_t length,
+                        uint32_t buffer_length,
+                        int nb_rx_ant,
+                        c16_t rxFext[nb_rx_ant][buffer_length],
+                        c16_t chFext[nb_rx_ant][buffer_length],
+                        int mod_order,
+                        c16_t cpe,
+                        int output_shift,
+                        int16_t *llr,
+                        const int16_t *scramble)
+{
+#if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
+  nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
+#else
+  if (nr_comp_simd_width_mode() == 1)
+    nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
+  else
+    nr_inner_rx_1layer_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
+#endif
+}
+
+// Register-fused variant: no tile scratch, no per-tile LLR call (per-block MRC+mag+LLR in regs).
+void nr_inner_rx_1layer_reg(uint32_t length,
+                            uint32_t buffer_length,
+                            int nb_rx_ant,
+                            c16_t rxFext[nb_rx_ant][buffer_length],
+                            c16_t chFext[nb_rx_ant][buffer_length],
+                            int mod_order,
+                            c16_t cpe,
+                            int output_shift,
+                            int16_t *llr)
+{
+#if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
+  nr_inner_rx_1layer_reg_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr);
+#else
+  if (nr_comp_simd_width_mode() == 1)
+    nr_inner_rx_1layer_reg_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr);
+  else
+    nr_inner_rx_1layer_reg_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr);
+#endif
+}
+
+/* Fused 2-layer near-ML inner RX: MRC compensation + Gram off-diagonal (rho) build + joint ML-LLR
+ * (nr_compute_ML_llr), TILED so the two compensated streams, the two per-layer magnitudes and the
+ * two off-diagonal rho vectors live only in L1 scratch. Equivalent to
+ * {nr_channel_compensation(nb_layers==2) + nr_compute_ML_llr}. nr_compute_ML_llr takes one
+ * magnitude per layer (n1-scaled) and derives the other QAM thresholds internally, so only mag_a
+ * is built. Requires the 2-layer LLR kernels to be RE-sub-range-composable (RE-exact stores).
+ * 256-bit only for now (width parameterization TODO). Caller gates out PTRS. */
+void nr_inner_rx_2layer_ml(uint32_t length,
+                           uint32_t buffer_length,
+                           int nb_rx_ant,
+                           c16_t rxFext[nb_rx_ant][buffer_length],
+                           c16_t chFext[2][nb_rx_ant][buffer_length],
+                           int mod_order,
+                           c16_t cpe,
+                           int output_shift,
+                           int16_t *llr0,
+                           int16_t *llr1,
+                           int16_t *llr_cw,
+                           const int16_t *scramble)
+{
+#if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
+  nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
+#else
+  if (nr_comp_simd_width_mode() == 1)
+    nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
+  else
+    nr_inner_rx_2layer_ml_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
+#endif
+}
+
+// Non-fused paths produced per-layer LLRs: interleave (layer demap) into llr_cw and, if scramble is
+// given, descramble the codeword slice in place. Shared by the UE and gNB inner_rx dispatch.
+static void nr_demap_descramble(int nb_layer, int mod_order, uint32_t length,
+                                int16_t *layers[], const int16_t *scramble, int16_t *llr_cw)
+{
+  nr_layer_demapping((uint8_t)nb_layer, (uint8_t)mod_order, (int)length, layers, llr_cw);
+  if (scramble) {
+    const uint32_t n = length * (uint32_t)nb_layer * (uint32_t)mod_order;
+    for (uint32_t k = 0; k < n; k++)
+      llr_cw[k] = (int16_t)(llr_cw[k] * scramble[k]);
+  }
+}
+
+/* Shared post-extraction inner RX for the detector set common to the UE (PDSCH) and gNB (PUSCH):
+ * pick the detector for (nb_layer, mod_order, do_ml, fuse_mode), then either write the layer-demapped
+ * (+ descrambled) codeword to llr_cw, or, when llr_cw==NULL, leave per-layer LLRs in layer_scratch[]
+ * for the caller to demap (e.g. the gNB MU-MIMO group path). Compensation must already be done for
+ * the non-fused paths (rxComp / mag_a-c per layer, rho01/rho10 for 2-layer); the fused paths
+ * (fuse_mode==1) do MRC inline from rxFext/chFext. do_ml + lbest256 encode each side's 2-layer ML
+ * gate (gNB: do_ml=true, lbest256=gnb_lbest; UE: do_ml, lbest256=ml256).
+ *
+ * Returns true if it handled the config; false for caller-specific paths — register-fused single
+ * layer (fuse_mode==2), 2-layer non-ML / 256QAM-MMSE, 3-layer, and >2 layers — which the caller runs
+ * itself (then demaps as needed). */
+bool nr_inner_rx(uint32_t length,
+                 uint32_t buffer_length,
+                 int nb_rx_ant,
+                 int nb_layer,
+                 int mod_order,
+                 c16_t cpe,
+                 c16_t rxFext[nb_rx_ant][buffer_length],
+                 c16_t chFext[nb_layer][nb_rx_ant][buffer_length],
+                 c16_t *rxComp[nb_layer],
+                 c16_t *mag_a[nb_layer],
+                 c16_t *mag_b[nb_layer],
+                 c16_t *mag_c[nb_layer],
+                 c16_t *rho01,
+                 c16_t *rho10,
+                 int output_shift,
+                 int fuse_mode,
+                 bool do_ml,
+                 bool lbest256,
+                 int16_t *layer_scratch[nb_layer],
+                 const int16_t *scramble,
+                 int16_t *llr_cw)
+{
+  const bool cw = (llr_cw != NULL); // codeword output (fold demap+descramble); else per-layer scratch
+
+  if (nb_layer == 1) {
+    if (fuse_mode == 1) { // tiled fused: MRC+LLR (+descramble at store when cw)
+      nr_inner_rx_1layer(length, buffer_length, nb_rx_ant, rxFext, chFext[0], mod_order, cpe, output_shift,
+                         cw ? llr_cw : layer_scratch[0], cw ? scramble : NULL);
+      return true;
+    }
+    if (fuse_mode == 0) { // standalone LLR on the compensated stream
+      nr_compute_llr(rxComp[0], mag_a[0], mag_b[0], mag_c[0], layer_scratch[0], length, 0, mod_order);
+      if (cw)
+        nr_demap_descramble(1, mod_order, length, layer_scratch, scramble, llr_cw);
+      return true;
+    }
+    return false; // fuse_mode==2 (register-fused): caller
+  }
+
+  if (nb_layer == 2 && do_ml && (mod_order <= 6 || (mod_order == 8 && lbest256))) {
+    if (fuse_mode == 1) { // tiled fused: MRC + rho + joint ML-LLR (+demap+descramble at store when cw)
+      nr_inner_rx_2layer_ml(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift,
+                            cw ? NULL : layer_scratch[0], cw ? NULL : layer_scratch[1],
+                            cw ? llr_cw : NULL, cw ? scramble : NULL);
+      return true;
+    }
+    nr_compute_ML_llr(rxComp[0], rxComp[1], mag_a[0], mag_a[1], layer_scratch[0], layer_scratch[1],
+                      rho01, rho10, length, mod_order);
+    if (cw)
+      nr_demap_descramble(2, mod_order, length, layer_scratch, scramble, llr_cw);
+    return true;
+  }
+
+  return false; // 2-layer non-ML / 256QAM-MMSE, 3-layer, >2-layer: caller
 }
