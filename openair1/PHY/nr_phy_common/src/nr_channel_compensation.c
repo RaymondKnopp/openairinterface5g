@@ -112,16 +112,23 @@ void nr_inner_rx_1layer(uint32_t length,
                         c16_t cpe,
                         int output_shift,
                         int16_t *llr,
-                        const int16_t *scramble)
+                        const int16_t *scramble,
+                        c16_t *maga_slot,
+                        c16_t *magb_slot,
+                        c16_t *magc_slot,
+                        bool build_terms)
 {
+#define NR_IRX1_ARGS length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble, \
+                     maga_slot, magb_slot, magc_slot, build_terms
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
-  nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
+  nr_inner_rx_1layer_w128(NR_IRX1_ARGS);
 #else
   if (nr_comp_simd_width_mode() == 1)
-    nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
+    nr_inner_rx_1layer_w128(NR_IRX1_ARGS);
   else
-    nr_inner_rx_1layer_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
+    nr_inner_rx_1layer_w256(NR_IRX1_ARGS);
 #endif
+#undef NR_IRX1_ARGS
 }
 
 // Register-fused variant: no tile scratch, no per-tile LLR call (per-block MRC+mag+LLR in regs).
@@ -232,8 +239,12 @@ bool nr_inner_rx(uint32_t length,
 
   if (nb_layer == 1) {
     if (fuse_mode == 1) { // tiled fused: MRC+LLR (+descramble at store when cw)
+      /* chest_time == 1: mag_a/b/c already point at the caller's slot-lifetime buffers, so the
+         fused kernel builds them once and later symbols read them at the tile offset. */
       nr_inner_rx_1layer(length, buffer_length, nb_rx_ant, rxFext, chFext[0], mod_order, cpe, output_shift,
-                         cw ? llr_cw : layer_scratch[0], cw ? scramble : NULL);
+                         cw ? llr_cw : layer_scratch[0], cw ? scramble : NULL,
+                         terms_slot ? mag_a[0] : NULL, terms_slot ? mag_b[0] : NULL,
+                         terms_slot ? mag_c[0] : NULL, build_terms);
       return true;
     }
     if (fuse_mode == 0) { // standalone LLR on the compensated stream

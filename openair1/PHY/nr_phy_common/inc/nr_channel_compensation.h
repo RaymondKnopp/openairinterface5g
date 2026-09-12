@@ -73,6 +73,12 @@ void nr_channel_compensation(uint32_t buffer_length,
  *                        non-NULL, the LLRs are multiplied by it in-place as they are stored
  *                        (descrambling folded into the store). NULL => raw LLR. Single-layer only:
  *                        per-layer LLR order equals the codeword bit order, so no demap is needed.
+ * @param maga_slot/magb_slot/magc_slot
+ *                        chest_time == 1 only: slot-lifetime magnitude buffers, indexed from RE 0.
+ *                        The magnitudes depend only on chFext, which is slot-constant, so they are
+ *                        built once and reused by every later data symbol. NULL (the default) keeps
+ *                        the per-tile L1 scratch and rebuilds them every symbol.
+ * @param build_terms     With slot buffers: true on the symbol that builds them, false to reuse.
  */
 void nr_inner_rx_1layer(uint32_t length,
                         uint32_t buffer_length,
@@ -83,7 +89,11 @@ void nr_inner_rx_1layer(uint32_t length,
                         c16_t cpe,
                         int output_shift,
                         int16_t *llr,
-                        const int16_t *scramble);
+                        const int16_t *scramble,
+                        c16_t *maga_slot,
+                        c16_t *magb_slot,
+                        c16_t *magc_slot,
+                        bool build_terms);
 
 /** @brief Register-fused single-layer inner RX: per-block MRC + mag + LLR in registers, no tile
  * scratch and no per-tile LLR call (bit-exact with nr_inner_rx_1layer). */

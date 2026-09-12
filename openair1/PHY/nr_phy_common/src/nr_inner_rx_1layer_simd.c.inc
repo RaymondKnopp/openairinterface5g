@@ -15,12 +15,22 @@ static void NRLB_NAME(nr_inner_rx_1layer)(uint32_t length,
                                           c16_t cpe,
                                           int output_shift,
                                           int16_t *llr,
-                                          const int16_t *scramble)
+                                          const int16_t *scramble,
+                                          c16_t *maga_slot,
+                                          c16_t *magb_slot,
+                                          c16_t *magc_slot,
+                                          bool build_terms)
 {
   /* PTRS phase: a per-symbol scalar common to every antenna and layer, so it factors out of
      the MRC sum and is applied once to the compensated stream (see nr_channel_comp_simd.c.inc).
      Leaves the channel-only terms (mag*, rho) symbol-invariant. {INT16_MAX,0} = no PTRS. */
   const bool cpe_identity = (cpe.r == INT16_MAX && cpe.i == 0);
+  /* chest_time == 1: the magnitudes depend only on chFext, which is slot-constant, so the
+     caller can hand us slot-lifetime buffers instead of per-tile scratch -- built once
+     (build_terms) and read by every later symbol. NULL keeps the original tile scratch.
+     Single layer has no rho, so these are the only channel-derived terms. */
+  const bool terms_slot = (maga_slot != NULL);
+  const bool compute_terms = !terms_slot || build_terms;
   NRLB_VI QAM_ampa = NRLB_SETZERO();
   NRLB_VI QAM_ampb = NRLB_SETZERO();
   NRLB_VI QAM_ampc = NRLB_SETZERO();
@@ -44,11 +54,16 @@ static void NRLB_NAME(nr_inner_rx_1layer)(uint32_t length,
   __attribute__((aligned(32))) c16_t magc_t[TILE];
 
   NRLB_VI *rxComp_v = (NRLB_VI *)rxComp_t;
-  NRLB_VI *maga_v = (NRLB_VI *)maga_t;
-  NRLB_VI *magb_v = (NRLB_VI *)magb_t;
-  NRLB_VI *magc_v = (NRLB_VI *)magc_t;
 
   for (uint32_t base = 0; base < length; base += TILE) {
+    /* TILE is 96 REs = 384 B, so slot + base keeps the 64-byte alignment the vector
+       loads want at every width. */
+    c16_t *maga_p = terms_slot ? &maga_slot[base] : maga_t;
+    c16_t *magb_p = terms_slot ? &magb_slot[base] : magb_t;
+    c16_t *magc_p = terms_slot ? &magc_slot[base] : magc_t;
+    NRLB_VI *maga_v = (NRLB_VI *)maga_p;
+    NRLB_VI *magb_v = (NRLB_VI *)magb_p;
+    NRLB_VI *magc_v = (NRLB_VI *)magc_p;
     const uint32_t tre = (length - base < TILE) ? (length - base) : TILE; // valid REs (LLR)
     uint32_t hi = base + TILE;
     if (hi > buffer_length)
@@ -61,7 +76,7 @@ static void NRLB_NAME(nr_inner_rx_1layer)(uint32_t length,
       NRLB_VI *chF = (NRLB_VI *)&chFext[0][base];
       for (uint32_t i = 0; i < nblk; i++) {
         rxComp_v[i] = NRLB_OAI(cpx_mult_conj)(chF[i], rxF[i], output_shift);
-        if (mod_order > 2) {
+        if (mod_order > 2 && compute_terms) {
           NRLB_VI mag = NRLB_OAI(smadd)(chF[i], chF[i], output_shift);
           mag = NRLB_MM(packs_epi32)(mag, mag);
           mag = NRLB_MM(unpacklo_epi16)(mag, mag);
@@ -80,7 +95,7 @@ static void NRLB_NAME(nr_inner_rx_1layer)(uint32_t length,
       NRLB_VI *chF = (NRLB_VI *)&chFext[aarx][base];
       for (uint32_t i = 0; i < nblk; i++) {
         rxComp_v[i] = NRLB_MM(add_epi16)(rxComp_v[i], NRLB_OAI(cpx_mult_conj)(chF[i], rxF[i], output_shift));
-        if (mod_order > 2) {
+        if (mod_order > 2 && compute_terms) {
           NRLB_VI mag = NRLB_OAI(smadd)(chF[i], chF[i], output_shift);
           mag = NRLB_MM(packs_epi32)(mag, mag);
           mag = NRLB_MM(unpacklo_epi16)(mag, mag);
@@ -103,9 +118,9 @@ static void NRLB_NAME(nr_inner_rx_1layer)(uint32_t length,
     int16_t *llr_off = llr + (size_t)base * mod_order;
     switch (mod_order) {
       case 2: nr_qpsk_llr(rxComp_t, llr_off, tre); break;
-      case 4: nr_16qam_llr(rxComp_t, maga_t, llr_off, tre); break;
-      case 6: nr_64qam_llr(rxComp_t, maga_t, magb_t, llr_off, tre); break;
-      case 8: nr_256qam_llr(rxComp_t, maga_t, magb_t, magc_t, llr_off, tre); break;
+      case 4: nr_16qam_llr(rxComp_t, maga_p, llr_off, tre); break;
+      case 6: nr_64qam_llr(rxComp_t, maga_p, magb_p, llr_off, tre); break;
+      case 8: nr_256qam_llr(rxComp_t, maga_p, magb_p, magc_p, llr_off, tre); break;
       default: break;
     }
 
