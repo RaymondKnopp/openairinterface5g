@@ -29,14 +29,35 @@
 #include "nr_inner_rx_1layer_reg_simd.c.inc"
 #include "nr_inner_rx_2layer_ml_simd.c.inc"
 #undef NRLB_W
+// AVX-512 (W=512) instantiation of the compensation core only: same gating as the L-best
+// kernels in nr_compute_llr.c -- only when 512 is a real compile target, else SIMDe emulates
+// it as 2x256 and loses. The inner_rx .c.inc kernels are not instantiated at 512 here; they
+// carry cross-lane helpers that have not been validated at that width yet.
+#if defined(__AVX512BW__) && defined(__AVX512VL__) && defined(__AVX512F__)
+#include <simde/x86/avx512.h>
+#define NRLB_W 512
+#include "nr_lbest_simd_width.h"
+#include "nr_channel_comp_simd.c.inc"
+#undef NRLB_W
+#define NR_COMP_HAVE_W512 1
+#endif
 
 // x86 width selection (cached): 1 = w128 (SSE->NEON regression path, OAI_COMP_W128), 0 = w256 (default).
 // aarch64 always runs w128 (SIMDe maps 256-bit to 2x128 NEON, slower than native 128).
 static int nr_comp_simd_width_mode(void)
 {
   static int m = -1;
-  if (m < 0)
-    m = getenv("OAI_COMP_W128") ? 1 : 0;
+  if (m < 0) {
+    if (getenv("OAI_COMP_W128"))
+      m = 1;
+#ifdef NR_COMP_HAVE_W512
+    else if (getenv("OAI_COMP_W512"))
+      m = 2;
+#endif
+    else
+      m = 0; // w256 stays the default: on double-pumped AVX-512 parts (Zen4/Zen5-mobile)
+             // the 512 path issues as 2x256 uops with no datapath gain.
+  }
   return m;
 }
 
@@ -58,14 +79,20 @@ void nr_channel_compensation(uint32_t buffer_length,
 {
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
   nr_channel_compensation_w128(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                               ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, symbol, output_shift);
+                               ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
 #else
-  if (nr_comp_simd_width_mode() == 1)
+  const int w = nr_comp_simd_width_mode();
+  if (w == 1)
     nr_channel_compensation_w128(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, symbol, output_shift);
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+#ifdef NR_COMP_HAVE_W512
+  else if (w == 2)
+    nr_channel_compensation_w512(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+#endif
   else
     nr_channel_compensation_w256(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, symbol, output_shift);
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
 #endif
 }
 

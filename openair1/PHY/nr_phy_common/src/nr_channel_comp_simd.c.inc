@@ -20,10 +20,24 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
                                                c16_t **rxComp,
                                                c16_t (*rho)[nb_layers][pdsch_buf_size_max],
                                                int mod_order,
+                                               c16_t cpe,
                                                uint32_t symbol,
                                                uint32_t output_shift)
 {
   const uint32_t nvec = buffer_length / NRLB_N_RE; // SIMD vectors per symbol (NRLB_N_RE REs each)
+
+  /* PTRS phase correction. cpe is a per-symbol scalar common to every Rx antenna and layer,
+     so it factors straight out of the MRC sum:
+         sum_rx conj(cpe.h_rx).y_rx  ==  conj(cpe) . sum_rx conj(h_rx).y_rx
+     Rotating the accumulated output once per layer therefore costs one complex multiply per
+     RE instead of one per (layer x antenna) RE, and -- the reason it matters here -- leaves
+     every channel-derived term (ch_mag*, rho) independent of the symbol, so a chest_time=1
+     slot-constant channel can still have them computed once per slot. Upstream instead
+     rotates chFext per antenna before the conjugate multiply; same result up to rounding,
+     which differs because this rounds once after accumulation rather than per antenna.
+     With no PTRS the caller passes {INT16_MAX, 0} ("zero phase error"), so skip the pass
+     entirely and avoid both the work and its ~0.0003 dB scale error. */
+  const bool cpe_identity = (cpe.r == INT16_MAX && cpe.i == 0);
 
   NRLB_VI QAM_ampa = NRLB_SETZERO();
   NRLB_VI QAM_ampb = NRLB_SETZERO();
@@ -109,6 +123,13 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
             rho_v[i] = NRLB_MM(adds_epi16)(rho_v[i], NRLB_OAI(cpx_mult_conj)(chF_v[i], chF2_v[i], output_shift));
         }
       }
+    }
+
+    // de-rotate the MRC output by the PTRS phase (see cpe_identity above)
+    if (!cpe_identity) {
+      const NRLB_VI cpe_v = NRLB_MM(set1_epi32)(*(const int32_t *)&cpe);
+      for (uint32_t i = 0; i < nvec; i++)
+        rxComp_v[i] = NRLB_OAI(cpx_mult_conj)(cpe_v, rxComp_v[i], 15);
     }
   }
 }
