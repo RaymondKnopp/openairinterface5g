@@ -125,7 +125,12 @@ void nr_inner_rx_2layer_ml(uint32_t length,
                            int16_t *llr0,
                            int16_t *llr1,
                            int16_t *llr_cw,
-                           const int16_t *scramble);
+                           const int16_t *scramble,
+                           c16_t *mag0_slot,
+                           c16_t *mag1_slot,
+                           c16_t *rho01_slot,
+                           c16_t *rho10_slot,
+                           bool build_terms);
 
 /**
  * @brief Shared post-extraction inner RX dispatch (UE PDSCH + gNB PUSCH common detector set).
@@ -160,6 +165,8 @@ bool nr_inner_rx(uint32_t length,
                  bool lbest256,
                  int16_t *layer_scratch[nb_layer],
                  const int16_t *scramble,
-                 int16_t *llr_cw);
+                 int16_t *llr_cw,
+                 bool terms_slot,
+                 bool build_terms);
 
 #endif /* __NR_CHANNEL_COMPENSATION__H__ */

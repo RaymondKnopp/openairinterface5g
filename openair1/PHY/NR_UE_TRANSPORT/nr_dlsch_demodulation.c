@@ -1128,7 +1128,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
     if (nr_inner_rx(this_re, rx_size_symbol, nbRx, nl, qamModOrder, ptrs_phase, rxdataF_ext, chFext,
                     rxComp, mag_a, mag_b, mag_c,
                     (nl == 2) ? rho_dl[1] : NULL, (nl == 2) ? rho_dl[nl] : NULL,
-                    *log2_maxh, fuse_mode, do_ml, ml256, layer_scratch, seq_sym, llr_cw)) {
+                    *log2_maxh, fuse_mode, do_ml, ml256, layer_scratch, seq_sym, llr_cw,
+                    /*terms_slot=*/false, /*build_terms=*/false)) {
       cw_written = true; // shared dispatch wrote the demapped + descrambled codeword directly
     } else if (fuse_1layer) {
       // Register-fused single-layer inner RX (OAI_FUSE=2): no tile scratch / per-tile call; per-layer.

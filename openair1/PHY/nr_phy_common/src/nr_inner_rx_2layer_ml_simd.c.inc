@@ -17,12 +17,22 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
                                              int16_t *llr0,
                                              int16_t *llr1,
                                              int16_t *llr_cw,
-                                             const int16_t *scramble)
+                                             const int16_t *scramble,
+                                             c16_t *mag0_slot,
+                                             c16_t *mag1_slot,
+                                             c16_t *rho01_slot,
+                                             c16_t *rho10_slot,
+                                             bool build_terms)
 {
   /* PTRS phase: a per-symbol scalar common to every antenna and layer, so it factors out of
      the MRC sum and is applied once to the compensated stream (see nr_channel_comp_simd.c.inc).
      Leaves the channel-only terms (mag*, rho) symbol-invariant. {INT16_MAX,0} = no PTRS. */
   const bool cpe_identity = (cpe.r == INT16_MAX && cpe.i == 0);
+  /* chest_time == 1: mag and rho depend only on chFext, which is slot-constant, so the
+     caller can hand us slot-lifetime buffers instead of per-tile scratch -- built once
+     (build_terms) and read by every later symbol. NULL keeps the original tile scratch. */
+  const bool terms_slot = (rho01_slot != NULL);
+  const bool compute_terms = !terms_slot || build_terms;
   NRLB_VI QAM_ampa = NRLB_SETZERO();
   if (mod_order == 4)
     QAM_ampa = NRLB_MM(set1_epi16)(QAM16_n1);
@@ -40,10 +50,16 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
   __attribute__((aligned(32))) int16_t tl0[(TILE + 16) * 8], tl1[(TILE + 16) * 8]; // mod_order <= 8 (+1 SIMD block slop)
 
   NRLB_VI *rxC0 = (NRLB_VI *)rxC0_t, *rxC1 = (NRLB_VI *)rxC1_t;
-  NRLB_VI *mag0 = (NRLB_VI *)mag0_t, *mag1 = (NRLB_VI *)mag1_t;
-  NRLB_VI *rho01 = (NRLB_VI *)rho01_t, *rho10 = (NRLB_VI *)rho10_t;
 
   for (uint32_t base = 0; base < length; base += TILE) {
+    /* TILE is 96 REs = 384 B, so slot + base keeps the 64-byte alignment the vector
+       loads want at every width. */
+    c16_t *mag0_p = terms_slot ? &mag0_slot[base] : mag0_t;
+    c16_t *mag1_p = terms_slot ? &mag1_slot[base] : mag1_t;
+    c16_t *rho01_p = terms_slot ? &rho01_slot[base] : rho01_t;
+    c16_t *rho10_p = terms_slot ? &rho10_slot[base] : rho10_t;
+    NRLB_VI *mag0 = (NRLB_VI *)mag0_p, *mag1 = (NRLB_VI *)mag1_p;
+    NRLB_VI *rho01 = (NRLB_VI *)rho01_p, *rho10 = (NRLB_VI *)rho10_p;
     const uint32_t tre = (length - base < TILE) ? (length - base) : TILE;
     uint32_t hi = base + TILE;
     if (hi > buffer_length)
@@ -58,9 +74,11 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
       for (uint32_t i = 0; i < nblk; i++) {
         rxC0[i] = NRLB_OAI(cpx_mult_conj)(c0[i], rxF[i], output_shift);
         rxC1[i] = NRLB_OAI(cpx_mult_conj)(c1[i], rxF[i], output_shift);
-        rho01[i] = NRLB_OAI(cpx_mult_conj)(c0[i], c1[i], output_shift);
-        rho10[i] = NRLB_OAI(cpx_mult_conj)(c1[i], c0[i], output_shift);
-        if (mod_order > 2) {
+        if (compute_terms) {
+          rho01[i] = NRLB_OAI(cpx_mult_conj)(c0[i], c1[i], output_shift);
+          rho10[i] = NRLB_OAI(cpx_mult_conj)(c1[i], c0[i], output_shift);
+        }
+        if (compute_terms && mod_order > 2) {
           NRLB_VI m0 = NRLB_OAI(smadd)(c0[i], c0[i], output_shift);
           m0 = NRLB_MM(packs_epi32)(m0, m0);
           m0 = NRLB_MM(unpacklo_epi16)(m0, m0);
@@ -81,9 +99,11 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
       for (uint32_t i = 0; i < nblk; i++) {
         rxC0[i] = NRLB_MM(add_epi16)(rxC0[i], NRLB_OAI(cpx_mult_conj)(c0[i], rxF[i], output_shift));
         rxC1[i] = NRLB_MM(add_epi16)(rxC1[i], NRLB_OAI(cpx_mult_conj)(c1[i], rxF[i], output_shift));
-        rho01[i] = NRLB_MM(adds_epi16)(rho01[i], NRLB_OAI(cpx_mult_conj)(c0[i], c1[i], output_shift));
-        rho10[i] = NRLB_MM(adds_epi16)(rho10[i], NRLB_OAI(cpx_mult_conj)(c1[i], c0[i], output_shift));
-        if (mod_order > 2) {
+        if (compute_terms) {
+          rho01[i] = NRLB_MM(adds_epi16)(rho01[i], NRLB_OAI(cpx_mult_conj)(c0[i], c1[i], output_shift));
+          rho10[i] = NRLB_MM(adds_epi16)(rho10[i], NRLB_OAI(cpx_mult_conj)(c1[i], c0[i], output_shift));
+        }
+        if (compute_terms && mod_order > 2) {
           NRLB_VI m0 = NRLB_OAI(smadd)(c0[i], c0[i], output_shift);
           m0 = NRLB_MM(packs_epi32)(m0, m0);
           m0 = NRLB_MM(unpacklo_epi16)(m0, m0);
@@ -109,7 +129,7 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
       // Codeword-output mode: detector -> L1 per-layer tile scratch, then fold the layer demap
       // (interleave l0,l1 per RE) and optional descramble (+-1 mullo) into the store. Bit-exact
       // with {nr_compute_ML_llr to per-layer + nr_layer_demapping + codeword unscrambling}.
-      nr_compute_ML_llr(rxC0_t, rxC1_t, mag0_t, mag1_t, tl0, tl1, rho01_t, rho10_t, tre, mod_order);
+      nr_compute_ML_llr(rxC0_t, rxC1_t, mag0_p, mag1_p, tl0, tl1, rho01_p, rho10_p, tre, mod_order);
       int16_t *cw = llr_cw + (size_t)base * 2 * mod_order;              // 2 layers/RE
       const int16_t *s = scramble ? scramble + (size_t)base * 2 * mod_order : NULL;
       for (uint32_t i = 0; i < tre; i++) {
@@ -129,9 +149,9 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
         }
       }
     } else {
-      nr_compute_ML_llr(rxC0_t, rxC1_t, mag0_t, mag1_t,
+      nr_compute_ML_llr(rxC0_t, rxC1_t, mag0_p, mag1_p,
                         llr0 + (size_t)base * mod_order, llr1 + (size_t)base * mod_order,
-                        rho01_t, rho10_t, tre, mod_order);
+                        rho01_p, rho10_p, tre, mod_order);
     }
   }
 }

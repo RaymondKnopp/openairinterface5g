@@ -448,7 +448,8 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                                    (nb_layer == 2) ? rho[0][1] : NULL,
                                    (nb_layer == 2) ? rho[1][0] : NULL,
                                    output_shift, fuse_mode, /*do_ml=*/true, /*lbest256=*/gnb_lbest != 0,
-                                   layer_scratch, llr_cw ? scramble : NULL, llr_cw);
+                                   layer_scratch, llr_cw ? scramble : NULL, llr_cw,
+                                   /*terms_slot=*/hoist, /*build_terms=*/build_ch_terms);
   const bool did_fused = handled && (llr_cw != NULL); // codeword written directly => skip post-pass
   if (!handled) {
     if (nb_layer == 2) {

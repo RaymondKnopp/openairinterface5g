@@ -163,15 +163,20 @@ void nr_inner_rx_2layer_ml(uint32_t length,
                            int16_t *llr0,
                            int16_t *llr1,
                            int16_t *llr_cw,
-                           const int16_t *scramble)
+                           const int16_t *scramble,
+                           c16_t *mag0_slot,
+                           c16_t *mag1_slot,
+                           c16_t *rho01_slot,
+                           c16_t *rho10_slot,
+                           bool build_terms)
 {
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
-  nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
+  nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble, mag0_slot, mag1_slot, rho01_slot, rho10_slot, build_terms);
 #else
   if (nr_comp_simd_width_mode() == 1)
-    nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
+    nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble, mag0_slot, mag1_slot, rho01_slot, rho10_slot, build_terms);
   else
-    nr_inner_rx_2layer_ml_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
+    nr_inner_rx_2layer_ml_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble, mag0_slot, mag1_slot, rho01_slot, rho10_slot, build_terms);
 #endif
 }
 
@@ -219,7 +224,9 @@ bool nr_inner_rx(uint32_t length,
                  bool lbest256,
                  int16_t *layer_scratch[nb_layer],
                  const int16_t *scramble,
-                 int16_t *llr_cw)
+                 int16_t *llr_cw,
+                 bool terms_slot,
+                 bool build_terms)
 {
   const bool cw = (llr_cw != NULL); // codeword output (fold demap+descramble); else per-layer scratch
 
@@ -240,9 +247,14 @@ bool nr_inner_rx(uint32_t length,
 
   if (nb_layer == 2 && do_ml && (mod_order <= 6 || (mod_order == 8 && lbest256))) {
     if (fuse_mode == 1) { // tiled fused: MRC + rho + joint ML-LLR (+demap+descramble at store when cw)
+      /* chest_time == 1: mag_a/rho already point at the caller's slot-lifetime buffers, so
+         the fused kernel builds them once and later symbols read them at the tile offset. */
       nr_inner_rx_2layer_ml(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift,
                             cw ? NULL : layer_scratch[0], cw ? NULL : layer_scratch[1],
-                            cw ? llr_cw : NULL, cw ? scramble : NULL);
+                            cw ? llr_cw : NULL, cw ? scramble : NULL,
+                            terms_slot ? mag_a[0] : NULL, terms_slot ? mag_a[1] : NULL,
+                            terms_slot ? rho01 : NULL, terms_slot ? rho10 : NULL,
+                            build_terms);
       return true;
     }
     nr_compute_ML_llr(rxComp[0], rxComp[1], mag_a[0], mag_a[1], layer_scratch[0], layer_scratch[1],
