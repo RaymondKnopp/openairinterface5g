@@ -365,7 +365,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
   static int gnb_lbest_fuse = -1;
   if (gnb_lbest_fuse < 0) {
     const char *e = getenv("OAI_LBEST");
-    gnb_lbest_fuse = e ? atoi(e) : 0;
+    gnb_lbest_fuse = e ? atoi(e) : 1;
   }
   const bool ptrs_fuse = (rel15_ul->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS);
   const bool fuse_1layer = fuse_env && (nb_layer == 1)
@@ -426,7 +426,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
      the offset from MRCed rxdataF_comp, which was noted as broken for multiple ports. */
   start_meas(ulsch_llr);
   static int gnb_lbest = -1;
-  if (gnb_lbest < 0) { const char *e = getenv("OAI_LBEST"); gnb_lbest = e ? atoi(e) : 0; }
+  if (gnb_lbest < 0) { const char *e = getenv("OAI_LBEST"); gnb_lbest = e ? atoi(e) : 1; }
   const uint32_t valid_re = pusch_vars->ul_valid_re_per_slot[symbol];
   const int mod = rel15_ul->qam_mod_order;
   // Per-layer pointers into the compensated buffers (used by the shared dispatch's non-fused paths).
@@ -1010,9 +1010,10 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   if (total_layers == 2 && rel15_ul_ref->qam_mod_order > 6) {
     // 256QAM 2-layer: the full-ML detector wants a cooler LLR scale (-2) than the
     // linear MMSE receiver (-3); -3 saturates the ML metric and loses ~1 dB, while
-    // -2 recovers the full ML gain over MMSE (verified on TDL-A). Selected by OAI_LBEST.
+    // -2 recovers the full ML gain over MMSE (verified on TDL-A). On by default; OAI_LBEST=0
+    // reverts 2-layer 256QAM to MMSE and to the -3 linear scale.
     static int ml256 = -1;
-    if (ml256 < 0) { const char *e = getenv("OAI_LBEST"); ml256 = e ? atoi(e) : 0; }
+    if (ml256 < 0) { const char *e = getenv("OAI_LBEST"); ml256 = e ? atoi(e) : 1; }
     // ML (ml256): same mod-order correction + antenna term as the qam<=6 2-layer branch below
     // (nr_ml_llr_maxh_off(8) + log2_approx(num_sp_streams>>1)); at nb=4 that is -3+1 = -2, matching
     // the prior fixed -2, but it now tracks the antenna count and matches the UE. MMSE (!ml256) -3.

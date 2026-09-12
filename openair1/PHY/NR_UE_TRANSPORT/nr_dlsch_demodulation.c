@@ -767,16 +767,23 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
   // Controlled by ue->do_ml (set via -E flag in dlsim, or ue->do_ml in the UE struct).
   // When false (default), MMSE equalization is used for all configurations.
   bool do_ml = ue->do_ml;
-  // ANALYSIS gate (OAI_LBEST): route 2-layer 256QAM (Qm=8) to the float L-best ML kernel
-  // (nr_compute_ML_llr case 8) instead of the MMSE+single-layer fallback. Off by default.
+  // 2-layer 256QAM (Qm=8) goes to the reduced-search fixed-point L-best ML kernel
+  // (nr_compute_ML_llr case 8) rather than the MMSE+single-layer fallback. On by default
+  // under do_ml: measured on TDL-A 4x4, 2 layers, MCS22 table 1, the 3x3/9-candidate kernel
+  // matches the full 16x16 max-log ML to within run noise (BLER 0.570/0.570 at 24 dB,
+  // 0.243/0.233 at 26 dB) and beats MMSE by ~1.5-2 dB (0.757 / 0.413). OAI_LBEST=0 reverts
+  // 256QAM to MMSE.
   static int lbest_gate = -1;
-  if (lbest_gate < 0) { const char *e = getenv("OAI_LBEST"); lbest_gate = e ? atoi(e) : 0; }
+  if (lbest_gate < 0) { const char *e = getenv("OAI_LBEST"); lbest_gate = e ? atoi(e) : 1; }
   const bool ml256 = do_ml && lbest_gate;
-  // 3-layer detector selection mirrors the 2-layer path: MMSE is the default (fast linear,
-  // works for all modulations), and the hybrid ML detector (Schur-deflate one nuisance, keep
-  // the other discrete, 2-layer conditional-slice LLR) is opt-in via the do_ml/OAI_LBEST gate.
+  // 3-layer detector selection: MMSE is the default (fast linear, works for all modulations),
+  // and the hybrid ML detector (Schur-deflate one nuisance, keep the other discrete, 2-layer
+  // conditional-slice LLR) is opt-in via OAI_ML3 -- it has its own gate so that defaulting the
+  // 2-layer 256QAM detector on does not also switch the 3-layer receiver.
   // The hybrid covers QPSK/16/64/256QAM. (4-layer: MMSE only for now; hybrid is a later effort.)
-  const bool ml3 = do_ml && lbest_gate && nl == 3;
+  static int ml3_gate = -1;
+  if (ml3_gate < 0) { const char *e = getenv("OAI_ML3"); ml3_gate = e ? atoi(e) : 0; }
+  const bool ml3 = do_ml && ml3_gate && nl == 3;
 
   // Reinterpret flat dl_ch_estimates_ext as [nl][nbRx][rx_size_symbol]
   c16_t(*chFext)[nbRx][rx_size_symbol] = (void *)dl_ch_estimates_ext;

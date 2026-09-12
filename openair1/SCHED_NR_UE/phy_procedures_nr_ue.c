@@ -553,11 +553,6 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
                                                          freq_alloc->num_rbs * NR_NB_SC_PER_RB * dlschCfg->number_symbols,
                                                          &mt);
   }
-  // OAI_LBEST analysis gate: also allocate rho for 2-layer 256QAM (Qm=8) so the float
-  // L-best ML path in the demod can use it (off by default).
-  static int lbest256 = -1;
-  if (lbest256 < 0) { const char *e = getenv("OAI_LBEST"); lbest256 = e ? atoi(e) : 0; }
-
   // chest_time == 1: the channel-derived terms (ch_mag A/B/C, rho) are the same on every
   // data-only symbol, so nr_rx_pdsch builds them once and reuses them. The symbol loop is
   // sequential and dl_ch_mag*/rho_dl are slot-lifetime per-actor scratch, so a plain flag

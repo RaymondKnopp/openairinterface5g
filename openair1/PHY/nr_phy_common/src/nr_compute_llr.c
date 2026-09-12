@@ -3969,16 +3969,24 @@ void nr_compute_ML_llr(c16_t *rxdataF_comp0,
       nr_qam16_llr_2layer(rxdataF_comp1, rxdataF_comp0, ch_mag1, ch_mag0, llr_layers1, rho1, nb_re);
       break;
     case 6:
-      // 2-layer 64QAM. Default today = full ML search (nr_qam64_llr_2layer). The reduced-search
-      // L-best kernel (nr_qam64_llr_2layer_lbest_q15_simd16) tracks full-ML on 3GPP TDL with the
-      // hot ML LLR scaling and is faster (see nr_mimo_lbest_detector.md sec. 6a); it is opt-in via
-      // OAI_LBEST=1 for now, pending a proper RX-mode/config flag to make it the default.
-      // OAI_LBEST_PAT picks the candidate set (0=3x3 [default], 1=6-cand seed-aware, 2=5-plus).
+      // 2-layer 64QAM. Default = the reduced-search fixed-point L-best kernel
+      // (nr_qam64_llr_2layer_lbest_q15_simd16); OAI_LBEST64=0 selects the exact full-ML search
+      // (nr_qam64_llr_2layer). Measured on TDL-A 4x4, 2 layers, MCS20, nr_dlsim -Q32 -E, n=300:
+      // the reduced search costs ~0.2-0.3 dB (BLER 0.460 vs 0.363 at 15 dB, 0.200 vs 0.130 at
+      // 16 dB, 0.060 vs 0.033 at 17 dB) and is 2.1x faster on the LLR stage (48.3 vs 101.1 us).
+      // OAI_LBEST_PAT picks the candidate set (0=3x3 [default], 1=6-cand seed-aware, 2=5-plus);
+      // all three measure the same.
+      //
+      // IMPORTANT when re-measuring: this q15 kernel is sensitive to the fixed-point headroom and
+      // must be compared at a well-scaled tx amplitude (-Q30/-Q32, per nr_mimo_lbest_detector.md
+      // sec. 6a). At nr_dlsim's low -Q36 default it looks ~1.5 dB worse; that is the amplitude,
+      // not the kernel. The ML LLR scale from the nr_ml_llr_maxh_off table (-1 for 64QAM) is
+      // already the optimum for this kernel at -Q32 -- the residual gap is the search, not a shift.
       {
         static int lbest = -1, pat = 0;
         if (lbest < 0) {
-          const char *e = getenv("OAI_LBEST");
-          lbest = e ? atoi(e) : 0;
+          const char *e = getenv("OAI_LBEST64");
+          lbest = e ? atoi(e) : 1;
           const char *ep = getenv("OAI_LBEST_PAT");
           pat = ep ? atoi(ep) : 0;
         }
