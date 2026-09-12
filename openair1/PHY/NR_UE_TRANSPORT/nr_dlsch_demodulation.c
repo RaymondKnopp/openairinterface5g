@@ -1002,6 +1002,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                             p_rxComp,
                             need_rho ? (c16_t(*)[nl][pdsch_buf_size_max])rho_dl : NULL,
                             ptrs_phase,
+                            /*compute_ch_terms=*/true,
                             dlsch->cw_info.qamModOrder,
                             0, // symbol already baked into p_rxComp
                             *log2_maxh);

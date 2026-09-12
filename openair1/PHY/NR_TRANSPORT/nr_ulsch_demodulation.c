@@ -368,6 +368,11 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
   // memsets were previously unconditional and showed up as the residual ~9 µs "channel compensation"
   // time in fused runs; PTRS and transform-precoding, which read rxdataF_comp, are excluded from the
   // fuse gates above so they always fall in this branch.)
+  /* PROBE (temporary): OAI_SKIP_CHTERMS=1 skips the channel-only terms for every symbol to
+     size the chest_time==1 hoist. Output is WRONG with it set -- mag/rho are never built. */
+  static int skip_chterms = -1;
+  if (skip_chterms < 0) { const char *e = getenv("OAI_SKIP_CHTERMS"); skip_chterms = e ? atoi(e) : 0; }
+  const bool ch_terms_on = !skip_chterms;
   start_meas(pusch_ch_comp);
   if (!fuse_skip_comp) {
     memset(rho, 0, sizeof(rho));
@@ -385,6 +390,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                             pusch_vars->rxdataF_comp,
                             (nb_layer > 1) ? rho : NULL,
                             cpe,
+                            /*compute_ch_terms=*/ch_terms_on,
                             rel15_ul->qam_mod_order,
                             symbol,
                             output_shift);

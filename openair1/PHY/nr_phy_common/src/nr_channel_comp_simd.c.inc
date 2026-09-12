@@ -21,6 +21,7 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
                                                c16_t (*rho)[nb_layers][pdsch_buf_size_max],
                                                int mod_order,
                                                c16_t cpe,
+                                               bool compute_ch_terms,
                                                uint32_t symbol,
                                                uint32_t output_shift)
 {
@@ -38,6 +39,14 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
      With no PTRS the caller passes {INT16_MAX, 0} ("zero phase error"), so skip the pass
      entirely and avoid both the work and its ~0.0003 dB scale error. */
   const bool cpe_identity = (cpe.r == INT16_MAX && cpe.i == 0);
+
+  /* compute_ch_terms == false: ch_mag* and rho are functions of chFext alone, so with a
+     slot-constant channel (chest_time == 1, one fixed DMRS symbol for the whole slot) they
+     are identical for every symbol and the caller has already filled them. Skip rebuilding
+     them and do only the MRC, which is the part that depends on the received samples.
+     That is the 6-of-10 multiplies the DragonWing Hexagon inner_rx hoists out of its
+     per-symbol pass. The chF loads stay -- the MRC needs them -- so the saving is the
+     magnitude/rho arithmetic, not the traffic. */
 
   NRLB_VI QAM_ampa = NRLB_SETZERO();
   NRLB_VI QAM_ampb = NRLB_SETZERO();
@@ -68,7 +77,7 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
       for (uint32_t i = 0; i < nvec; i++) {
         rxComp_v[i] = NRLB_OAI(cpx_mult_conj)(chF_v[i], rxF_v[i], output_shift);
 
-        if (mod_order > 2) {
+        if (compute_ch_terms && mod_order > 2) {
           NRLB_VI mag = NRLB_OAI(smadd)(chF_v[i], chF_v[i], output_shift);
           mag = NRLB_MM(packs_epi32)(mag, mag);
           mag = NRLB_MM(unpacklo_epi16)(mag, mag);
@@ -82,7 +91,7 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
         }
       }
 
-      if (rho) {
+      if (rho && compute_ch_terms) {
         for (int atx = 0; atx < nb_layers; atx++) {
           NRLB_VI *rho_v = (NRLB_VI *)rho[aatx][atx];
           NRLB_VI *chF2_v = (NRLB_VI *)chFext[atx][0];
@@ -101,7 +110,7 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
         NRLB_VI comp = NRLB_OAI(cpx_mult_conj)(chF_v[i], rxF_v[i], output_shift);
         rxComp_v[i] = NRLB_MM(add_epi16)(rxComp_v[i], comp);
 
-        if (mod_order > 2) {
+        if (compute_ch_terms && mod_order > 2) {
           NRLB_VI mag = NRLB_OAI(smadd)(chF_v[i], chF_v[i], output_shift);
           mag = NRLB_MM(packs_epi32)(mag, mag);
           mag = NRLB_MM(unpacklo_epi16)(mag, mag);
@@ -115,7 +124,7 @@ static void NRLB_NAME(nr_channel_compensation)(uint32_t buffer_length,
         }
       }
 
-      if (rho) {
+      if (rho && compute_ch_terms) {
         for (int atx = 0; atx < nb_layers; atx++) {
           NRLB_VI *rho_v = (NRLB_VI *)rho[aatx][atx];
           NRLB_VI *chF2_v = (NRLB_VI *)chFext[atx][aarx];

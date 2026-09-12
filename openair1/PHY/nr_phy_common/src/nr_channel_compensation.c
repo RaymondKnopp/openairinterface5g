@@ -73,26 +73,27 @@ void nr_channel_compensation(uint32_t buffer_length,
                              c16_t **rxComp,
                              c16_t (*rho)[nb_layers][pdsch_buf_size_max],
                              c16_t cpe,
+                             bool compute_ch_terms,
                              int mod_order,
                              uint32_t symbol,
                              uint32_t output_shift)
 {
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
   nr_channel_compensation_w128(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                               ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+                               ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, compute_ch_terms, symbol, output_shift);
 #else
   const int w = nr_comp_simd_width_mode();
   if (w == 1)
     nr_channel_compensation_w128(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, compute_ch_terms, symbol, output_shift);
 #ifdef NR_COMP_HAVE_W512
   else if (w == 2)
     nr_channel_compensation_w512(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, compute_ch_terms, symbol, output_shift);
 #endif
   else
     nr_channel_compensation_w256(buffer_length, pdsch_buf_size_max, nb_rx_ant, nb_layers, rxFext, chFext,
-                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, symbol, output_shift);
+                                 ch_maga, ch_magb, ch_magc, rxComp, rho, mod_order, cpe, compute_ch_terms, symbol, output_shift);
 #endif
 }
 
