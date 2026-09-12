@@ -753,7 +753,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
                 c16_t rho_dl[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                const int16_t *scramble)
+                const int16_t *scramble,
+                uint16_t is_ptrs)
 {
   NR_DL_FRAME_PARMS *fp = &ue->frame_parms;
   const int nl = dlsch->cw_info.Nl;

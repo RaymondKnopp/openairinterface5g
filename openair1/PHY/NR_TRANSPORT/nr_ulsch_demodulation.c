@@ -378,6 +378,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                             rxF_ch_magc,
                             pusch_vars->rxdataF_comp,
                             (nb_layer > 1) ? rho : NULL,
+                            cpe,
                             rel15_ul->qam_mod_order,
                             symbol,
                             output_shift);
@@ -395,16 +396,10 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                            rel15_ul->qam_mod_order);
     nr_idft((int32_t *)&pusch_vars->rxdataF_comp[0][symbol * buffer_length], pusch_vars->ul_valid_re_per_slot[symbol]);
   }
-  /* PTRS processing for multiple antenna ports is broken because the following
-  function estimates phase offset from and applies compensation to rxdataF_comp
-  for each antenna port but rxdataF_comp has MRCed data. */
-  /* TODO: Move PTRS phase estimation before immediately after DMRS channels
-  estimation and apply PTRS phase compensation in nr_channel_compensationi() */
-  if (rel15_ul->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS) {
-    // rxdataF_comp is MRCed so no point in processing all antenna ports. Fixme.
-    nr_pusch_ptrs_processing(gNB, frame_parms, rel15_ul, pusch_vars, slot, symbol, 1, buffer_length);
-    pusch_vars->ul_valid_re_per_slot[symbol] -= pusch_vars->ptrs_re_per_slot;
-  }
+  /* No post-hoc PTRS pass here any more: upstream's ptrs refactor applies the phase inside
+     the channel compensation (the cpe argument above) and drops PTRS REs during extraction
+     (the is_ptrs path), so ul_valid_re_per_slot is already correct. The old code estimated
+     the offset from MRCed rxdataF_comp, which was noted as broken for multiple ports. */
   start_meas(ulsch_llr);
   static int gnb_lbest = -1;
   if (gnb_lbest < 0) { const char *e = getenv("OAI_LBEST"); gnb_lbest = e ? atoi(e) : 0; }
@@ -424,7 +419,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
   // Shared inner RX (comp already done above for the non-fused paths). gNB 2-layer uses ML for
   // qam<=6 always and 256QAM under the L-best gate (do_ml=true, lbest256=gnb_lbest); the else
   // (2-layer 256QAM without L-best) and >2 layers fall through to the caller-specific fallbacks.
-  const bool handled = nr_inner_rx(valid_re, buffer_length, nb_rx_ant, nb_layer, mod, rxFext, chFext,
+  const bool handled = nr_inner_rx(valid_re, buffer_length, nb_rx_ant, nb_layer, mod, cpe, rxFext, chFext,
                                    rxComp, mag_a, mag_b, mag_c,
                                    (nb_layer == 2) ? rho[0][1] : NULL,
                                    (nb_layer == 2) ? rho[1][0] : NULL,
@@ -461,6 +456,11 @@ typedef struct puschSymbolProc_s {
   uint32_t nvar;
   uint16_t ptrs_symb_pos;
   c16_t *ptrs_cpe;
+  /* per-worker timing: the symbol proc takes these by pointer rather than sharing the
+     gNB-level counters, so parallel symbol tasks do not contend on them */
+  time_stats_t pusch_extr;
+  time_stats_t pusch_ch_comp;
+  time_stats_t ulsch_llr;
   int beam_nb;
   // TODO: Remove assumption of contiguous ports after DAS is properly handled in beamforming
   uint16_t ant_port_start;
@@ -1021,6 +1021,9 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       rdata->ant_port_start = ant_port_start;
       rdata->rxFext_slot_mem = rxFext_slot_mem;
       rdata->pusch_ch_est_dmrs_interpl_slot_mem = pusch_ch_est_dmrs_interpl_slot_mem;
+      reset_meas(&rdata->pusch_extr);
+      reset_meas(&rdata->pusch_ch_comp);
+      reset_meas(&rdata->ulsch_llr);
       rdata->group_size = group_size;
       rdata->rel15_ul_group = rel15_ul_group;
       rdata->pusch_vars_group = pusch_vars_group;
