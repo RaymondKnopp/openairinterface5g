@@ -555,8 +555,12 @@ static void nr_pusch_symbol_processing(void *arg)
     const bool uniform_sym = !((rel15_ul->ul_dmrs_symb_pos >> symbol) & 0x01)
                              && !IS_BIT_SET(rdata->ptrs_symb_pos, symbol);
     const bool build_terms = rdata->rho_slot && uniform_sym && rdata->compute_terms_task && !terms_built;
-    // readers may only share the slot terms once the builder has actually filled them
-    const bool use_slot_terms = rdata->rho_slot && uniform_sym && (build_terms || *rdata->terms_ready);
+    /* Opportunistic: the builder is not serialised ahead of the pool (doing that cost more
+       wall time on the A72 than the arithmetic it saved), so a reader that starts before
+       the terms are published just builds its own in per-symbol scratch. Acquire/release
+       pairs the flag with the buffer contents. */
+    const bool use_slot_terms = rdata->rho_slot && uniform_sym
+                                && (build_terms || __atomic_load_n(rdata->terms_ready, __ATOMIC_ACQUIRE));
 
     const bool descr_fused = inner_rx(gNB,
              slot,
@@ -585,7 +589,7 @@ static void nr_pusch_symbol_processing(void *arg)
              /*build_ch_terms=*/build_terms);
     if (build_terms) {
       terms_built = true;
-      *rdata->terms_ready = true;
+      __atomic_store_n(rdata->terms_ready, true, __ATOMIC_RELEASE);
     }
     if (descr_fused)
       continue; // layer demap + descramble already folded into the store
@@ -1120,9 +1124,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
         builder_assigned = true;
       rdata->terms_ready = &terms_ready;
 
-      if ((rel15_ul_ref->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS)
-          || (hoist_terms && rdata->compute_terms_task)) {
-        // run the terms-building task here: the readers dispatched below depend on it
+      if (rel15_ul_ref->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS) {
         nr_pusch_symbol_processing(rdata);
       } else {
         task_t t = {.func = &nr_pusch_symbol_processing, .args = rdata};
