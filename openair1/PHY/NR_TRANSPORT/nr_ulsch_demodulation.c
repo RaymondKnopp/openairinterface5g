@@ -175,7 +175,10 @@ static void nr_ulsch_extract_rbs(c16_t *const rxF,
           idx++;
         }
       }
-      k += NR_NB_SC_PER_RB;
+      /* wrap: the DC-crossing branch above derives neg from (k + 12 - fft_size), so k must
+         stay inside the FFT. Without this it keeps growing past fft_size, neg exceeds 12 on
+         the next RB, and (NR_NB_SC_PER_RB - neg) underflows into a ~17 GB memcpy. */
+      k = (k + NR_NB_SC_PER_RB) % fft_size;
     }
   } else if (is_dmrs_symbol == 0) {
     if (start_re + nb_re_pusch <= frame_parms->ofdm_symbol_size)
