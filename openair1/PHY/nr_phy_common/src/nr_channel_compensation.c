@@ -108,17 +108,18 @@ void nr_inner_rx_1layer(uint32_t length,
                         c16_t rxFext[nb_rx_ant][buffer_length],
                         c16_t chFext[nb_rx_ant][buffer_length],
                         int mod_order,
+                        c16_t cpe,
                         int output_shift,
                         int16_t *llr,
                         const int16_t *scramble)
 {
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
-  nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr, scramble);
+  nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
 #else
   if (nr_comp_simd_width_mode() == 1)
-    nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr, scramble);
+    nr_inner_rx_1layer_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
   else
-    nr_inner_rx_1layer_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr, scramble);
+    nr_inner_rx_1layer_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr, scramble);
 #endif
 }
 
@@ -129,16 +130,17 @@ void nr_inner_rx_1layer_reg(uint32_t length,
                             c16_t rxFext[nb_rx_ant][buffer_length],
                             c16_t chFext[nb_rx_ant][buffer_length],
                             int mod_order,
+                            c16_t cpe,
                             int output_shift,
                             int16_t *llr)
 {
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
-  nr_inner_rx_1layer_reg_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr);
+  nr_inner_rx_1layer_reg_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr);
 #else
   if (nr_comp_simd_width_mode() == 1)
-    nr_inner_rx_1layer_reg_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr);
+    nr_inner_rx_1layer_reg_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr);
   else
-    nr_inner_rx_1layer_reg_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr);
+    nr_inner_rx_1layer_reg_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr);
 #endif
 }
 
@@ -155,6 +157,7 @@ void nr_inner_rx_2layer_ml(uint32_t length,
                            c16_t rxFext[nb_rx_ant][buffer_length],
                            c16_t chFext[2][nb_rx_ant][buffer_length],
                            int mod_order,
+                           c16_t cpe,
                            int output_shift,
                            int16_t *llr0,
                            int16_t *llr1,
@@ -162,12 +165,12 @@ void nr_inner_rx_2layer_ml(uint32_t length,
                            const int16_t *scramble)
 {
 #if defined(SIMDE_ARM_NEON_A64V8_NATIVE) || defined(__aarch64__)
-  nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr0, llr1, llr_cw, scramble);
+  nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
 #else
   if (nr_comp_simd_width_mode() == 1)
-    nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr0, llr1, llr_cw, scramble);
+    nr_inner_rx_2layer_ml_w128(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
   else
-    nr_inner_rx_2layer_ml_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift, llr0, llr1, llr_cw, scramble);
+    nr_inner_rx_2layer_ml_w256(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift, llr0, llr1, llr_cw, scramble);
 #endif
 }
 
@@ -200,6 +203,7 @@ bool nr_inner_rx(uint32_t length,
                  int nb_rx_ant,
                  int nb_layer,
                  int mod_order,
+                 c16_t cpe,
                  c16_t rxFext[nb_rx_ant][buffer_length],
                  c16_t chFext[nb_layer][nb_rx_ant][buffer_length],
                  c16_t *rxComp[nb_layer],
@@ -220,7 +224,7 @@ bool nr_inner_rx(uint32_t length,
 
   if (nb_layer == 1) {
     if (fuse_mode == 1) { // tiled fused: MRC+LLR (+descramble at store when cw)
-      nr_inner_rx_1layer(length, buffer_length, nb_rx_ant, rxFext, chFext[0], mod_order, output_shift,
+      nr_inner_rx_1layer(length, buffer_length, nb_rx_ant, rxFext, chFext[0], mod_order, cpe, output_shift,
                          cw ? llr_cw : layer_scratch[0], cw ? scramble : NULL);
       return true;
     }
@@ -235,7 +239,7 @@ bool nr_inner_rx(uint32_t length,
 
   if (nb_layer == 2 && do_ml && (mod_order <= 6 || (mod_order == 8 && lbest256))) {
     if (fuse_mode == 1) { // tiled fused: MRC + rho + joint ML-LLR (+demap+descramble at store when cw)
-      nr_inner_rx_2layer_ml(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, output_shift,
+      nr_inner_rx_2layer_ml(length, buffer_length, nb_rx_ant, rxFext, chFext, mod_order, cpe, output_shift,
                             cw ? NULL : layer_scratch[0], cw ? NULL : layer_scratch[1],
                             cw ? llr_cw : NULL, cw ? scramble : NULL);
       return true;

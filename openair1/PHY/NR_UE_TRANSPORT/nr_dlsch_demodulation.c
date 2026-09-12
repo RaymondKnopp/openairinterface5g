@@ -748,8 +748,8 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                 c16_t dl_ch_mag[NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t dl_ch_magb[NR_MAX_NB_LAYERS][pdsch_buf_size_max],
                 c16_t dl_ch_magr[NR_MAX_NB_LAYERS][pdsch_buf_size_max],
-                c16_t ptrs_phase_per_slot[][NR_SYMBOLS_PER_SLOT],
-                int32_t ptrs_re_per_slot[][NR_SYMBOLS_PER_SLOT],
+                c16_t ptrs_phase,
+                uint ptrs_re_per_symbol,
                 uint32_t nvar,
                 pdsch_scope_req_t *scope_req,
                 c16_t rho_dl[NR_MAX_NB_LAYERS * NR_MAX_NB_LAYERS][pdsch_buf_size_max],
@@ -1000,6 +1000,7 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
                             dl_ch_magr,
                             p_rxComp,
                             need_rho ? (c16_t(*)[nl][pdsch_buf_size_max])rho_dl : NULL,
+                            ptrs_phase,
                             dlsch->cw_info.qamModOrder,
                             0, // symbol already baked into p_rxComp
                             *log2_maxh);
@@ -1122,14 +1123,14 @@ int nr_rx_pdsch(PHY_VARS_NR_UE *ue,
       mag_c[l] = dl_ch_magr[l];
       layer_scratch[l] = layer_llr[l];
     }
-    if (nr_inner_rx(this_re, rx_size_symbol, nbRx, nl, qamModOrder, rxdataF_ext, chFext,
+    if (nr_inner_rx(this_re, rx_size_symbol, nbRx, nl, qamModOrder, ptrs_phase, rxdataF_ext, chFext,
                     rxComp, mag_a, mag_b, mag_c,
                     (nl == 2) ? rho_dl[1] : NULL, (nl == 2) ? rho_dl[nl] : NULL,
                     *log2_maxh, fuse_mode, do_ml, ml256, layer_scratch, seq_sym, llr_cw)) {
       cw_written = true; // shared dispatch wrote the demapped + descrambled codeword directly
     } else if (fuse_1layer) {
       // Register-fused single-layer inner RX (OAI_FUSE=2): no tile scratch / per-tile call; per-layer.
-      nr_inner_rx_1layer_reg(this_re, rx_size_symbol, nbRx, rxdataF_ext, chFext[0], qamModOrder, *log2_maxh, layer_llr[0]);
+      nr_inner_rx_1layer_reg(this_re, rx_size_symbol, nbRx, rxdataF_ext, chFext[0], qamModOrder, ptrs_phase, *log2_maxh, layer_llr[0]);
     } else if (nl == 2) {
       // 2-layer linear MMSE — every nl==2 case the shared dispatch didn't handle: do_ml off (any
       // mod order) or 256QAM without ml256. Fused per-RE MMSE (L=1) + per-layer LLR

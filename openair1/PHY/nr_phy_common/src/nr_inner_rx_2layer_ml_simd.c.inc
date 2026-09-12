@@ -12,12 +12,17 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
                                              c16_t rxFext[nb_rx_ant][buffer_length],
                                              c16_t chFext[2][nb_rx_ant][buffer_length],
                                              int mod_order,
+                                             c16_t cpe,
                                              int output_shift,
                                              int16_t *llr0,
                                              int16_t *llr1,
                                              int16_t *llr_cw,
                                              const int16_t *scramble)
 {
+  /* PTRS phase: a per-symbol scalar common to every antenna and layer, so it factors out of
+     the MRC sum and is applied once to the compensated stream (see nr_channel_comp_simd.c.inc).
+     Leaves the channel-only terms (mag*, rho) symbol-invariant. {INT16_MAX,0} = no PTRS. */
+  const bool cpe_identity = (cpe.r == INT16_MAX && cpe.i == 0);
   NRLB_VI QAM_ampa = NRLB_SETZERO();
   if (mod_order == 4)
     QAM_ampa = NRLB_MM(set1_epi16)(QAM16_n1);
@@ -88,6 +93,14 @@ static void NRLB_NAME(nr_inner_rx_2layer_ml)(uint32_t length,
           m1 = NRLB_MM(unpacklo_epi16)(m1, m1);
           mag1[i] = NRLB_MM(add_epi16)(mag1[i], NRLB_MM(mulhrs_epi16)(m1, QAM_ampa));
         }
+      }
+    }
+
+    if (!cpe_identity) {
+      const NRLB_VI cpe_v = NRLB_MM(set1_epi32)(*(const int32_t *)&cpe);
+      for (uint32_t i = 0; i < nblk; i++) {
+        rxC0[i] = NRLB_OAI(cpx_mult_conj)(cpe_v, rxC0[i], 15);
+        rxC1[i] = NRLB_OAI(cpx_mult_conj)(cpe_v, rxC1[i], 15);
       }
     }
 

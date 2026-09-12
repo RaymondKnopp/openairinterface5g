@@ -13,9 +13,14 @@ static void NRLB_NAME(nr_inner_rx_1layer_reg)(uint32_t length,
                                               c16_t rxFext[nb_rx_ant][buffer_length],
                                               c16_t chFext[nb_rx_ant][buffer_length],
                                               int mod_order,
+                                              c16_t cpe,
                                               int output_shift,
                                               int16_t *llr)
 {
+  /* PTRS phase: a per-symbol scalar common to every antenna and layer, so it factors out of
+     the MRC sum and is applied once to the compensated stream (see nr_channel_comp_simd.c.inc).
+     Leaves the channel-only terms (mag*, rho) symbol-invariant. {INT16_MAX,0} = no PTRS. */
+  const bool cpe_identity = (cpe.r == INT16_MAX && cpe.i == 0);
   const NRLB_VI ones_v = NRLB_MM(set1_epi16)(1);
 #define NRLB_PABS(v) NRLB_MM(abs_epi16)(NRLB_MM(adds_epi16)(NRLB_MM(subs_epi16)((v), ones_v), ones_v))
 
@@ -58,6 +63,9 @@ static void NRLB_NAME(nr_inner_rx_1layer_reg)(uint32_t length,
         }
       }
     }
+
+    if (!cpe_identity)
+      rxComp = NRLB_OAI(cpx_mult_conj)(NRLB_MM(set1_epi32)(*(const int32_t *)&cpe), rxComp, 15);
 
     // LLR in registers. int32-per-RE layout [v0, s1, s2, s3][re] == the bytes nr_XXqam_llr write.
     const int npr = mod_order / 2; // int32 (c16) words per RE
