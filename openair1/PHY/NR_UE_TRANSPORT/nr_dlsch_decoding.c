@@ -205,13 +205,21 @@ void nr_dlsch_decoding(PHY_VARS_NR_UE *phy_vars_ue,
     }
 
   if (crcok) {
-    uint8_t *output = b;
-    const uint8_t *in = harq_process->c;
-    const int sz = (harq_process->K - harq_process->F) / 8 - (harq_process->C > 1 ? 3 : 0);
-    for (int r = 0; r < TB_parameters.C; r++) {
-      memcpy(output, in, sz);
-      output += sz;
-      in += harq_process->K / 8;
+    if (TB_parameters.backend_desegmented) {
+      /* The decoding backend did 38.212 5.2.2 itself and returned the transport block with
+       * every CRC24B checked and dropped, so ->c is the contiguous payload rather than C
+       * code-block slots at a K/8 stride. De-segmenting again would take each block after
+       * the first from the wrong offset. */
+      memcpy(b, harq_process->c, TB_parameters.A >> 3);
+    } else {
+      uint8_t *output = b;
+      const uint8_t *in = harq_process->c;
+      const int sz = (harq_process->K - harq_process->F) / 8 - (harq_process->C > 1 ? 3 : 0);
+      for (int r = 0; r < TB_parameters.C; r++) {
+        memcpy(output, in, sz);
+        output += sz;
+        in += harq_process->K / 8;
+      }
     }
   } else {
     LOG_D(PHY, "frame=%d, slot=%d, first_rx=%d, rv_index=%d\n", proc->frame_rx, proc->nr_slot_rx, harq_process->first_rx, cw_info->rv);
@@ -226,7 +234,10 @@ void nr_dlsch_decoding(PHY_VARS_NR_UE *phy_vars_ue,
 
   harq_process->decodeResult = harq_process->processedSegments == harq_process->C;
 
-  if (harq_process->decodeResult && harq_process->C > 1) {
+  /* The backend-de-segmented path also has the transport-block CRC24A checked and stripped by
+   * the device (->c is exactly A/8 bytes, no CRC appended), so re-checking it here can only
+   * ever fail. The device reports that CRC alongside the per-code-block ones. */
+  if (harq_process->decodeResult && harq_process->C > 1 && !TB_parameters.backend_desegmented) {
     /* check global CRC */
     // we have regrouped the transport block
     if (!check_crc(b, lenWithCrc(1, cw_info->TBS), crcType(1, cw_info->TBS))) {
