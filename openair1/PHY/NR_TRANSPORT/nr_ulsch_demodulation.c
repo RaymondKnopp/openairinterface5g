@@ -373,7 +373,18 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                            && !ptrs_fuse;
   // 2-layer near-ML path: QPSK/16QAM/64QAM, or 256QAM under the L-best gate (matches the LLR
   // dispatch below). The 256QAM-MMSE path is not fused here.
-  const bool fuse_2layer_ml = fuse_env && (nb_layer == 2)
+  /* OAI_UL_MMSE=1 forces the linear MMSE receiver for 2 layers instead of the near-ML one, so the
+   * cost of the advanced receiver can be measured against its coverage gain. Measured on the A72,
+   * 273 PRB MCS19, 2 layers on 4 RX: symbol processing 1058 us (MMSE) vs 1832 us (near-ML), for
+   * ~1 dB on TDL-A. On a fully loaded array (2 layers on 2 RX, TDL-A, MCS9) the linear receiver
+   * instead saturates near 45% throughput at any SNR while near-ML reaches 100% by 14 dB.
+   * Analysis gate; the near-ML receiver stays the default. */
+  static int ul_mmse = -1;
+  if (ul_mmse < 0) {
+    const char *e = getenv("OAI_UL_MMSE");
+    ul_mmse = (e && atoi(e)) ? 1 : 0;
+  }
+  const bool fuse_2layer_ml = fuse_env && (nb_layer == 2) && !ul_mmse
                               && (rel15_ul->qam_mod_order <= 6 || (rel15_ul->qam_mod_order == 8 && gnb_lbest_fuse))
                               && !ptrs_fuse;
   const bool fuse_skip_comp = fuse_1layer || fuse_2layer_ml;
@@ -447,7 +458,7 @@ static bool inner_rx(PHY_VARS_gNB *gNB,
                                    rxComp, mag_a, mag_b, mag_c,
                                    (nb_layer == 2) ? rho[0][1] : NULL,
                                    (nb_layer == 2) ? rho[1][0] : NULL,
-                                   output_shift, fuse_mode, /*do_ml=*/true, /*lbest256=*/gnb_lbest != 0,
+                                   output_shift, fuse_mode, /*do_ml=*/!ul_mmse, /*lbest256=*/gnb_lbest != 0,
                                    layer_scratch, llr_cw ? scramble : NULL, llr_cw,
                                    /*terms_slot=*/hoist, /*build_terms=*/build_ch_terms);
   const bool did_fused = handled && (llr_cw != NULL); // codeword written directly => skip post-pass
