@@ -572,9 +572,15 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
 
     bool crc_valid = false;
 
+    /* TB-mode offload: the accelerator checks AND STRIPS both the per-code-block
+     * CRC24B and the transport-block CRC24A, returning exactly A/8 payload bytes
+     * with no CRC appended (out_len == A/8, and crc_stat reports every CRC result
+     * including the TB one). Re-running check_crc() over ->b therefore always
+     * fails for C > 1 -- which is why only C == 1, the branch that skips the
+     * re-check, ever decoded. See the matching note in nr_ulsch_decoding.c. */
     // if all segments are done
     if (ulsch_harq->processedSegments == ulsch_harq->C) {
-      if (ulsch_harq->C > 1) {
+      if (ulsch_harq->C > 1 && !ulsch_harq->backend_desegmented) {
         int tbs = pusch_pdu->pusch_data.tb_size;
         crc_valid = check_crc(ulsch_harq->b, lenWithCrc(1, tbs << 3), crcType(1, tbs << 3));
       } else {

@@ -707,10 +707,16 @@ static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
   active_dev.enc_cap_flags = _ec ? _ec->cap.ldpc_enc.capability_flags : 0xffffffffu;
   active_dev.dec_cap_flags = _dc ? _dc->cap.ldpc_dec.capability_flags : 0xffffffffu;
 
-  /* Saturation (plain int16 -> int8 clamp) is a T2 convention. The LA12xx
-   * advertises llr_size = 8 with llr_decimals = 1, i.e. S7.1 fixed point, so
-   * its LLRs must be *rescaled* by llr_scaling() rather than clamped. */
-  active_dev.saturate_llrs = is_t2;
+  /* Saturate (plain int16 -> int8 clamp) rather than rescale, on the LA12xx as well
+   * as the T2. llr_scaling() normalises each code block by its own max |LLR|, and
+   * at 2 layers the post-detection dynamic range is wide enough that this crushes
+   * the small LLRs to zero: the device then fails the syndrome check on every code
+   * block (status 0x4, all-zero output) while 1 layer still decodes. It is also
+   * pure overhead -- a max-scan plus a scale over every code block, ~150 us/slot at
+   * 1 layer 273 PRB. This is what the LLR-format comment above already prescribed;
+   * the assignment had been left keyed to is_t2, and the now-dead guard below it
+   * (saturate_llrs && !is_t2) was the tell. */
+  active_dev.saturate_llrs = is_t2 || dev_is_la12xx(&active_dev.info);
   if (active_dev.saturate_llrs && !is_t2)
     LOG_I(NR_PHY, "%s: saturating LLRs to int8 instead of rescaling\n", active_dev.info.drv.driver_name);
 
@@ -1348,6 +1354,9 @@ static int retrieve_ldpc_dec_op(struct rte_bbdev_dec_op **ops, nrLDPC_slot_decod
                ops[h]->status, ops[h]->ldpc_dec.iter_count,
                data[0], data[1], data[2], data[3]);
       memcpy(p->c, data, data_len);
+      /* Tell the caller not to de-segment or re-check the TB CRC: the device did
+       * both, and ->c is the contiguous payload with every CRC already stripped. */
+      p->backend_desegmented = true;
     }
     return 0;
   }

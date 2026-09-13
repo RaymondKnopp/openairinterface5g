@@ -156,6 +156,9 @@ typedef struct {
   uint32_t E;
   /// Number of segments processed so far
   uint32_t processedSegments;
+  /// Decoding backend already de-segmented and verified both CRC layers (see
+  /// nrLDPC_TB_decoding_parameters_t::backend_desegmented)
+  bool backend_desegmented;
   decode_abort_t abort_decode;
   /// Last index of LLR buffer that contains information.
   /// Used for computing LDPC decoder R

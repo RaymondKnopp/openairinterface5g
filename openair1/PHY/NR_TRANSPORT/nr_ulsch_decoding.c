@@ -124,6 +124,10 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
     uint8_t harq_pid = ulsch->harq_pid;
 
     nrLDPC_TB_decoding_parameters_t *TB_parameters = &TBs[pusch_id];
+    /* TBs[] is an uninitialised VLA: clear the backend flag before the backend
+     * runs, so a backend that does not set it cannot inherit stack garbage and
+     * skip de-segmentation / the TB CRC check. */
+    TB_parameters->backend_desegmented = false;
 
     if (!harq_process) {
       LOG_E(PHY, "ulsch_decoding.c: NULL harq_process pointer\n");
@@ -300,6 +304,17 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
 
     uint32_t offset = 0, r_offset = 0;
     LOG_D(PHY, "C = %d\n", TB_parameters->C);
+    /* TB-mode offload: the accelerator does 38.212 5.2.2 segmentation itself and
+     * returns the de-segmented transport block with every CRC24B already checked
+     * and dropped, so harq_process->c holds the payload contiguously rather than
+     * C code-block slots at a K/8 stride. Re-running the de-segmentation below
+     * would read every segment after the first from the wrong offset. */
+    harq_process->backend_desegmented = TB_parameters->backend_desegmented;
+    if (TB_parameters->backend_desegmented) {
+      if (harq_process->processedSegments == TB_parameters->C)
+        memcpy(harq_process->b, harq_process->c, TB_parameters->A >> 3);
+      goto tb_done;
+    }
     for (int r = 0; r < TB_parameters->C; r++) {
       LOG_D(PHY, "Segment %d %d\n", r, TB_parameters->decodeSuccess[r]);
       uint32_t seg_len = (harq_process->K >> 3) - (harq_process->F >> 3) - ((harq_process->C > 1) ? 3 : 0);
@@ -311,6 +326,8 @@ int nr_ulsch_decoding(PHY_VARS_gNB *phy_vars_gNB,
       offset += seg_len;
       r_offset += (harq_process->K >> 3);
     }
+tb_done:
+    ;
     bool crcok = (harq_process->processedSegments == TB_parameters->C);
     if (!crcok)
       LOG_D(PHY, "ULSCH %d in error\n", ULSCH_id);

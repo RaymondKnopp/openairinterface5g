@@ -46,6 +46,12 @@ typedef struct nrLDPC_TB_decoding_parameters_s{
 
   uint32_t harq_unique_pid;
   uint32_t *processedSegments;
+  /// Set by the decoding backend when IT performed 38.212 5.2.2 de-segmentation and
+  /// checked+dropped the CRC24B of every code block and the transport-block CRC24A,
+  /// so ->c holds the contiguous payload (A/8 bytes, no CRC) rather than C code-block
+  /// slots at a K/8 stride. The caller must then neither de-segment nor re-check the
+  /// TB CRC. Left false by every backend that returns the classic per-CB layout.
+  bool backend_desegmented;
 
   uint16_t nb_rb;
   uint8_t Qm;
