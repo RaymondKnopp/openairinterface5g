@@ -2130,8 +2130,22 @@ llr_scaling(int16_t *llr, int llr_len, uint8_t *llr_scaled, int8_t llr_size, int
   }
 }
 
+/* LDPC_AAL_PROF=1: split the decode call into its three costs. The shipped counters do not
+ * separate them -- "ULSCH segments decoding time" brackets only the enqueue/dequeue round
+ * trip, so everything else lands in the caller's total. Analysis only; three clock_gettime
+ * calls per slot. */
+static double aal_prof_us(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec * 1e6 + ts.tv_nsec / 1e3;
+}
+static double prof_conv = 0, prof_gather = 0, prof_total = 0;
+static long prof_n = 0;
+
 int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_decoding_parameters)
 {
+  const double _p_t0 = aal_prof_us();
   pthread_mutex_lock(&decode_mutex);
 
   int ret;
@@ -2183,13 +2197,27 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
       uint8_t *dst = &l_ol[offset];
 
       if (active_dev.saturate_llrs) {
-        // Saturate int16 -> int8 rather than rescaling (T2 and LA12xx).
-        uint16_t z_ol[LDPC_MAX_CB_SIZE] __attribute__((aligned(16)));
-        memcpy(z_ol, p->llr + data_off, E * sizeof(uint16_t));
-        simde__m128i *pv_ol128 = (simde__m128i *)z_ol;
+        /* Saturate int16 -> int8 rather than rescaling (T2 and LA12xx). Read the LLRs straight
+         * from p->llr with unaligned loads: staging each code block through an aligned stack
+         * buffer first only bought alignment, and cost a second pass over every LLR in the slot
+         * (904 kB per slot at 2 layers, 273 PRB) plus a 16.9 kB stack frame. Measured on the A72,
+         * 273 PRB MCS19: the conversion drops 181 -> 108 us at 2 layers and 93 -> 54 us at 1.
+         * Only the final partial block is staged, to avoid reading past the end of p->llr. */
+        const int16_t *src = (const int16_t *)(p->llr + data_off);
         simde__m128i *pl_ol128 = (simde__m128i *)dst;
-        for (int i = 0, j = 0; j < ((E + 15) >> 4); i += 2, j++) {
-          pl_ol128[j] = simde_mm_packs_epi16(pv_ol128[i], pv_ol128[i + 1]);
+        const int full = E >> 4;
+        for (int j = 0; j < full; j++) {
+          simde__m128i lo = simde_mm_loadu_si128((const simde__m128i *)(src + j * 16));
+          simde__m128i hi = simde_mm_loadu_si128((const simde__m128i *)(src + j * 16 + 8));
+          simde_mm_storeu_si128(&pl_ol128[j], simde_mm_packs_epi16(lo, hi));
+        }
+        const int rem = E - (full << 4);
+        if (rem > 0) {
+          int16_t tail[16] = {0};
+          memcpy(tail, src + (full << 4), (size_t)rem * sizeof(int16_t));
+          simde__m128i lo = simde_mm_loadu_si128((const simde__m128i *)tail);
+          simde__m128i hi = simde_mm_loadu_si128((const simde__m128i *)(tail + 8));
+          simde_mm_storeu_si128(&pl_ol128[full], simde_mm_packs_epi16(lo, hi));
         }
       } else {
         llr_scaling(p->llr + data_off, E, dst, llr_size, llr_decimal, p->nb_layers, p->Qm);
@@ -2199,6 +2227,7 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
     }
   }
 
+  const double _p_t1 = aal_prof_us();
   for (enum op_data_type type = DATA_INPUT; type < DATA_NUM_TYPES; ++type) {
     *queue_ops[type] = persistent_op_data(1, type, num_segments, socket_id);
     ret = init_op_data_objs_dec(*queue_ops[type],
@@ -2210,6 +2239,7 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
     AssertFatal(ret == 0, "Couldn't init rte_bbdev_op_data structs");
   }
 
+  const double _p_t2 = aal_prof_us();
   ret = start_pmd_dec(&active_dev, op_params, &data_buffers, nrLDPC_slot_decoding_parameters);
   if (ret < 0) {
     LOG_E(NR_PHY, "Couldn't start pmd dec\n");
@@ -2222,6 +2252,17 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
         rte_pktmbuf_free((*queue_ops[type])[segment].data);
   }
 
+  if (getenv("LDPC_AAL_PROF")) {
+    const double _p_t3 = aal_prof_us();
+    prof_conv += _p_t1 - _p_t0;
+    prof_gather += _p_t2 - _p_t1;
+    prof_total += _p_t3 - _p_t0;
+    if (++prof_n % 20 == 0)
+      fprintf(stderr,
+              "### AAL_DEC_PROF n=%ld llr_convert=%.1f op_data_gather=%.1f device_and_retrieve=%.1f total=%.1f us\n",
+              prof_n, prof_conv / prof_n, prof_gather / prof_n,
+              (prof_total - prof_conv - prof_gather) / prof_n, prof_total / prof_n);
+  }
   pthread_mutex_unlock(&decode_mutex);
   return 0;
 }
