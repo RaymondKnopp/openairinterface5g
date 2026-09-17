@@ -778,12 +778,10 @@ static int do_one_dlsch(unsigned char *input_ptr, PHY_VARS_gNB *gNB, NR_gNB_DLSC
     reset_meas(&rdata->dlsch_precoding_stats);
     for (int l = 0; l < rel15->nrOfLayers; l++)
       rdata->tx_layers[l] = tx_layers[l];
-    if (l_symbol < rel15->StartSymbolIndex + rel15->NrOfSymbols - num_pdsch_symbols_per_task) {
-      task_t t = {.func = &nr_pdsch_symbol_processing, .args = rdata};
-      pushTpool(&gNB->threadPool, t);
-    } else {
-      nr_pdsch_symbol_processing(rdata);
-    }
+    /* The last chunk runs on this thread, which would otherwise block in join_task_ans(). */
+    task_t t = {.func = &nr_pdsch_symbol_processing, .args = rdata};
+    const bool is_last = l_symbol >= rel15->StartSymbolIndex + rel15->NrOfSymbols - num_pdsch_symbols_per_task;
+    pushTpool_batch(&gNB->threadPool, t, is_last);
   }
   join_task_ans(&ans);
   for (int i = 0; i < nb_tasks; i++) {
