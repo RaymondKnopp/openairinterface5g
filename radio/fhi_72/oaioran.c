@@ -463,13 +463,133 @@ bool is_tdd_ul_guard_slot(const struct xran_frame_config *frame_conf, int slot)
  * Function is blocking and waits for next frame/slot combination. It is unblocked
  * by oai_xran_fh_rx_callback(). It writes the current slot into parameters
  * frame/slot. */
-int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
+/* One antenna's worth of U-plane decompression, for the thread pool. Everything the body
+ * touches is indexed by ant_id -- ru->rxdataF[ant_id], the dstcp/dst buffers picked by
+ * ant_id, and info->nRxPkt[cc_id][ant_id][] -- so antennas are independent. The cursors
+ * that used to be function-level (ptr/pos/idx/src/start_ptr) are locals here for the same
+ * reason. */
+static void xran_fh_rx_read_slot_ant(ru_info_t *ru,
+                                     const oran_sync_info_t *info,
+                                     const struct xran_fh_init *fh_init,
+                                     const uint16_t cc_id,
+                                     const uint8_t ant_id,
+                                     const int tti,
+                                     const int slot,
+                                     const int fftsize,
+                                     const uint32_t slot_size,
+                                     const int slot_offset_rxdata,
+                                     const int nb_rx_per_ru)
 {
   void *ptr = NULL;
   int32_t *pos = NULL;
   int idx = 0;
+  uint8_t *rx_data = (uint8_t *)ru->rxdataF[ant_id];
+  uint8_t *start_ptr = rx_data + (slot_size * slot_offset_rxdata);
+  const struct xran_frame_config *frame_conf = &get_xran_fh_config(ant_id / nb_rx_per_ru)->frame_conf;
+  // skip processing this slot is TX (no RX in this slot)
+  if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_ul_guard_slot(frame_conf, slot))
+    return;
 
-  static int outcnt = 0;
+  // This loop would better be more inner to avoid confusion and maybe also errors.
+  for (int32_t sym_idx = 0; sym_idx < XRAN_NUM_OF_SYMBOL_PER_SLOT; sym_idx++) {
+    /* the callback is for mixed and UL slots. In mixed, we have to
+     * skip DL and guard symbols. */
+    if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_ul_symbol(frame_conf, slot, sym_idx))
+      continue;
+
+    oran_buf_list_t *bufs = get_xran_buffers(ant_id / nb_rx_per_ru);
+    uint8_t *pPrbMapData = bufs->dstcp[ant_id % nb_rx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
+    struct xran_prb_map *pRbMap = (struct xran_prb_map *)pPrbMapData;
+
+    uint8_t *src = (uint8_t *)ptr;
+
+    struct xran_prb_elm *pRbElm = &pRbMap->prbMap[0];
+    struct xran_rx_packet_ctl *p_rx_packet_ctl = &pRbMap->sFrontHaulRxPacketCtrl[sym_idx];
+    uint32_t one_rb_size =
+        (((pRbElm->iqWidth == 0) || (pRbElm->iqWidth == 16)) ? (N_SC_PER_PRB * 2 * 2) : (3 * pRbElm->iqWidth + 1));
+    int32_t nRxPkt = info->nRxPkt[cc_id][ant_id][sym_idx];
+    LOG_D(HW, "nRxPkt %d\n", nRxPkt);
+    for (int pkt_idx = 0; pkt_idx < nRxPkt; pkt_idx++) {
+      uint8_t *pData;
+      if (fh_init->mtu < p_rx_packet_ctl->nRBSize[pkt_idx] * one_rb_size)
+        pData = bufs->dst[ant_id % nb_rx_per_ru][tti % XRAN_N_FE_BUF_LEN]
+                    .pBuffers[sym_idx % XRAN_NUM_OF_SYMBOL_PER_SLOT]
+                    .pData;
+      else
+        pData = p_rx_packet_ctl->pData[pkt_idx];
+      int numRB = p_rx_packet_ctl->nRBSize[pkt_idx];
+      int startRB = p_rx_packet_ctl->nRBStart[pkt_idx];
+      // num_prbu & start_prbu are for UL U-plane only
+      LOG_D(HW, "p_rx_packet_ctl[%d] startRB[%d]:numRB[%d]\n", pkt_idx, startRB, numRB);
+      {
+        {
+          ptr = pData;
+          pos = (int32_t *)(start_ptr + (4 * sym_idx * fftsize));
+          if (ptr == NULL || pos == NULL)
+            continue;
+          src = pData;
+          if (pRbElm->compMethod == XRAN_COMPMETHOD_NONE) {
+            // NOTE: gcc 11 knows how to generate AVX2 for this!
+            for (idx = 0; idx < (numRB * N_SC_PER_PRB) * 2; idx++)
+              ((int16_t *)pos)[idx + startRB * N_SC_PER_PRB * 2] = ((int16_t)ntohs(((uint16_t *)src)[idx])) >> 2;
+          } else if (pRbElm->compMethod == XRAN_COMPMETHOD_BLKFLOAT) {
+#if defined(__i386__) || defined(__x86_64__)
+            struct xranlib_decompress_request bfp_decom_req = {};
+            struct xranlib_decompress_response bfp_decom_rsp = {};
+
+            int16_t payload_len = (3 * pRbElm->iqWidth + 1) * numRB;
+
+            bfp_decom_req.data_in = (int8_t *)src;
+            bfp_decom_req.numRBs = numRB;
+            bfp_decom_req.len = payload_len;
+            bfp_decom_req.compMethod = pRbElm->compMethod;
+            bfp_decom_req.iqWidth = pRbElm->iqWidth;
+
+            bfp_decom_rsp.data_out = (int16_t *)(pos + startRB * N_SC_PER_PRB);
+            bfp_decom_rsp.len = 0;
+
+            xranlib_decompress_avx512(&bfp_decom_req, &bfp_decom_rsp);
+#elif defined(__arm__) || defined(__aarch64__)
+            armral_bfp_decompression(pRbElm->iqWidth, numRB, (int8_t *)src, (int16_t *)(pos + startRB * N_SC_PER_PRB));
+#else
+            AssertFatal(1 == 0, "BFP compression not supported on this architecture");
+#endif
+          } else {
+            printf("pRbElm->compMethod == %d is not supported\n", pRbElm->compMethod);
+            exit(-1);
+          }
+        }
+      } // idxDesc
+    } // idxElm
+
+  } // sym_ind
+}
+
+typedef struct {
+  task_ans_t *ans;
+  ru_info_t *ru;
+  const oran_sync_info_t *info;
+  const struct xran_fh_init *fh_init;
+  uint16_t cc_id;
+  uint8_t ant_id;
+  int tti;
+  int slot;
+  int fftsize;
+  uint32_t slot_size;
+  int slot_offset_rxdata;
+  int nb_rx_per_ru;
+} oran_rx_decompress_cmd_t;
+
+static void oran_rx_decompress_ant(void *arg)
+{
+  oran_rx_decompress_cmd_t *c = (oran_rx_decompress_cmd_t *)arg;
+  xran_fh_rx_read_slot_ant(c->ru, c->info, c->fh_init, c->cc_id, c->ant_id, c->tti, c->slot,
+                           c->fftsize, c->slot_size, c->slot_offset_rxdata, c->nb_rx_per_ru);
+  completed_task_ans(c->ans);
+}
+
+int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
+{
   // pull next event from oran_sync_fifo
   notifiedFIFO_elt_t *res = pullNotifiedFIFO(&oran_sync_fifo);
   atomic_fetch_sub(&xran_queue_length, 1);
@@ -507,93 +627,59 @@ int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
 
   int slot_offset_rxdata = 3 & (*slot);
   uint32_t slot_size = 4 * 14 * fftsize;
-  uint8_t *rx_data = (uint8_t *)ru->rxdataF[0];
-  uint8_t *start_ptr = NULL;
   int nb_rx_per_ru = ru->nb_rx / fh_init->xran_ports;
-  for (uint16_t cc_id = 0; cc_id < 1 /*nSectorNum*/; cc_id++) { // OAI does not support multiple CC yet.
-    for (uint8_t ant_id = 0; ant_id < ru->nb_rx; ant_id++) {
-      rx_data = (uint8_t *)ru->rxdataF[ant_id];
-      start_ptr = rx_data + (slot_size * slot_offset_rxdata);
-      const struct xran_frame_config *frame_conf = &get_xran_fh_config(ant_id / nb_rx_per_ru)->frame_conf;
-      // skip processing this slot is TX (no RX in this slot)
-      if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_ul_guard_slot(frame_conf, *slot))
-        continue;
-      // This loop would better be more inner to avoid confusion and maybe also errors.
-      for (int32_t sym_idx = 0; sym_idx < XRAN_NUM_OF_SYMBOL_PER_SLOT; sym_idx++) {
-        /* the callback is for mixed and UL slots. In mixed, we have to
-         * skip DL and guard symbols. */
-        if (frame_conf->nFrameDuplexType != XRAN_FDD && !is_tdd_ul_symbol(frame_conf, *slot, sym_idx))
-          continue;
+  /* OAI does not support multiple CC yet, so there is exactly one cc_id. */
+  const uint16_t cc_id = 0;
 
-        oran_buf_list_t *bufs = get_xran_buffers(ant_id / nb_rx_per_ru);
-        uint8_t *pPrbMapData = bufs->dstcp[ant_id % nb_rx_per_ru][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
-        struct xran_prb_map *pRbMap = (struct xran_prb_map *)pPrbMapData;
+  /* A slot whose last symbol is not UL carries no U-plane to decompress. Select the antennas
+     that have work BEFORE dispatching: this runs on ru_thread every slot, and in a DDDSU
+     pattern three slots in five have nothing to do, which would otherwise cost a task push
+     per antenna plus a join for no work. The per-antenna function keeps its own guard too,
+     so it stays correct if called directly. */
+  uint8_t work_ant[ru->nb_rx];
+  int n_work = 0;
+  for (uint8_t ant_id = 0; ant_id < ru->nb_rx; ant_id++) {
+    const struct xran_frame_config *fc = &get_xran_fh_config(ant_id / nb_rx_per_ru)->frame_conf;
+    if (fc->nFrameDuplexType == XRAN_FDD || is_tdd_ul_guard_slot(fc, *slot))
+      work_ant[n_work++] = ant_id;
+  }
+  if (n_work == 0) {
+    delNotifiedFIFO_elt(res);
+    return (0);
+  }
 
-        uint8_t *src = (uint8_t *)ptr;
-
-        struct xran_prb_elm *pRbElm = &pRbMap->prbMap[0];
-        struct xran_rx_packet_ctl *p_rx_packet_ctl = &pRbMap->sFrontHaulRxPacketCtrl[sym_idx];
-        uint32_t one_rb_size =
-            (((pRbElm->iqWidth == 0) || (pRbElm->iqWidth == 16)) ? (N_SC_PER_PRB * 2 * 2) : (3 * pRbElm->iqWidth + 1));
-        int32_t nRxPkt = info->nRxPkt[cc_id][ant_id][sym_idx];
-        LOG_D(HW, "nRxPkt %d\n", nRxPkt);
-        for (int pkt_idx = 0; pkt_idx < nRxPkt; pkt_idx++) {
-          uint8_t *pData;
-          if (fh_init->mtu < p_rx_packet_ctl->nRBSize[pkt_idx] * one_rb_size)
-            pData = bufs->dst[ant_id % nb_rx_per_ru][tti % XRAN_N_FE_BUF_LEN]
-                        .pBuffers[sym_idx % XRAN_NUM_OF_SYMBOL_PER_SLOT]
-                        .pData;
-          else
-            pData = p_rx_packet_ctl->pData[pkt_idx];
-          int numRB = p_rx_packet_ctl->nRBSize[pkt_idx];
-          int startRB = p_rx_packet_ctl->nRBStart[pkt_idx];
-          // num_prbu & start_prbu are for UL U-plane only
-          LOG_D(HW, "p_rx_packet_ctl[%d] startRB[%d]:numRB[%d]\n", pkt_idx, startRB, numRB);
-          {
-            {
-              ptr = pData;
-              pos = (int32_t *)(start_ptr + (4 * sym_idx * fftsize));
-              if (ptr == NULL || pos == NULL)
-                continue;
-              src = pData;
-              if (pRbElm->compMethod == XRAN_COMPMETHOD_NONE) {
-                // NOTE: gcc 11 knows how to generate AVX2 for this!
-                for (idx = 0; idx < (numRB * N_SC_PER_PRB) * 2; idx++)
-                  ((int16_t *)pos)[idx + startRB * N_SC_PER_PRB * 2] = ((int16_t)ntohs(((uint16_t *)src)[idx])) >> 2;
-              } else if (pRbElm->compMethod == XRAN_COMPMETHOD_BLKFLOAT) {
-#if defined(__i386__) || defined(__x86_64__)
-                struct xranlib_decompress_request bfp_decom_req = {};
-                struct xranlib_decompress_response bfp_decom_rsp = {};
-
-                int16_t payload_len = (3 * pRbElm->iqWidth + 1) * numRB;
-
-                bfp_decom_req.data_in = (int8_t *)src;
-                bfp_decom_req.numRBs = numRB;
-                bfp_decom_req.len = payload_len;
-                bfp_decom_req.compMethod = pRbElm->compMethod;
-                bfp_decom_req.iqWidth = pRbElm->iqWidth;
-
-                bfp_decom_rsp.data_out = (int16_t *)(pos + startRB * N_SC_PER_PRB);
-                bfp_decom_rsp.len = 0;
-
-                xranlib_decompress_avx512(&bfp_decom_req, &bfp_decom_rsp);
-#elif defined(__arm__) || defined(__aarch64__)
-                armral_bfp_decompression(pRbElm->iqWidth, numRB, (int8_t *)src, (int16_t *)(pos + startRB * N_SC_PER_PRB));
-#else
-                AssertFatal(1 == 0, "BFP compression not supported on this architecture");
-#endif
-                outcnt++;
-              } else {
-                printf("pRbElm->compMethod == %d is not supported\n", pRbElm->compMethod);
-                exit(-1);
-              }
-            }
-          } // idxDesc
-        } // idxElm
-
-      } // sym_ind
-    } // ant_ind
-  } // vv_inf
+  if (ru->rx_decomp)
+    start_meas(ru->rx_decomp);
+  if (ru->threadPool == NULL) {
+    for (int w = 0; w < n_work; w++)
+      xran_fh_rx_read_slot_ant(ru, info, fh_init, cc_id, work_ant[w], tti, *slot, fftsize,
+                               slot_size, slot_offset_rxdata, nb_rx_per_ru);
+  } else {
+    /* This runs on ru_thread, which drives fronthaul timing, so the decompression is worth
+       getting off it. */
+    oran_rx_decompress_cmd_t cmd[n_work];
+    task_ans_t ans;
+    init_task_ans(&ans, n_work);
+    for (int w = 0; w < n_work; w++) {
+      cmd[w] = (oran_rx_decompress_cmd_t){.ans = &ans,
+                                          .ru = ru,
+                                          .info = info,
+                                          .fh_init = fh_init,
+                                          .cc_id = cc_id,
+                                          .ant_id = work_ant[w],
+                                          .tti = tti,
+                                          .slot = *slot,
+                                          .fftsize = fftsize,
+                                          .slot_size = slot_size,
+                                          .slot_offset_rxdata = slot_offset_rxdata,
+                                          .nb_rx_per_ru = nb_rx_per_ru};
+      task_t t = {.func = oran_rx_decompress_ant, .args = &cmd[w]};
+      pushTpool(ru->threadPool, t);
+    }
+    join_task_ans(&ans);
+  }
+  if (ru->rx_decomp)
+    stop_meas(ru->rx_decomp);
   delNotifiedFIFO_elt(res);
   return (0);
 }

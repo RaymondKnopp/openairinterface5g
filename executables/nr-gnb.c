@@ -256,6 +256,7 @@ static void nrL1_stats_init_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru, unsigned in
     init_sorted_list_meas(&ru->ofdm_total_stats, size);
   }
   init_sorted_list_meas(&ru->tx_fhaul, size);
+  init_sorted_list_meas(&ru->rx_decomp, size);
 }
 
 static void nrL1_stats_free_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru)
@@ -290,6 +291,7 @@ static void nrL1_stats_free_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru)
     free_sorted_list_meas(&ru->txdataF_copy_stats);
   }
   free_sorted_list_meas(&ru->tx_fhaul);
+  free_sorted_list_meas(&ru->rx_decomp);
 }
 
 static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
@@ -325,6 +327,7 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
     reset_meas(&ru->txdataF_copy_stats);
   }
   reset_meas(&ru->tx_fhaul);
+  reset_meas(&ru->rx_decomp);
 }
 
 static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size_t outputlen) {
@@ -386,6 +389,7 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   }
 
   output += print_meas_log(&ru->tx_fhaul,"tx_fhaul",NULL,NULL, output, end - output);
+  output += print_meas_log(&ru->rx_decomp,"rx_decomp",NULL,NULL, output, end - output);
 
   if (cpu_meas_enabled == TIME_STATS_ADVANCED_MODE) {
     nrL1_stats_reset(gNB, ru);

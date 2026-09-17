@@ -138,6 +138,8 @@ void oran_fh_if4p5_south_in(RU_t *ru, int *frame, int *slot)
       .nb_rx = ru->nb_rx,
       .rxdataF = ru->common.rxdataF,
       .prach_buf = NULL,
+      .threadPool = ru->threadPool,
+      .rx_decomp = &ru->rx_decomp,
   };
 
   /* Firstly, process PUSCH packets */

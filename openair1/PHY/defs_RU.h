@@ -532,8 +532,11 @@ typedef struct RU_t_s {
   time_stats_t ofdm_mod_wait_stats;
   /// Timing wakeup statistics (TX)
   time_stats_t ofdm_mod_wakeup_stats;
-  /// Timing statistics (RX Fronthaul + Compression)
+  /// Timing statistics (RX Fronthaul + Compression). Dominated by the wait for the slot's
+  /// packets to arrive, so it does not show the decompression cost; see rx_decomp.
   time_stats_t rx_fhaul;
+  /// Timing statistics (RX U-plane decompression only, excluding the wait for the slot)
+  time_stats_t rx_decomp;
   /// Timing statistics (TX Fronthaul + Compression)
   time_stats_t tx_fhaul;
   /// Timing statistics (Compression)
