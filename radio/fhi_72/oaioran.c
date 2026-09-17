@@ -25,6 +25,7 @@
 #include "oran-config.h" // for g_kbar
 
 #include "common/utils/threadPool/notified_fifo.h"
+#include "common/utils/threadPool/thread-pool.h"
 #include "common/utils/fsn.h"
 
 #define N_SC_PER_PRB 12
@@ -719,15 +720,66 @@ static void xran_fh_tx_send_slot_ant(struct xran_prb_map *pPrbMap,
 /** @details Write PDSCH IQ-data from OAI txdataF_BF buffer to xran buffers. If
  * I/Q compression (bitwidth < 16 bits) is configured, compresses the data
  * before writing. */
-int xran_fh_tx_send_slot(const int tti, const int xran_port, const uint8_t nb_ant, const int fft_size, int32_t **txdataF_BF, oran_buf_list_t *bufs)
+/* One antenna's worth of compression, for the thread pool. Antenna is the right
+ * granularity, not symbol: every buffer touched here is indexed by ant_id, so antennas
+ * are independent, whereas two symbols of the same antenna share p_prbMapElm and its
+ * sec_desc[] and would race. */
+typedef struct {
+  task_ans_t *ans;
+  struct xran_prb_map *pPrbMap;
+  int32_t *txdataF_ant;
+  int fft_size;
+  struct xran_buffer_list *src_slot;
+} oran_tx_compress_cmd_t;
+
+static void oran_tx_compress_ant(void *arg)
 {
+  oran_tx_compress_cmd_t *cmd = (oran_tx_compress_cmd_t *)arg;
+  xran_fh_tx_send_slot_ant(cmd->pPrbMap, cmd->txdataF_ant, cmd->fft_size, cmd->src_slot);
+  completed_task_ans(cmd->ans);
+}
+
+int xran_fh_tx_send_slot(const int tti,
+                         const int xran_port,
+                         const uint8_t nb_ant,
+                         const int fft_size,
+                         int32_t **txdataF_BF,
+                         oran_buf_list_t *bufs,
+                         tpool_t *threadPool)
+{
+  const int buf_id = tti % XRAN_N_FE_BUF_LEN;
+
+  /* No pool configured: compress inline, exactly as before. */
+  if (threadPool == NULL) {
+    for (uint8_t ant_id = 0; ant_id < nb_ant; ant_id++) {
+      struct xran_prb_map *pPrbMap = (struct xran_prb_map *)bufs->srccp[ant_id][buf_id].pBuffers->pData;
+      xran_fh_tx_send_slot_ant(pPrbMap, txdataF_BF[ant_id + (xran_port * nb_ant)], fft_size, &bufs->src[ant_id][buf_id]);
+      pPrbMap->tti_id = tti; // The tti should be updated as it increased.
+    }
+    return (0);
+  }
+
+  /* The 7.2 U-plane carries the full band whatever the scheduler allocated, so this cost
+   * is flat in load and is worth spreading even for an idle cell. */
+  oran_tx_compress_cmd_t cmd[nb_ant];
+  task_ans_t ans;
+  init_task_ans(&ans, nb_ant);
   for (uint8_t ant_id = 0; ant_id < nb_ant; ant_id++) {
-    struct xran_prb_map *pPrbMap = (struct xran_prb_map *)bufs->srccp[ant_id][tti % XRAN_N_FE_BUF_LEN].pBuffers->pData;
+    struct xran_prb_map *pPrbMap = (struct xran_prb_map *)bufs->srccp[ant_id][buf_id].pBuffers->pData;
+    cmd[ant_id] = (oran_tx_compress_cmd_t){.ans = &ans,
+                                           .pPrbMap = pPrbMap,
+                                           .txdataF_ant = txdataF_BF[ant_id + (xran_port * nb_ant)],
+                                           .fft_size = fft_size,
+                                           .src_slot = &bufs->src[ant_id][buf_id]};
+    task_t t = {.func = oran_tx_compress_ant, .args = &cmd[ant_id]};
+    pushTpool(threadPool, t);
+  }
+  join_task_ans(&ans);
 
-    xran_fh_tx_send_slot_ant(pPrbMap, txdataF_BF[ant_id + (xran_port * nb_ant)], fft_size, &bufs->src[ant_id][tti % XRAN_N_FE_BUF_LEN]);
+  /* Only after every task has been joined: tti_id is what marks the map as belonging to
+   * this tti, and publishing it before the compression is visible would be a lie. */
+  for (uint8_t ant_id = 0; ant_id < nb_ant; ant_id++)
+    ((struct xran_prb_map *)bufs->srccp[ant_id][buf_id].pBuffers->pData)->tti_id = tti;
 
-    // The tti should be updated as it increased.
-    pPrbMap->tti_id = tti;
-  } // ant_id
   return (0);
 }
