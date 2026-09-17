@@ -247,7 +247,10 @@ void oran_fh_if4p5_south_out(RU_t *ru, int frame, int slot, uint64_t timestamp)
       const int tti = slots_per_frame * frame + slot;
 
       const int fft_size = 1 << fh_cfg->perMu[mu_number].nDLFftSize;
-      ret = xran_fh_tx_send_slot(tti, xran_port, fh_cfg->neAxc, fft_size, ru->common.txdataF_BF, bufs, ru->threadPool);
+      /* Straight out of the gNB's txdataF: see the REMOTE_IF4p5 case in set_function_spec_param().
+         c16_t and int32_t are both 4 bytes per RE here, same layout. */
+      int32_t **txdataF = (int32_t **)ru->gNB_list[0]->common_vars.txdataF;
+      ret = xran_fh_tx_send_slot(tti, xran_port, fh_cfg->neAxc, fft_size, txdataF, bufs, ru->threadPool);
       if (ret != 0) {
         LOG_W(HW, "[%d.%d] xran_fh_tx_send_slot error for xran_port %d\n", frame, slot, xran_port);
       }
