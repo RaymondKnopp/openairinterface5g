@@ -674,7 +674,8 @@ int xran_fh_rx_read_slot(ru_info_t *ru, int *frame, int *slot)
                                           .slot_offset_rxdata = slot_offset_rxdata,
                                           .nb_rx_per_ru = nb_rx_per_ru};
       task_t t = {.func = oran_rx_decompress_ant, .args = &cmd[w]};
-      pushTpool(ru->threadPool, t);
+      /* Last antenna inline, as on the TX side: ru_thread blocks in the join anyway. */
+      pushTpool_batch(ru->threadPool, t, w == n_work - 1);
     }
     join_task_ans(&ans);
   }
@@ -858,7 +859,9 @@ int xran_fh_tx_send_slot(const int tti,
                                            .fft_size = fft_size,
                                            .src_slot = &bufs->src[ant_id][buf_id]};
     task_t t = {.func = oran_tx_compress_ant, .args = &cmd[ant_id]};
-    pushTpool(threadPool, t);
+    /* The last antenna runs here: this thread would otherwise block in join_task_ans()
+       below, so nb_ant antennas need only nb_ant-1 workers to run nb_ant-ways parallel. */
+    pushTpool_batch(threadPool, t, ant_id == nb_ant - 1);
   }
   join_task_ans(&ans);
 
