@@ -231,7 +231,9 @@ void nr_feptx_tp(RU_t *ru, int frame_tx, int slot)
         (ru->half_slot_parallelization > 0) ? ru->nr_frame_parms->symbols_per_slot >> 1 : ru->nr_frame_parms->symbols_per_slot;
 
     task_t t = {.func = nr_feptx, .args = feptx_cmd};
-    pushTpool(ru->threadPool, t);
+    /* The final task of the batch runs on this thread, which would otherwise just block in
+       join_task_ans() below; sz tasks then need only sz-1 workers to run sz-ways parallel. */
+    pushTpool_batch(ru->threadPool, t, nbfeptx == (int)sz - 1);
     nbfeptx++;
     if (ru->half_slot_parallelization > 0) {
       feptx_cmd_t *feptx_cmd = &arr[nbfeptx];
@@ -243,7 +245,7 @@ void nr_feptx_tp(RU_t *ru, int frame_tx, int slot)
       feptx_cmd->numSymbols = ru->nr_frame_parms->symbols_per_slot >> 1;
 
       task_t t = {.func = nr_feptx, .args = feptx_cmd};
-      pushTpool(ru->threadPool, t);
+      pushTpool_batch(ru->threadPool, t, nbfeptx == (int)sz - 1);
       nbfeptx++;
     }
   }
@@ -304,7 +306,8 @@ void nr_fep_tp(RU_t *ru, int slot)
       feprx_cmd->sample_offet = ru->N_TA_offset;
 
       task_t t = {.func = nr_fep, .args = feprx_cmd};
-      pushTpool(ru->threadPool, t);
+      /* Last task inline: this thread blocks in join_task_ans() below either way. */
+      pushTpool_batch(ru->threadPool, t, nbfeprx == (int)sz - 1);
       nbfeprx++;
     }
   }
