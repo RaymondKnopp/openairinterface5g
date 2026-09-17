@@ -30,6 +30,13 @@ typedef struct ru_info_s {
   c16_t (*prach_buf)[NUMBER_OF_NR_RU_PRACH_OCCASIONS_MAX][NR_PRACH_SEQ_LEN_L];
   int nb_prach_rx;
   int start_prach_rx;
+
+  /* RU thread pool, used to spread the per-antenna U-plane decompression in
+     xran_fh_rx_read_slot(). NULL is valid and means "run inline". */
+  tpool_t *threadPool;
+  /* Decompression-only timing, so the cost is visible separately from rx_fhaul, which is
+     mostly the wait for the slot to be filled. NULL is valid. */
+  time_stats_t *rx_decomp;
 } ru_info_t;
 
 void print_fhi_counters(ru_info_t *ru, const int frame, const int slot);
