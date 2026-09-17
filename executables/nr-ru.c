@@ -835,8 +835,11 @@ void kill_NR_RU_proc(int inst) {
    * returns promptly. */
   pthread_join(proc->pthread_FH, NULL);
 
+  /* The pool is created for every if_south now (7.2 uses it for the per-antenna BFP
+   * compression), so it must be torn down for every if_south too. The feprx/feptx FIFOs
+   * are still only used by the non-7.2 paths. */
+  abortTpool(ru->threadPool);
   if (ru->if_south != REMOTE_IF4p5) {
-    abortTpool(ru->threadPool);
     abortNotifiedFIFO(ru->respfeprx);
     abortNotifiedFIFO(ru->respfeptx);
   }
@@ -960,7 +963,11 @@ void init_NR_RU(configmodule_interface_t *cfg, char *rf_config_file)
     // init RU_proc -> needed for timing alignment
     ru->proc = (RU_proc_t){.ru = ru, .first_rx = 1, .first_tx = 1};
 
-    if (ru->if_south != REMOTE_IF4p5) {
+    /* REMOTE_IF4p5 used to be excluded here because it has neither feprx nor feptx_ofdm
+     * to parallelise. It has work now: the 7.2 fronthaul south_out compresses every
+     * antenna in xran_fh_tx_send_slot(), and that spreads over this pool. Size and
+     * pinning come from num_tp_cores/tp_cores in the RUs section. */
+    {
       int threadCnt = ru->num_tpcores;
       if (threadCnt < 2)
         LOG_E(PHY, "Number of threads for gNB should be more than 1. Allocated only %d\n", threadCnt);

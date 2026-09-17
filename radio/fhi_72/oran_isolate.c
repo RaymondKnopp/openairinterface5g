@@ -247,7 +247,7 @@ void oran_fh_if4p5_south_out(RU_t *ru, int frame, int slot, uint64_t timestamp)
       const int tti = slots_per_frame * frame + slot;
 
       const int fft_size = 1 << fh_cfg->perMu[mu_number].nDLFftSize;
-      ret = xran_fh_tx_send_slot(tti, xran_port, fh_cfg->neAxc, fft_size, ru->common.txdataF_BF, bufs);
+      ret = xran_fh_tx_send_slot(tti, xran_port, fh_cfg->neAxc, fft_size, ru->common.txdataF_BF, bufs, ru->threadPool);
       if (ret != 0) {
         LOG_W(HW, "[%d.%d] xran_fh_tx_send_slot error for xran_port %d\n", frame, slot, xran_port);
       }
