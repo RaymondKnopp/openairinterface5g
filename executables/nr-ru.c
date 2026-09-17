@@ -889,7 +889,14 @@ void set_function_spec_param(RU_t *ru)
 
     case REMOTE_IF4p5:
       ru->feprx = NULL; // DFTs
-      ru->feptx_prec = nr_feptx_prec; // Precoding operation
+      /* No precoding stage for 7.2. nr_feptx_prec()'s only implemented path is a straight
+       * memcpy of gNB txdataF into ru->common.txdataF_BF (its digital-beamforming branch is
+       * an AssertFatal(false)), and tx_func() runs phy_procedures_gNB_TX(), the precoding
+       * stage and fh_south_out() back to back on one thread, so nothing can write txdataF
+       * while the fronthaul reads it. The copy therefore bought no decoupling, only a
+       * full-band memcpy per slot per antenna; oran_fh_if4p5_south_out() compresses out of
+       * gNB txdataF directly instead. */
+      ru->feptx_prec = NULL;
       ru->feptx_ofdm = NULL; // no OFDM mod
       ru->fh_south_in = NULL;
       ru->fh_south_out = NULL;
