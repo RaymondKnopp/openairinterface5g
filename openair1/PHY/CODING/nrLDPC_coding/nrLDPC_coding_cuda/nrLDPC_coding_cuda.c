@@ -164,6 +164,12 @@ static void close_default_ldpc(nrLDPC_coding_interface_t *ldpc)
 }
 
 extern int32_t nrLDPC_coding_init_cuda(int max_num_pxsch);
+uint32_t nrLDPC_coding_capabilities(void)
+{
+  /* the CUDA backend takes code blocks with their CRC already attached. */
+  return 0;
+}
+
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
   // we can't use load_nrLDPC_coding_interface() because:

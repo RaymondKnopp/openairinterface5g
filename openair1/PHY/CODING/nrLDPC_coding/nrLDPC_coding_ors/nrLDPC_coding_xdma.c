@@ -75,6 +75,12 @@ typedef struct args_fpga_post_decode_s {
   task_ans_t *ans; /*!< pointer to the answer that is used by thread pool to detect job completion */
 } args_fpga_post_decode_t;
 
+uint32_t nrLDPC_coding_capabilities(void)
+{
+  /* the xdma backend takes code blocks with their CRC already attached. */
+  return 0;
+}
+
 int32_t nrLDPC_coding_init(void);
 int32_t nrLDPC_coding_shutdown(void);
 int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot_params, int frame_rx, int slot_rx);

@@ -34,7 +34,8 @@ int load_nrLDPC_coding_interface(char *version, nrLDPC_coding_interface_t *itf, 
   loader_shlibfunc_t shlib_fdesc[] = {{.fname = "nrLDPC_coding_init"},
                                       {.fname = "nrLDPC_coding_shutdown"},
                                       {.fname = "nrLDPC_coding_decoder"},
-                                      {.fname = "nrLDPC_coding_encoder"}};
+                                      {.fname = "nrLDPC_coding_encoder"},
+                                      {.fname = "nrLDPC_coding_capabilities"}};
   int ret;
   ret = load_module_version_shlib(libname, version, shlib_fdesc, sizeofArray(shlib_fdesc), NULL);
   if(ret < 0){
@@ -45,6 +46,7 @@ int load_nrLDPC_coding_interface(char *version, nrLDPC_coding_interface_t *itf, 
   itf->nrLDPC_coding_shutdown = (nrLDPC_coding_shutdown_t *)shlib_fdesc[1].fptr;
   itf->nrLDPC_coding_decoder = (nrLDPC_coding_decoder_t *)shlib_fdesc[2].fptr;
   itf->nrLDPC_coding_encoder = (nrLDPC_coding_encoder_t *)shlib_fdesc[3].fptr;
+  itf->nrLDPC_coding_capabilities = (nrLDPC_coding_capabilities_t *)shlib_fdesc[4].fptr;
 
   AssertFatal(itf->nrLDPC_coding_init(max_num_pxsch) == 0, "error starting LDPC library %s %s\n", libname, version);
 

@@ -17,7 +17,8 @@ int32_t nr_segmentation(unsigned char *input_buffer,
                         unsigned int *K,
                         unsigned int *Zout, // [hna] Zout is Zc
                         unsigned int *F,
-                        uint8_t BG)
+                        uint8_t BG,
+                        bool write_cb_crc)
 {
 
   unsigned int L,Bprime,Z,r,Kcb,Kb,k,s,crc,Kprime;
@@ -135,7 +136,10 @@ else
       memcpy(output_buffers[r],input_buffer+s,(Kprime-L)>>3);
       s+=(Kprime-L)>>3;
 
-      if (*C > 1) { // add CRC
+      /* The per-CB CRC (L bits of 38.212 5.2.2) exists only when the TB is split. An
+         offload backend that advertises attaching it wants the code block without one, so
+         it is skipped here rather than computed and then overwritten. */
+      if (*C > 1 && write_cb_crc) { // add CRC
         crc = crc24b(output_buffers[r],Kprime-L)>>8;
         output_buffers[r][(Kprime-L)>>3] = ((uint8_t*)&crc)[2];
         output_buffers[r][1+((Kprime-L)>>3)] = ((uint8_t*)&crc)[1];
@@ -162,7 +166,7 @@ main()
   unsigned int K,C,F,Bbytes, Zout;
 
   for (Bbytes=5; Bbytes<8; Bbytes++) {
-    nr_segmentation(0,0,Bbytes<<3,&C,&K,&Zout, &F);
+    nr_segmentation(0,0,Bbytes<<3,&C,&K,&Zout, &F, true);
     printf("Bbytes %u : C %u, K %u, F %u\n",
            Bbytes, C, K, F);
   }

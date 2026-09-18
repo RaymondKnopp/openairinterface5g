@@ -200,11 +200,30 @@ typedef int32_t(nrLDPC_coding_decoder_t)(nrLDPC_slot_decoding_parameters_t *nrLD
  */
 typedef int32_t(nrLDPC_coding_encoder_t)(nrLDPC_slot_encoding_parameters_t *nrLDPC_slot_encoding_parameters);
 
+/** @brief Work the coding backend performs itself, so the caller can skip it.
+ *
+ * Returned by nrLDPC_coding_capabilities(). A backend that does none of it returns 0,
+ * which is the behaviour every caller must already cope with.
+ *
+ * NRLDPC_CODING_CAP_ENC_CB_CRC: the backend attaches the per-code-block CRC of
+ * 38.212 5.2.2 (the L bits) during encoding. The caller must then hand it code blocks of
+ * Kprime - L bits with no CRC appended. L is 0 for a single code block, so this changes
+ * nothing when C == 1.
+ */
+#define NRLDPC_CODING_CAP_ENC_CB_CRC (1u << 0)
+
+/** @brief Report the NRLDPC_CODING_CAP_* work the backend performs itself.
+ *
+ * Called after nrLDPC_coding_init(), because for an offload backend the answer depends on
+ * what the device turns out to advertise. */
+typedef uint32_t(nrLDPC_coding_capabilities_t)(void);
+
 typedef struct nrLDPC_coding_interface_s {
   nrLDPC_coding_init_t *nrLDPC_coding_init;
   nrLDPC_coding_shutdown_t *nrLDPC_coding_shutdown;
   nrLDPC_coding_decoder_t *nrLDPC_coding_decoder;
   nrLDPC_coding_encoder_t *nrLDPC_coding_encoder;
+  nrLDPC_coding_capabilities_t *nrLDPC_coding_capabilities;
 } nrLDPC_coding_interface_t;
 
 int load_nrLDPC_coding_interface(char *version, nrLDPC_coding_interface_t *interface, int);

@@ -262,6 +262,12 @@ int nrLDPC_prepare_TB_decoding(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_de
   return nrLDPC_TB_decoding_parameters->C;
 }
 
+uint32_t nrLDPC_coding_capabilities(void)
+{
+  /* the CPU implementation performs the whole 38.212 5.2.2 preamble itself. */
+  return 0;
+}
+
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
   return 0;

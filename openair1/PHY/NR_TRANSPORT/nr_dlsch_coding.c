@@ -189,6 +189,11 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
     TB_parameters->harq_unique_pid = i;
     TB_parameters->BG = rel15->maintenance_parms_v3.ldpcBaseGraph;
     TB_parameters->A = A;
+    /* Skip the per-CB CRC when the coding backend attaches it itself: for an offload
+       device that is a CRC per code block the CPU need not compute. The backend reports
+       this after init because it depends on what the device advertises. */
+    const bool write_cb_crc =
+        !(gNB->nrLDPC_coding_interface.nrLDPC_coding_capabilities()  & NRLDPC_CODING_CAP_ENC_CB_CRC);
     TB_parameters->Kb = nr_segmentation(dlsch->b,
                                         dlsch->c,
                                         B,
@@ -196,7 +201,8 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
                                         &TB_parameters->K,
                                         &TB_parameters->Z,
                                         &TB_parameters->F,
-                                        TB_parameters->BG);
+                                        TB_parameters->BG,
+                                        write_cb_crc);
 
     if (TB_parameters->C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER * rel15->nrOfLayers) {
       LOG_E(PHY, "nr_segmentation.c: too many segments %d, B %d\n", TB_parameters->C, B);

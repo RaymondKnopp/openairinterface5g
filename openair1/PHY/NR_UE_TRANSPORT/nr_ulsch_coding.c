@@ -82,7 +82,9 @@ int nr_ulsch_pre_encoding(PHY_VARS_NR_UE *ue,
                                        &harq_process->K,
                                        &harq_process->Z,
                                        &harq_process->F,
-                                       harq_process->BG);
+                                       harq_process->BG,
+                                       !(ue->nrLDPC_coding_interface.nrLDPC_coding_capabilities()
+                                         & NRLDPC_CODING_CAP_ENC_CB_CRC));
     if (harq_process->C > MAX_NUM_NR_DLSCH_SEGMENTS_PER_LAYER * pusch_pdu->nrOfLayers) {
       LOG_E(PHY, "nr_segmentation.c: too many segments %d, B %d\n", harq_process->C, B);
       return (-1);

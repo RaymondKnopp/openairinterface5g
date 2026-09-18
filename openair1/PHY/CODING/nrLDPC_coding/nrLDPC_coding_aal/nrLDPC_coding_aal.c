@@ -64,6 +64,9 @@ struct active_device {
   // Note: This is used to store/keep track of the combined output information across iterations
   struct rte_bbdev_op_data *harq_buffers;
   bool support_internal_harq_memory;
+  /* The device attaches the per-CB CRC of 38.212 5.2.2 during encoding, so the caller can
+     hand us code blocks without one. Advertised as RTE_BBDEV_LDPC_CRC_24B_ATTACH. */
+  bool enc_attaches_cb_crc;
   int dec_queue;
   int enc_queue;
   uint16_t queue_ids[MAX_QUEUES];
@@ -359,6 +362,12 @@ bool check_internal_harq_memory_capabilities(struct rte_bbdev_info *info)
 }
 
 // based on DPDK BBDEV add_bbdev_dev
+uint32_t nrLDPC_coding_capabilities(void)
+{
+  /* Queried after nrLDPC_coding_init(), so active_dev reflects what the device advertises. */
+  return active_dev.enc_attaches_cb_crc ? NRLDPC_CODING_CAP_ENC_CB_CRC : 0;
+}
+
 static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
 {
   int ret;
@@ -382,6 +391,24 @@ static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
 
   // check internal harq memory capabilities
   active_dev.support_internal_harq_memory = check_internal_harq_memory_capabilities(&active_dev.info);
+
+  /* Does the device attach the per-CB CRC itself on encode? The decode direction already
+     uses CRC_TYPE_24B_CHECK/DROP where advertised; this is the transmit counterpart, and it
+     lets the caller skip computing a CRC per code block. Devices differ: VRB1/ACC200
+     advertises it, the AMD T2 may not, so ask rather than assume. */
+  active_dev.enc_attaches_cb_crc = false;
+  uint32_t enc_flags_seen = 0;
+  for (int i = 0; active_dev.info.drv.capabilities[i].type != RTE_BBDEV_OP_NONE; i++) {
+    if (active_dev.info.drv.capabilities[i].type != RTE_BBDEV_OP_LDPC_ENC)
+      continue;
+    enc_flags_seen = active_dev.info.drv.capabilities[i].cap.ldpc_enc.capability_flags;
+    active_dev.enc_attaches_cb_crc = check_bit(enc_flags_seen, RTE_BBDEV_LDPC_CRC_24B_ATTACH);
+    break;
+  }
+  LOG_I(PHY,
+        "LDPC offload: device %s the per-CB CRC on encode (LDPC_ENC capability flags 0x%08x)\n",
+        active_dev.enc_attaches_cb_crc ? "attaches" : "does not attach",
+        enc_flags_seen);
 
   // setup harq buffers
   active_dev.num_harq_codeblock = num_harq_codeblock;
@@ -516,7 +543,13 @@ static int init_op_data_objs_enc(struct rte_bbdev_op_data *bufs,
   int j = 0;
   for (int h = 0; h < nrLDPC_slot_encoding_parameters->nb_TBs; ++h) {
     for (int i = 0; i < nrLDPC_slot_encoding_parameters->TBs[h].C; ++i) {
-      uint32_t data_len = (nrLDPC_slot_encoding_parameters->TBs[h].K - nrLDPC_slot_encoding_parameters->TBs[h].F + 7) / 8;
+      /* Kprime = K - F. When the device attaches the per-CB CRC the caller has not written
+         one, so the input is L bits shorter; the device produces the same K-bit code block
+         either way. L is 0 for a single code block. */
+      const uint32_t cb_crc_bits =
+          (active_dev.enc_attaches_cb_crc && nrLDPC_slot_encoding_parameters->TBs[h].C > 1) ? 24 : 0;
+      uint32_t data_len =
+          (nrLDPC_slot_encoding_parameters->TBs[h].K - nrLDPC_slot_encoding_parameters->TBs[h].F - cb_crc_bits + 7) / 8;
       char *data;
       struct rte_mbuf *m_head = rte_pktmbuf_alloc(mbuf_pool);
       AssertFatal(m_head != NULL,
@@ -701,6 +734,10 @@ static void set_ldpc_enc_op(struct rte_bbdev_enc_op **ops,
       }
       ops[j]->ldpc_enc.rv_index = nrLDPC_slot_encoding_parameters->TBs[h].rv_index;
       ops[j]->ldpc_enc.op_flags = RTE_BBDEV_LDPC_RATE_MATCH;
+      /* L of 38.212 5.2.2 is 24 bits only when the TB is split; with a single code block
+         there is no per-CB CRC to attach and the caller hands us the full Kprime. */
+      if (active_dev.enc_attaches_cb_crc && nrLDPC_slot_encoding_parameters->TBs[h].C > 1)
+        ops[j]->ldpc_enc.op_flags |= RTE_BBDEV_LDPC_CRC_24B_ATTACH;
       if (!special_case_tb_mode) {
         ops[j]->ldpc_enc.code_block_mode = 1;
         ops[j]->ldpc_enc.cb_params.e = nrLDPC_slot_encoding_parameters->TBs[h].segments[i].E;
