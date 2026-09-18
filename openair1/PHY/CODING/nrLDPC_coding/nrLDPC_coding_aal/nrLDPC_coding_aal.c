@@ -383,12 +383,53 @@ static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
   // check internal harq memory capabilities
   active_dev.support_internal_harq_memory = check_internal_harq_memory_capabilities(&active_dev.info);
 
-  // setup harq buffers
+  /* setup harq buffers
+     A code block's HARQ buffer is indexed by
+     (harq_unique_pid * NR_LDPC_MAX_NUM_CB + cb) pruned modulo num_harq_codeblock.
+     Unless num_harq_codeblock holds a whole number of per-process ranges, that
+     modulo wraps in the middle of a process: with the default 512 and
+     NR_LDPC_MAX_NUM_CB = 144, process 3's code blocks 80..143 land on process 0's
+     buffers 0..63 and silently corrupt its HARQ combining. Round up so a process
+     maps either to a private aligned range or onto another process wholesale. */
+  if (num_harq_codeblock % NR_LDPC_MAX_NUM_CB != 0) {
+    const uint32_t rounded = ((num_harq_codeblock + NR_LDPC_MAX_NUM_CB - 1) / NR_LDPC_MAX_NUM_CB) * NR_LDPC_MAX_NUM_CB;
+    LOG_W(NR_PHY,
+          "nrLDPC_coding_aal.num_harq_codeblock %u is not a multiple of %d, rounding up to %u to avoid HARQ buffer aliasing\n",
+          num_harq_codeblock,
+          NR_LDPC_MAX_NUM_CB,
+          rounded);
+    num_harq_codeblock = rounded;
+  }
   active_dev.num_harq_codeblock = num_harq_codeblock;
   active_dev.harq_buffers = malloc(sizeof(struct rte_bbdev_op_data) * active_dev.num_harq_codeblock);
+  AssertFatal(active_dev.harq_buffers != NULL, "could not allocate %u HARQ buffer descriptors", active_dev.num_harq_codeblock);
 
-  // is device T2?
-  active_dev.is_t2 = is_t2;
+  /* The device-internal HARQ memory is addressed as num_harq_codeblock slots of
+     LDPC_MAX_CB_SIZE; check it actually fits (harq_buffer_size is in kB). */
+  if (active_dev.support_internal_harq_memory) {
+    const uint64_t needed_kb = ((uint64_t)active_dev.num_harq_codeblock * LDPC_MAX_CB_SIZE) / 1024;
+    if (active_dev.info.drv.harq_buffer_size < needed_kb)
+      LOG_W(NR_PHY,
+            "device internal HARQ memory is %u kB but %u code blocks of %d bytes need %lu kB; HARQ combining will alias\n",
+            active_dev.info.drv.harq_buffer_size,
+            active_dev.num_harq_codeblock,
+            LDPC_MAX_CB_SIZE,
+            (unsigned long)needed_kb);
+  }
+
+  /* is device T2?
+     The T2 needs behavioural differences that no bbdev capability expresses: no
+     TB-mode special case, different processedSegments accounting, and a different
+     LLR preparation. Derive it from the driver name as well as the option, so a T2
+     does not silently take the wrong paths when the operator forgets to set it. */
+  const bool is_t2_detected = active_dev.driver_name != NULL && strstr(active_dev.driver_name, "accl_ldpc") != NULL;
+  if (is_t2 && !is_t2_detected)
+    LOG_W(NR_PHY, "nrLDPC_coding_aal.is_t2 is set but the bbdev driver is \"%s\"\n", active_dev.driver_name);
+  else if (!is_t2 && is_t2_detected)
+    LOG_W(NR_PHY,
+          "bbdev driver \"%s\" is an AccelerComm T2 but nrLDPC_coding_aal.is_t2 was not set, enabling it\n",
+          active_dev.driver_name);
+  active_dev.is_t2 = is_t2 || is_t2_detected;
 
   // device setup
   ret = rte_bbdev_setup_queues(dev_id, nb_queues, active_dev.info.socket_id);
@@ -432,6 +473,60 @@ static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
   return 0;
 }
 
+/* A code block does not always fit an mbuf from the pool. This used to be detected
+   against RTE_BBDEV_LDPC_E_MAX_MBUF and handled by overwriting the mbuf's own
+   buf_addr with an rte_malloc'd block, which was wrong three ways: the flag driving
+   it was declared outside the code-block loop and never cleared, so one oversized
+   block sent every later block in the slot down the same path; the allocation was
+   never freed and the mbuf went back to the pool pointing at memory that was not
+   its own, poisoning it for the next user; and the threshold did not match the
+   pool, whose usable room is in_max_sz + FILLER_HEADROOM, so a block between the
+   two sizes took the normal path and tripped the append assertion.
+   Attach the memory as an external buffer instead: DPDK frees it through the
+   shared-info callback when the mbuf is freed. */
+static void aal_ext_buf_free_cb(void *addr, void *opaque)
+{
+  (void)opaque;
+  rte_free(addr);
+}
+
+/* Reserve data_len writable bytes in m, using an external buffer when the mbuf's
+   own is too small. Returns the region, which satisfies the device alignment. */
+static char *aal_mbuf_reserve(struct rte_mbuf *m, struct rte_mempool *mbuf_pool, uint32_t data_len, uint16_t min_alignment)
+{
+  const uint16_t room = rte_pktmbuf_data_room_size(mbuf_pool) - RTE_PKTMBUF_HEADROOM;
+  char *data;
+
+  if (data_len <= room) {
+    rte_pktmbuf_reset(m);
+    data = rte_pktmbuf_append(m, data_len);
+    AssertFatal(data != NULL, "Couldn't append %u bytes to an mbuf with %u bytes of room", data_len, room);
+  } else {
+    /* buf_len and data_len are 16-bit, so a larger block cannot be described by a
+       single mbuf at all; that needs a chained buffer and the device's
+       SCATTER_GATHER capability. */
+    AssertFatal(data_len <= UINT16_MAX,
+                "code block of %u bytes cannot fit a single mbuf (max %u), scatter-gather is required",
+                data_len,
+                (unsigned int)UINT16_MAX);
+    const uint16_t shinfo_sz = RTE_ALIGN(sizeof(struct rte_mbuf_ext_shared_info), RTE_CACHE_LINE_SIZE);
+    char *buf = rte_malloc(NULL, data_len + shinfo_sz, RTE_CACHE_LINE_SIZE);
+    AssertFatal(buf != NULL, "rte_malloc failed for %u bytes", data_len + shinfo_sz);
+    struct rte_mbuf_ext_shared_info *shinfo = (struct rte_mbuf_ext_shared_info *)(buf + data_len);
+    shinfo->free_cb = aal_ext_buf_free_cb;
+    shinfo->fcb_opaque = NULL;
+    rte_mbuf_ext_refcnt_set(shinfo, 1);
+    rte_pktmbuf_attach_extbuf(m, buf, rte_malloc_virt2iova(buf), data_len, shinfo);
+    data = rte_pktmbuf_append(m, data_len);
+    AssertFatal(data != NULL, "Couldn't append %u bytes to the external buffer", data_len);
+  }
+  AssertFatal(data == RTE_PTR_ALIGN(data, min_alignment),
+              "Data addr in mbuf (%p) is not aligned to device min alignment (%u)",
+              data,
+              min_alignment);
+  return data;
+}
+
 static int init_op_data_objs_harq(struct rte_bbdev_op_data *bufs, struct rte_mempool *mbuf_pool)
 {
   for (int i = 0; i < active_dev.num_harq_codeblock; i++) {
@@ -455,7 +550,6 @@ static int init_op_data_objs_dec(struct rte_bbdev_op_data *bufs,
                                  enum op_data_type op_type,
                                  uint16_t min_alignment)
 {
-  bool large_input = false;
   int j = 0;
   for (int h = 0; h < nrLDPC_slot_decoding_parameters->nb_TBs; ++h) {
     nrLDPC_TB_decoding_parameters_t *p = &nrLDPC_slot_decoding_parameters->TBs[h];
@@ -469,34 +563,13 @@ static int init_op_data_objs_dec(struct rte_bbdev_op_data *bufs,
                   nb_segments_decoding(nrLDPC_slot_decoding_parameters),
                   mbuf_pool->size);
 
-      if (data_len > RTE_BBDEV_LDPC_E_MAX_MBUF) {
-        printf("Warning: Larger input size than DPDK mbuf %u\n", data_len);
-        large_input = true;
-      }
       bufs[j].data = m_head;
       bufs[j].offset = 0;
       bufs[j].length = 0;
 
       if (op_type == DATA_INPUT) {
-        if (large_input) {
-          /* Allocate a fake overused mbuf */
-          data = rte_malloc(NULL, data_len, 0);
-          AssertFatal(data != NULL, "rte malloc failed with %u bytes", data_len);
-          memcpy(data, &input[j * LDPC_MAX_CB_SIZE], data_len);
-          m_head->buf_addr = data;
-          m_head->buf_iova = rte_malloc_virt2iova(data);
-          m_head->data_off = 0;
-          m_head->data_len = data_len;
-        } else {
-          rte_pktmbuf_reset(m_head);
-          data = rte_pktmbuf_append(m_head, data_len);
-          AssertFatal(data != NULL, "Couldn't append %u bytes to mbuf from %d data type mbuf pool", data_len, op_type);
-          AssertFatal(data == RTE_PTR_ALIGN(data, min_alignment),
-                      "Data addr in mbuf (%p) is not aligned to device min alignment (%u)",
-                      data,
-                      min_alignment);
-          rte_memcpy(data, &input[j * LDPC_MAX_CB_SIZE], data_len);
-        }
+        data = aal_mbuf_reserve(m_head, mbuf_pool, data_len, min_alignment);
+        rte_memcpy(data, &input[j * LDPC_MAX_CB_SIZE], data_len);
         bufs[j].length += data_len;
       }
       ++j;
@@ -512,7 +585,6 @@ static int init_op_data_objs_enc(struct rte_bbdev_op_data *bufs,
                                  enum op_data_type op_type,
                                  uint16_t min_alignment)
 {
-  bool large_input = false;
   int j = 0;
   for (int h = 0; h < nrLDPC_slot_encoding_parameters->nb_TBs; ++h) {
     for (int i = 0; i < nrLDPC_slot_encoding_parameters->TBs[h].C; ++i) {
@@ -525,34 +597,13 @@ static int init_op_data_objs_enc(struct rte_bbdev_op_data *bufs,
                   nb_segments_encoding(nrLDPC_slot_encoding_parameters),
                   mbuf_pool->size);
 
-      if (data_len > RTE_BBDEV_LDPC_E_MAX_MBUF) {
-        printf("Warning: Larger input size than DPDK mbuf %u\n", data_len);
-        large_input = true;
-      }
       bufs[j].data = m_head;
       bufs[j].offset = 0;
       bufs[j].length = 0;
 
       if (op_type == DATA_INPUT) {
-        if (large_input) {
-          /* Allocate a fake overused mbuf */
-          data = rte_malloc(NULL, data_len, 0);
-          AssertFatal(data != NULL, "rte malloc failed with %u bytes", data_len);
-          memcpy(data, nrLDPC_slot_encoding_parameters->TBs[h].segments[i].c, data_len);
-          m_head->buf_addr = data;
-          m_head->buf_iova = rte_malloc_virt2iova(data);
-          m_head->data_off = 0;
-          m_head->data_len = data_len;
-        } else {
-          rte_pktmbuf_reset(m_head);
-          data = rte_pktmbuf_append(m_head, data_len);
-          AssertFatal(data != NULL, "Couldn't append %u bytes to mbuf from %d data type mbuf pool", data_len, op_type);
-          AssertFatal(data == RTE_PTR_ALIGN(data, min_alignment),
-                      "Data addr in mbuf (%p) is not aligned to device min alignment (%u)",
-                      data,
-                      min_alignment);
-          rte_memcpy(data, nrLDPC_slot_encoding_parameters->TBs[h].segments[i].c, data_len);
-        }
+        data = aal_mbuf_reserve(m_head, mbuf_pool, data_len, min_alignment);
+        rte_memcpy(data, nrLDPC_slot_encoding_parameters->TBs[h].segments[i].c, data_len);
         bufs[j].length += data_len;
       }
       ++j;
