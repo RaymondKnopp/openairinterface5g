@@ -1112,6 +1112,222 @@ static inline nr_prec2x2_rot_t nr_prec2x2_classify(const c16_t w)
   return r;
 }
 
+#ifdef __aarch64__
+/* Fused cross-polar precoder for 2 layers onto 4 antenna ports.
+ *
+ * For 4 CSI ports with XP=2 (two polarisations of N1*N2=2 co-polar elements) the rank-2
+ * Type-I codebook satisfies, for the port pair (p, p+2) of the same co-polar element:
+ *
+ *     W[0][p+2] = +phi * W[0][p]        W[1][p+2] = -phi * W[1][p],     phi in {1, j}
+ *
+ * (verified against the weights this codebase actually generates). So with
+ * a = W[0][p]*x0 and b = W[1][p]*x1, the two polarisations are a butterfly:
+ *
+ *     y_p     = a + b
+ *     y_{p+2} = phi * (a - b)
+ *
+ * which costs 4 complex multiplies per RE instead of the 8 the generic per-port kernel
+ * does, because a and b are shared between the two polarisations. phi is a unit rotation,
+ * so applying it is a lane swap plus a negate, not a multiply. Precoding is the dominant
+ * term in DL TX: at 273 PRB / 2 layers / 4 ports it is 336.5 us of a 463.2 us PDSCH
+ * generation on a Cortex-A78AE, against 43.4 us for resource mapping.
+ *
+ * NOT bit-exact against nr_layer_precoder_simd(): the stored W[l][p+2] is rounded to int16
+ * independently of W[l][p], so deriving one from the other differs by up to ~1 LSB on a
+ * weight of ~23170 (about -88 dB, far below the output quantisation). Validate with a
+ * tolerance, not memcmp.
+ *
+ * phi_swap/phi_neg describe phi: {false,false} = +1, {true,X} = +/-j. */
+void nr_layer_precoder_2x4_simd(const int symSz,
+                                const c16_t txdataF_res_mapped[2][symSz],
+                                c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
+                                const int p,
+                                const bool phi_swap,
+                                const bool phi_neg,
+                                const int sc_offset,
+                                const int re_cnt,
+                                c16_t *out_lo,
+                                c16_t *out_hi)
+{
+  const c16_t w0 = weights[0][p], w1 = weights[1][p];
+  const int16x4_t w0r = vdup_n_s16(w0.r), w0i = vdup_n_s16(w0.i);
+  const int16x4_t w1r = vdup_n_s16(w1.r), w1i = vdup_n_s16(w1.i);
+
+  /* deinterleaved throughout: ld2/st2 split and merge for free, each product is computed
+     once (see cmac0_prec4()), and the phi rotation below is a register naming, not work */
+  const int16_t *in0 = (const int16_t *)(txdataF_res_mapped[0] + sc_offset);
+  const int16_t *in1 = (const int16_t *)(txdataF_res_mapped[1] + sc_offset);
+  int16_t *o_lo = (int16_t *)(out_lo + sc_offset);
+  int16_t *o_hi = (int16_t *)(out_hi + sc_offset);
+
+  int done = 0;
+  for (; done + 4 <= re_cnt; done += 4) {
+    const int16x4x2_t a = cmac0_prec4(vld2_s16(in0), w0r, w0i);
+    const int16x4x2_t b = cmac0_prec4(vld2_s16(in1), w1r, w1i);
+    in0 += 8;
+    in1 += 8;
+    /* saturating, to match the generic path's accumulation */
+    int16x4x2_t sum, dif;
+    sum.val[0] = vqadd_s16(a.val[0], b.val[0]);
+    sum.val[1] = vqadd_s16(a.val[1], b.val[1]);
+    const int16x4_t dr = vqsub_s16(a.val[0], b.val[0]);
+    const int16x4_t di = vqsub_s16(a.val[1], b.val[1]);
+    if (phi_swap) { /* multiply by +/-j: (r,i) -> (-i, r) or (i, -r) */
+      if (phi_neg) {
+        dif.val[0] = di;
+        dif.val[1] = vqneg_s16(dr);
+      } else {
+        dif.val[0] = vqneg_s16(di);
+        dif.val[1] = dr;
+      }
+    } else if (phi_neg) {
+      dif.val[0] = vqneg_s16(dr);
+      dif.val[1] = vqneg_s16(di);
+    } else {
+      dif = (int16x4x2_t){{dr, di}};
+    }
+    vst2_s16(o_lo + 2 * done, sum);
+    vst2_s16(o_hi + 2 * done, dif);
+  }
+  /* re_cnt is always a multiple of NR_NB_SC_PER_RB = 12, so the SIMD loop is exact */
+  DevAssert(done == re_cnt);
+}
+
+/* General cross-polar fast path for 2-4 layers onto 4 antenna ports.  Every 4-port
+ * Type-I codebook entry has the block form W = [[A],[Phi.A]]: ports {p, p+2} are the two
+ * polarisations and differ, per layer, by a co-phasing phi_l in {+-1,+-j}.  So
+ *   out[p]   = sum_l  W[l][p].x_l            (the r beam products)
+ *   out[p+2] = sum_l  phi_l . (W[l][p].x_l)  (the same products, co-phased)
+ * sharing the r complex multiplies between both ports of a pair -- 2r MACs for the pair
+ * instead of 4r for the generic per-port kernel.
+ *
+ * Everything here is kept in DEINTERLEAVED (separate real / imaginary) form, which is what
+ * makes the saving real rather than nominal:
+ *
+ *  - the products are 4-lane (D form), through the shared cmac0_prec4(): ld2/st2
+ *    deinterleave and re-interleave for free in the load and the store, and each lane is
+ *    multiplied once (the interleaved form computes every product twice on ARMv8.0).
+ *  - the co-phasing costs nothing.  phi_l takes only 4 values, so with the layers grouped
+ *    by phi the second polarisation is
+ *      out[p+2] = P + j.Q,  P = sum_{phi=+1} t - sum_{phi=-1} t,  Q = sum_{phi=+j} t - sum_{phi=-j} t
+ *    the signs fold into the accumulation (vqsub instead of vqadd, same cost), and in split
+ *    form j.(r,i) = (-i, r) is just naming the other accumulator: hi_r = P_r - Q_i,
+ *    hi_i = P_i + Q_r.  Applied to interleaved data it would instead cost rev32+neg+bsl per
+ *    +-j layer per RE, which is what ate the MAC saving in the first version of this kernel.
+ *
+ * Like nr_layer_precoder_simd(), the RE loop is specialised per layer count: the layers are
+ * sorted into the four phi groups in the prologue, but the loop body then indexes the
+ * sorted weights and input pointers with *constants*, so they stay in registers.
+ *
+ * Like nr_layer_precoder_2x4_simd() this is NOT bit-exact vs the generic kernel (W[l][p+2]
+ * is rounded independently of W[l][p], so deriving one from the other differs by up to
+ * ~1 LSB per layer); the phi grouping also reorders the saturating accumulation, which can
+ * differ from layer order only where an accumulator saturates.  Validate with a tolerance.
+ * phi_swap[l]/phi_neg[l] encode phi_l: {f,f}=+1 {f,t}=-1 {t,f}=+j {t,t}=-j. */
+void nr_layer_precoder_Nx4_simd(const int n_layers,
+                                const int symSz,
+                                const c16_t txdataF_res_mapped[n_layers][symSz],
+                                c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
+                                const int p,
+                                const bool phi_swap[NR_MAX_NB_LAYERS],
+                                const bool phi_neg[NR_MAX_NB_LAYERS],
+                                const int sc_offset,
+                                const int re_cnt,
+                                c16_t *out_lo,
+                                c16_t *out_hi)
+{
+  AssertFatal(n_layers >= 2 && n_layers <= 4, "Shouldn't get here, n_layers %d\n", n_layers);
+  int16x4_t wr[NR_MAX_NB_LAYERS], wi[NR_MAX_NB_LAYERS];
+  const int16_t *in[NR_MAX_NB_LAYERS];
+  int end[4]; /* exclusive end of each phi group, in the order +1, -1, +j, -j */
+  int n = 0;
+  for (int g = 0; g < 4; g++) {
+    const bool g_swap = g >= 2, g_neg = (g & 1) != 0;
+    for (int l = 0; l < n_layers; l++) {
+      if (phi_swap[l] == g_swap && phi_neg[l] == g_neg) {
+        wr[n] = vdup_n_s16(weights[l][p].r);
+        wi[n] = vdup_n_s16(weights[l][p].i);
+        in[n] = (const int16_t *)(txdataF_res_mapped[l] + sc_offset);
+        n++;
+      }
+    }
+    end[g] = n;
+  }
+  DevAssert(n == n_layers); /* the caller classified every layer */
+  const int e0 = end[0], e1 = end[1], e2 = end[2];
+  int16_t *o_lo = (int16_t *)(out_lo + sc_offset);
+  int16_t *o_hi = (int16_t *)(out_hi + sc_offset);
+
+  /* one sorted layer: the group tests are on constants and loop-invariant bounds */
+#define NX4_LAYER(I)                                                  \
+  do {                                                                \
+    const int16x4x2_t t = cmac0_prec4(vld2_s16(in##I), wr[I], wi[I]); \
+    in##I += 8;                                                       \
+    const int16x4_t tr = t.val[0], ti = t.val[1];                     \
+    lo_r = vqadd_s16(lo_r, tr);                                       \
+    lo_i = vqadd_s16(lo_i, ti);                                       \
+    if ((I) < e0) {                                                   \
+      P_r = vqadd_s16(P_r, tr);                                       \
+      P_i = vqadd_s16(P_i, ti);                                       \
+    } else if ((I) < e1) {                                            \
+      P_r = vqsub_s16(P_r, tr);                                       \
+      P_i = vqsub_s16(P_i, ti);                                       \
+    } else if ((I) < e2) {                                            \
+      Q_r = vqadd_s16(Q_r, tr);                                       \
+      Q_i = vqadd_s16(Q_i, ti);                                       \
+    } else {                                                          \
+      Q_r = vqsub_s16(Q_r, tr);                                       \
+      Q_i = vqsub_s16(Q_i, ti);                                       \
+    }                                                                 \
+  } while (0)
+
+#define NX4_RUN(R)                                                                        \
+  do {                                                                                    \
+    const int16_t *in0 = in[0];                                                           \
+    const int16_t *in1 = in[1];                                                           \
+    const int16_t *in2 = in[(R) > 2 ? 2 : 0];                                             \
+    const int16_t *in3 = in[(R) > 3 ? 3 : 0];                                             \
+    (void)in2;                                                                            \
+    (void)in3;                                                                            \
+    const int16x4_t zero = vdup_n_s16(0);                                                 \
+    for (; done + 4 <= re_cnt; done += 4) {                                               \
+      int16x4_t lo_r = zero, lo_i = zero, P_r = zero, P_i = zero, Q_r = zero, Q_i = zero; \
+      NX4_LAYER(0);                                                                       \
+      NX4_LAYER(1);                                                                       \
+      if ((R) > 2)                                                                        \
+        NX4_LAYER(2);                                                                     \
+      if ((R) > 3)                                                                        \
+        NX4_LAYER(3);                                                                     \
+      /* hi = P + j.Q : j.(r,i) = (-i, r), free in split form */                          \
+      int16x4x2_t o;                                                                      \
+      o.val[0] = lo_r;                                                                    \
+      o.val[1] = lo_i;                                                                    \
+      vst2_s16(o_lo + 2 * done, o);                                                       \
+      o.val[0] = vqsub_s16(P_r, Q_i);                                                     \
+      o.val[1] = vqadd_s16(P_i, Q_r);                                                     \
+      vst2_s16(o_hi + 2 * done, o);                                                       \
+    }                                                                                     \
+  } while (0)
+
+  int done = 0;
+  switch (n_layers) {
+    case 2:
+      NX4_RUN(2);
+      break;
+    case 3:
+      NX4_RUN(3);
+      break;
+    default:
+      NX4_RUN(4);
+      break;
+  }
+#undef NX4_RUN
+#undef NX4_LAYER
+  /* re_cnt is always a multiple of NR_NB_SC_PER_RB = 12, so the SIMD loop is exact */
+  DevAssert(done == re_cnt);
+}
+#endif // __aarch64__
+
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],
                                 c16_t weights[NR_MAX_NB_LAYERS][NR_MAX_CSI_PORTS],
