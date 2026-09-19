@@ -591,17 +591,18 @@ static void nr_pdsch_scramble_modulate_chunk(void *arg)
   for (uint32_t i = 0; i < d->n_words; i++)
     out[i] = in[i] ^ seq[i];
 
-  c16_t mod_symbs[d->n_syms] __attribute__((aligned(64)));
-  nr_modulation(out, d->bit_len, d->Qm, (int16_t *)mod_symbs);
-
   /* Offsetting the flat base keeps the per-layer stride, so tl[l][k] is
      tx_layers[l][sym_off / n_layers + k]. */
   c16_t (*tl)[d->layerSz] = (c16_t (*)[d->layerSz])(d->tx_base + d->sym_off / d->n_layers);
-  /* the granule keeps every chunk's per-layer offset 64-byte aligned; nr_layer_mapping()
-     stores there with aligned 512-bit stores on AVX-512 */
+  /* the granule keeps every chunk's per-layer offset 64-byte aligned; the AVX-512 layer
+     mapping below stores there with aligned 512-bit stores */
   DevAssert(((uintptr_t)tl & 63) == 0);
-  c16_t (*ms)[d->n_syms] = &mod_symbs;
-  nr_layer_mapping(1, d->n_syms, ms, d->n_layers, d->layerSz, d->n_syms, tl);
+  /* One entry point: it picks modulate-then-deinterleave for 1-2 layers and the fused
+     per-symbol loop for 3-4, so the chunking is valid for every layer count. The slice is
+     granule-aligned (granule_bits is a multiple of 16 * Qm * n_layers), which is what the
+     fused path and the aligned stores both need. */
+  const bool ok = nr_modulation_layer_mapping(out, d->bit_len, d->Qm, d->n_layers, d->layerSz, tl);
+  DevAssert(ok);
 
   completed_task_ans(d->ans);
 }
@@ -612,6 +613,14 @@ static void nr_pdsch_scramble_modulate_chunk(void *arg)
    scheduler produces, which is why the first version measured -49% in dlsim at 2 layers
    and no gain at all on the live DU. */
 #define NR_PDSCH_MOD_MIN_CHUNK_SYMS 2048
+
+/* A/B switch, read once at load time: the decision below is taken per PDSCH, which is too
+   hot for getenv(). NR_PDSCH_NO_MODCHUNK=1 forces the serial scramble+modulate call. */
+static bool nr_pdsch_no_modchunk;
+static void __attribute__((constructor)) nr_pdsch_read_modchunk_env(void)
+{
+  nr_pdsch_no_modchunk = getenv("NR_PDSCH_NO_MODCHUNK") != NULL;
+}
 
 static inline uint32_t nr_gcd_u32(uint32_t a, uint32_t b)
 {
@@ -852,10 +861,11 @@ static int do_one_dlsch(unsigned char *input_ptr, PHY_VARS_gNB *gNB, NR_gNB_DLSC
   uint32_t scrambled_output[(encoded_length >> 5) + 4]; // modulator access by 4 bytes in some cases
   const uint32_t roundedSz = (encoded_length + 31) / 32;
 
-  /* Split scramble+modulate+layer-map over the pool when it is worth it. Restricted to
-     <= 2 layers because that is exactly the range where nr_modulation_layer_mapping()
-     itself selects modulate-then-deinterleave; for 3-4 layers it picks a fused scalar
-     loop that this chunking does not reproduce, so fall through to the serial call. */
+  /* Split scramble+modulate+layer-map over the pool when it is worth it. The worker
+     goes through nr_modulation_layer_mapping(), which selects the right strategy for
+     the layer count, so every rank can be chunked -- at 3-4 layers this stage used to
+     run serially on one core while precoding had the whole pool.
+     NR_PDSCH_NO_MODCHUNK=1 forces the serial call, for A/B. */
   uint32_t nb_chunks = 1;
   /* A chunk boundary has to satisfy three things at once:
        - 32-bit aligned, because the scrambler XORs whole words;
@@ -873,7 +883,11 @@ static int do_one_dlsch(unsigned char *input_ptr, PHY_VARS_gNB *gNB, NR_gNB_DLSC
   const uint32_t align_unit = 16u * unit; // 16 c16_t = 64 B per layer
   const uint32_t granule_bits = (32u / nr_gcd_u32(32u, align_unit)) * align_unit;
   const uint32_t granules_total = (encoded_length + granule_bits - 1) / granule_bits;
-  if (gNB->num_pdsch_symbols_per_thread > 0 && rel15->nrOfLayers <= 2) {
+  /* Chunk every rank the pool can help with: the worker now goes through
+     nr_modulation_layer_mapping(), which selects the right strategy for the layer count,
+     so 3-4 layers chunk too -- that stage used to run serially on one core while precoding
+     had the whole pool.  NR_PDSCH_NO_MODCHUNK=1 forces the serial call, for A/B. */
+  if (gNB->num_pdsch_symbols_per_thread > 0 && !nr_pdsch_no_modchunk) {
     /* one chunk per worker plus one for the caller, which runs the last inline */
     const uint32_t by_pool = (uint32_t)gNB->threadPool.len_thr + 1;
     const uint32_t by_size = (encoded_length / Qm) / NR_PDSCH_MOD_MIN_CHUNK_SYMS;
