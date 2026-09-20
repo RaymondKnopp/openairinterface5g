@@ -177,10 +177,10 @@ void fftshift_inverse_inplace(c16_t *in, int nbins, int fft_size);
   @param[in]  re_cnt             Number of RE to write, should be multiple of 4.
   @param[out] txdataF_precoded_ant0/ant1  Precoded data for antenna ports 0 and 1.
 */
-#ifdef __aarch64__
-/* The cross-polar precoders below are NEON kernels with no portable equivalent: the
-   dispatcher in nr_dlsch.c selects them only under NR_PDSCH_2X4_FASTPATH, which is
-   aarch64-only, and every other target keeps the generic per-port kernel. */
+#if defined(__aarch64__) && !defined(__ARM_FEATURE_QRDMX)
+/* The rank-2 specialisation below is dispatched only on ARMv8.0, the one core class where
+   it measures faster than the general Nx4 kernel (see nr_dlsch.c). Elsewhere -- ARMv8.1+
+   and x86 -- rank 2 goes through the general kernel. */
 
 /*! \brief Fused 2-layer / 4-port cross-polar precoder: writes the port pair (p, p+2) in
    one pass, sharing the two complex multiplies between the polarisations. Halves the MAC
@@ -203,6 +203,7 @@ void nr_layer_precoder_2x4_simd(const int symSz,
                                 const int re_cnt,
                                 c16_t *out_lo,
                                 c16_t *out_hi);
+#endif // __aarch64__ && !__ARM_FEATURE_QRDMX
 
 void nr_layer_precoder_Nx4_simd(const int n_layers,
                                 const int symSz,
@@ -215,7 +216,6 @@ void nr_layer_precoder_Nx4_simd(const int n_layers,
                                 const int re_cnt,
                                 c16_t *out_lo,
                                 c16_t *out_hi);
-#endif // __aarch64__
 
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],

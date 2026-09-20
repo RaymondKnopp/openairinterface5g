@@ -506,10 +506,17 @@ static inline void do_txdataF(c16_t **txdataF,
 /* The cross-polar fast paths share their per-layer complex multiplies between the two
    polarisations, so unlike the 2x2 butterfly the win is fewer MACs rather than cheaper
    ones -- the QRDMX argument above does not apply, and they are enabled on every aarch64
-   core. Precoding at 273 PRB / MCS 25 / 4 ports, single-threaded, against the generic
-   per-port kernel: 1.95-2.13x on a Cortex-A78C (where precoding was 304.6 us of a 403 us
-   PDSCH generation at 2 layers) and 1.43-1.61x on a Cortex-X925. */
-#if defined(__aarch64__)
+   core as well as on x86. Note the 2x2 butterfly never covers this case: it is dispatched
+   only at num_log_ports == 2, so before this path a 4-port allocation ran the generic
+   per-port kernel on every target.
+
+   Precoding at 273 PRB / 4 ports, single-threaded, against that generic kernel, ranks 2-4:
+   1.10-1.45x on a Cortex-A72, 1.21-1.41x on a Cortex-A78AE, 1.50-1.60x on a Cortex-X925,
+   2.1-2.6x on a Xeon Gold 6433N and 2.6-3.3x on a Xeon Gold 6154.  The narrow NEON register
+   file is what limits the ARM cores: six accumulators plus eight weight registers plus four
+   input pointers spill at rank 4 on the A72 (its worst case, 1.10x), where the x86 tiers,
+   with more and wider registers, do best. */
+#if defined(__aarch64__) || defined(__AVX2__)
 #define NR_PDSCH_2X4_FASTPATH 1
 #endif
 
@@ -561,6 +568,7 @@ static inline void do_txdataF_2x2(c16_t **txdataF,
   } // RB loop: while(rb < rb_size)
 }
 
+#if defined(NR_PDSCH_2X4_FASTPATH) && defined(__aarch64__) && !defined(__ARM_FEATURE_QRDMX)
 /* Does the rank-2 4-port codebook entry have the cross-polar butterfly structure
  *   W[0][p+2] = +phi*W[0][p]   and   W[1][p+2] = -phi*W[1][p],   phi in {1,-1,j,-j} ?
  * The generated weights are each rounded to int16 independently, so compare with a small
@@ -621,7 +629,6 @@ static inline bool nr_pdsch_2x4_usable(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_
   return nr_prec2x4_classify(pm, 0, &swap, &neg) && nr_prec2x4_classify(pm, 1, &swap, &neg);
 }
 
-#if defined(NR_PDSCH_2X4_FASTPATH) && defined(__aarch64__) && !defined(__ARM_FEATURE_QRDMX)
 /* Fast path of do_txdataF() for 2 layers onto 4 antenna ports: fills the port pair
    (p, p+2) in one pass. See nr_layer_precoder_2x4_simd(). */
 static inline bool do_txdataF_2x4(c16_t **txdataF,
@@ -678,8 +685,8 @@ static inline bool do_txdataF_2x4(c16_t **txdataF,
   }
   return true;
 }
-
 #endif // NR_PDSCH_2X4_FASTPATH && __aarch64__ && !__ARM_FEATURE_QRDMX
+
 #ifdef NR_PDSCH_2X4_FASTPATH
 /* Rank 3-4 generalisation of nr_prec2x4_classify(): for port pair (p, p+2) find the
    per-layer co-phasing phi_l in {+-1,+-j} with W[l][p+2] = phi_l . W[l][p].  Fills
@@ -937,8 +944,18 @@ static void nr_pdsch_symbol_processing(void *arg)
       }
     } else
 #endif // NR_PDSCH_2X2_FASTPATH
-#ifdef NR_PDSCH_2X4_FASTPATH
-    /* 2 layers onto 4 ports: halve the complex MACs by sharing them between the two
+#if defined(NR_PDSCH_2X4_FASTPATH) && defined(__aarch64__) && !defined(__ARM_FEATURE_QRDMX)
+    /* 2 layers onto 4 ports, ARMv8.0 only: a rank-2 specialisation of the path below,
+     * which saves the phi bucketing.  Whether that is worth a separate kernel depends on
+     * the core, so it is dispatched only where it measures faster than the general one --
+     * rank 2, 273 PRB, 4 ports, median of 3:
+     *
+     *            generic   2x4 specialisation   general Nx4
+     *   A72       842.91         582.29            596.16    -> keep the specialisation
+     *   X925      260.87         184.49            174.69    -> use the general kernel
+     *
+     * On x86 rank 2 goes through the general kernel too.
+     * Halves the complex MACs by sharing them between the two
      * polarisations.  Decided once per symbol, never partway through: the scheduler sets
      * prg_size = rbSize, so the whole allocation carries a single PMI, and if that PMI is
      * not of the expected cross-polar form we simply use the generic kernel below. */
@@ -967,10 +984,13 @@ static void nr_pdsch_symbol_processing(void *arg)
         }
       }
     } else
-    /* 3-4 layers onto 4 ports: same cross-polar sharing as the 2x4 path, generalised to
-     * rank r (halves the MACs: 2r instead of 4r per RE-pair). Decided once per symbol; if
-     * the single PMI is not cross-polar the generic kernel below is used. */
-    if ((rel15->nrOfLayers == 3 || rel15->nrOfLayers == 4) && num_log_ports == 4 && nr_pdsch_Nx4_usable(gNB, rel15)) {
+#endif // NR_PDSCH_2X4_FASTPATH && __aarch64__ && !__ARM_FEATURE_QRDMX
+#ifdef NR_PDSCH_2X4_FASTPATH
+    /* 2-4 layers onto 4 ports: the same cross-polar sharing, for rank r -- 2r MACs per
+     * port pair instead of 4r. Decided once per symbol; if the single PMI is not
+     * cross-polar the generic kernel below is used. On aarch64 rank 2 is taken by the
+     * specialisation above, so only 3 and 4 reach here. */
+    if (rel15->nrOfLayers >= 2 && rel15->nrOfLayers <= 4 && num_log_ports == 4 && nr_pdsch_Nx4_usable(gNB, rel15)) {
       int pos = 0;
       int block_start, block_end;
       while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {

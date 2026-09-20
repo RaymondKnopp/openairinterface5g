@@ -1071,7 +1071,7 @@ static inline nr_prec2x2_rot_t nr_prec2x2_classify(const c16_t w)
   return r;
 }
 
-#ifdef __aarch64__
+#if defined(__aarch64__) && !defined(__ARM_FEATURE_QRDMX)
 /* Fused cross-polar precoder for 2 layers onto 4 antenna ports.
  *
  * For 4 CSI ports with XP=2 (two polarisations of N1*N2=2 co-polar elements) the rank-2
@@ -1151,6 +1151,7 @@ void nr_layer_precoder_2x4_simd(const int symSz,
   /* re_cnt is always a multiple of NR_NB_SC_PER_RB = 12, so the SIMD loop is exact */
   DevAssert(done == re_cnt);
 }
+#endif // __aarch64__ && !__ARM_FEATURE_QRDMX
 
 /* General cross-polar fast path for 2-4 layers onto 4 antenna ports.  Every 4-port
  * Type-I codebook entry has the block form W = [[A],[Phi.A]]: ports {p, p+2} are the two
@@ -1196,6 +1197,7 @@ void nr_layer_precoder_Nx4_simd(const int n_layers,
                                 c16_t *out_hi)
 {
   AssertFatal(n_layers >= 2 && n_layers <= 4, "Shouldn't get here, n_layers %d\n", n_layers);
+#ifdef __aarch64__
   int16x4_t wr[NR_MAX_NB_LAYERS], wi[NR_MAX_NB_LAYERS];
   const int16_t *in[NR_MAX_NB_LAYERS];
   int end[4]; /* exclusive end of each phi group, in the order +1, -1, +j, -j */
@@ -1282,10 +1284,180 @@ void nr_layer_precoder_Nx4_simd(const int n_layers,
   }
 #undef NX4_RUN
 #undef NX4_LAYER
+#else /* x86 and anything else simde covers */
+  /* Same algebra, interleaved.  Deinterleaving is an aarch64 idea: VPMADDWD multiplies
+     adjacent 16-bit pairs, which already matches the |Re Im| layout, so the products are
+     formed with the generic kernel's own cmac0_prec*() and are bit-identical to what it
+     computes for out[p].  What the bucketing buys here is the same thing it buys on NEON:
+     phi is applied once per output vector rather than once per layer per RE. */
+  c16_t w[NR_MAX_NB_LAYERS];
+  const c16_t *src[NR_MAX_NB_LAYERS];
+  int grp[4]; /* exclusive end of each phi group, in the order +1, -1, +j, -j */
+  int n = 0;
+  for (int g = 0; g < 4; g++) {
+    const bool g_swap = g >= 2, g_neg = (g & 1) != 0;
+    for (int l = 0; l < n_layers; l++) {
+      if (phi_swap[l] == g_swap && phi_neg[l] == g_neg) {
+        w[n] = weights[l][p];
+        src[n] = txdataF_res_mapped[l] + sc_offset;
+        n++;
+      }
+    }
+    grp[g] = n;
+  }
+  DevAssert(n == n_layers); /* the caller classified every layer */
+  const int e0 = grp[0], e1 = grp[1], e2 = grp[2];
+  c16_t *lo_out = out_lo + sc_offset;
+  c16_t *hi_out = out_hi + sc_offset;
+  int done = 0;
+  int lim;
+
+/* One sorted layer: t = W[l][p].x_l, accumulated into out[p] and, with the sign of phi_l
+   folded into the accumulate, into the P or Q bucket of out[p+2].  The group tests are on
+   constants and loop-invariant bounds, so they fold away per specialisation. */
+#define NX4_LAYER(I)                                                      \
+  do {                                                                    \
+    const NX4_VT t = NX4_CMAC0(NX4_LOADU(src##I + done), w_c##I, w_s##I); \
+    lo = NX4_ADDS(lo, t);                                                 \
+    if ((I) < e0)                                                         \
+      P = NX4_ADDS(P, t);                                                 \
+    else if ((I) < e1)                                                    \
+      P = NX4_SUBS(P, t);                                                 \
+    else if ((I) < e2)                                                    \
+      Q = NX4_ADDS(Q, t);                                                 \
+    else                                                                  \
+      Q = NX4_SUBS(Q, t);                                                 \
+  } while (0)
+
+#define NX4_W(Rank, Idx)                                        \
+  const NX4_VT w_c##Rank = NX4_SET1(c16toI32(c16conj(w[Idx]))); \
+  const NX4_VT w_s##Rank = NX4_SET1(c16toI32(c16swap(w[Idx]))); \
+  const c16_t *src##Rank = src[Idx];
+
+#define NX4_RUN(R, W)                                                             \
+  do {                                                                            \
+    NX4_W(0, 0)                                                                   \
+    NX4_W(1, 1)                                                                   \
+    NX4_W(2, (R) > 2 ? 2 : 0)                                                     \
+    NX4_W(3, (R) > 3 ? 3 : 0)                                                     \
+    (void)w_c2;                                                                   \
+    (void)w_s2;                                                                   \
+    (void)src2;                                                                   \
+    (void)w_c3;                                                                   \
+    (void)w_s3;                                                                   \
+    (void)src3;                                                                   \
+    /* j.(r,i) = (-i, r): swap the lanes of each pair, negate the new real one */ \
+    const NX4_VT jr = NX4_SET1(c16toI32(((c16_t){-1, 1})));                       \
+    for (; done + (W) <= lim; done += (W)) {                                      \
+      NX4_VT lo = NX4_ZERO, P = NX4_ZERO, Q = NX4_ZERO;                           \
+      NX4_LAYER(0);                                                               \
+      NX4_LAYER(1);                                                               \
+      if ((R) > 2)                                                                \
+        NX4_LAYER(2);                                                             \
+      if ((R) > 3)                                                                \
+        NX4_LAYER(3);                                                             \
+      NX4_STOREU(lo_out + done, lo);                                              \
+      NX4_STOREU(hi_out + done, NX4_ADDS(P, NX4_JMUL(NX4_SWAP(Q), jr)));          \
+    }                                                                             \
+  } while (0)
+
+/* specialise the RE loop per layer count, so the sorted weights and pointers are indexed
+   by constants and stay in registers */
+#define NX4_TIER(W)     \
+  do {                  \
+    switch (n_layers) { \
+      case 2:           \
+        NX4_RUN(2, W);  \
+        break;          \
+      case 3:           \
+        NX4_RUN(3, W);  \
+        break;          \
+      default:          \
+        NX4_RUN(4, W);  \
+        break;          \
+    }                   \
+  } while (0)
+
+  /* widest tier first, then the narrower ones mop up the remainder, as the generic kernel
+     does -- re_cnt is a multiple of NR_NB_SC_PER_RB = 12, hence of 4, so 128 bits finishes */
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+#define NX4_VT __m512i
+#define NX4_SET1 _mm512_set1_epi32
+#define NX4_ZERO _mm512_setzero_si512()
+#define NX4_CMAC0 cmac0_prec512
+#define NX4_ADDS _mm512_adds_epi16
+#define NX4_SUBS _mm512_subs_epi16
+#define NX4_LOADU(P) _mm512_loadu_si512((const void *)(P))
+#define NX4_STOREU(P, V) _mm512_storeu_si512((void *)(P), V)
+#define NX4_SWAP oai_mm512_swap
+#define NX4_JMUL _mm512_mullo_epi16 /* AVX-512BW dropped vpsignw */
+  lim = re_cnt & ~15;
+  NX4_TIER(16);
+#undef NX4_VT
+#undef NX4_SET1
+#undef NX4_ZERO
+#undef NX4_CMAC0
+#undef NX4_ADDS
+#undef NX4_SUBS
+#undef NX4_LOADU
+#undef NX4_STOREU
+#undef NX4_SWAP
+#undef NX4_JMUL
+#endif
+#ifdef __AVX2__
+#define NX4_VT simde__m256i
+#define NX4_SET1 simde_mm256_set1_epi32
+#define NX4_ZERO simde_mm256_setzero_si256()
+#define NX4_CMAC0 cmac0_prec256
+#define NX4_ADDS simde_mm256_adds_epi16
+#define NX4_SUBS simde_mm256_subs_epi16
+#define NX4_LOADU(P) simde_mm256_loadu_si256((const simde__m256i *)(P))
+#define NX4_STOREU(P, V) simde_mm256_storeu_si256((simde__m256i *)(P), V)
+#define NX4_SWAP oai_mm256_swap
+#define NX4_JMUL simde_mm256_sign_epi16
+  lim = re_cnt & ~7;
+  NX4_TIER(8);
+#undef NX4_VT
+#undef NX4_SET1
+#undef NX4_ZERO
+#undef NX4_CMAC0
+#undef NX4_ADDS
+#undef NX4_SUBS
+#undef NX4_LOADU
+#undef NX4_STOREU
+#undef NX4_SWAP
+#undef NX4_JMUL
+#endif
+#define NX4_VT simde__m128i
+#define NX4_SET1 simde_mm_set1_epi32
+#define NX4_ZERO simde_mm_setzero_si128()
+#define NX4_CMAC0 cmac0_prec128
+#define NX4_ADDS simde_mm_adds_epi16
+#define NX4_SUBS simde_mm_subs_epi16
+#define NX4_LOADU(P) simde_mm_loadu_si128((const simde__m128i *)(P))
+#define NX4_STOREU(P, V) simde_mm_storeu_si128((simde__m128i *)(P), V)
+#define NX4_SWAP oai_mm_swap
+#define NX4_JMUL simde_mm_sign_epi16
+  lim = re_cnt & ~3;
+  NX4_TIER(4);
+#undef NX4_VT
+#undef NX4_SET1
+#undef NX4_ZERO
+#undef NX4_CMAC0
+#undef NX4_ADDS
+#undef NX4_SUBS
+#undef NX4_LOADU
+#undef NX4_STOREU
+#undef NX4_SWAP
+#undef NX4_JMUL
+#undef NX4_TIER
+#undef NX4_RUN
+#undef NX4_W
+#undef NX4_LAYER
+#endif
   /* re_cnt is always a multiple of NR_NB_SC_PER_RB = 12, so the SIMD loop is exact */
   DevAssert(done == re_cnt);
 }
-#endif // __aarch64__
 
 void nr_layer_precoder_2x2_simd(const int symSz,
                                 const c16_t txdataF_res_mapped[2][symSz],
