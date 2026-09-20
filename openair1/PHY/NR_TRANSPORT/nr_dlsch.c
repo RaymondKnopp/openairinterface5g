@@ -758,7 +758,9 @@ static int do_one_dlsch(unsigned char *input_ptr, PHY_VARS_gNB *gNB, NR_gNB_DLSC
 
   int layerSz2 = (layerSz + 63) & ~63;
   c16_t tx_layers[rel15->nrOfLayers][layerSz2] __attribute__((aligned(64)));
+  start_meas(&gNB->dlsch_layer_clear_stats);
   memset(tx_layers, 0, sizeof(tx_layers));
+  stop_meas(&gNB->dlsch_layer_clear_stats);
 
   /* A single codeword. TS 38.211 only uses a second one above 4 layers, this PHY is capped
      at NR_MAX_NB_LAYERS == 4, and the scheduler sets NrOfCodewords = 1 unconditionally --
