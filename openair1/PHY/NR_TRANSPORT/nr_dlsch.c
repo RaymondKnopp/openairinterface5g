@@ -568,6 +568,7 @@ static inline void do_txdataF_2x2(c16_t **txdataF,
   } // RB loop: while(rb < rb_size)
 }
 
+
 #if defined(NR_PDSCH_2X4_FASTPATH) && defined(__aarch64__) && !defined(__ARM_FEATURE_QRDMX)
 /* Does the rank-2 4-port codebook entry have the cross-polar butterfly structure
  *   W[0][p+2] = +phi*W[0][p]   and   W[1][p+2] = -phi*W[1][p],   phi in {1,-1,j,-j} ?
@@ -605,6 +606,7 @@ static inline bool nr_prec2x4_classify(const nfapi_nr_pm_pdu_t *pm, int p, bool 
 /* Can the 2x4 fast path handle this PDU?  The scheduler sets prg_size = rbSize so there is
    a single PMI for the whole allocation; check it once here rather than discovering a bad
    one after part of the symbol has already been written. */
+
 static inline bool nr_pdsch_2x4_usable(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *rel15)
 {
   const nfapi_nr_tx_precoding_and_beamforming_t *pb = &rel15->precodingAndBeamforming;
@@ -909,6 +911,14 @@ static void nr_pdsch_symbol_processing(void *arg)
     stop_meas(&rdata->dlsch_resource_mapping_stats);
 
     start_meas(&rdata->dlsch_precoding_stats);
+    /* The dispatch below is a chain of mutually exclusive branches spliced together with
+       #ifdef, and the `else` before the generic loop is unbraced because the chain needs
+       it that way. That makes it possible for a statement inserted in the wrong place to
+       capture the `else` and leave the generic kernel running IN ADDITION to a fast path:
+       the output is still correct, because both kernels compute the same values, so no
+       functional test notices -- only the cost doubles. Count the branches and require
+       exactly one, which catches that as well as the opposite error of none running. */
+    int precoder_paths = 0;
     const size_t txdataF_offset_per_symbol = l_symbol * symbol_sz;
     const uint16_t num_log_ports =
         rel15->param_v4.numberCodewords ? rel15->param_v4.spatialStreamsCw[0].numSpatialStreamIndices : 0;
@@ -916,6 +926,7 @@ static void nr_pdsch_symbol_processing(void *arg)
     // on targets where it is a win (see NR_PDSCH_2X2_FASTPATH). Otherwise, and
     // for 4-port/2-layer (num_log_ports==4), fall through to the generic path.
     if (NR_PDSCH_2X2_FASTPATH && rel15->nrOfLayers == 2 && num_log_ports == 2) {
+      precoder_paths++;
       const int ant0 = rdata->ant_to_map[0];
       const int ant1 = rdata->ant_to_map[1];
       int pos = 0;
@@ -960,6 +971,7 @@ static void nr_pdsch_symbol_processing(void *arg)
      * prg_size = rbSize, so the whole allocation carries a single PMI, and if that PMI is
      * not of the expected cross-polar form we simply use the generic kernel below. */
     if (rel15->nrOfLayers == 2 && num_log_ports == 4 && nr_pdsch_2x4_usable(gNB, rel15)) {
+      precoder_paths++;
       int pos = 0;
       int block_start, block_end;
       while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
@@ -991,6 +1003,7 @@ static void nr_pdsch_symbol_processing(void *arg)
      * cross-polar the generic kernel below is used. On aarch64 rank 2 is taken by the
      * specialisation above, so only 3 and 4 reach here. */
     if (rel15->nrOfLayers >= 2 && rel15->nrOfLayers <= 4 && num_log_ports == 4 && nr_pdsch_Nx4_usable(gNB, rel15)) {
+      precoder_paths++;
       int pos = 0;
       int block_start, block_end;
       while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
@@ -1012,6 +1025,11 @@ static void nr_pdsch_symbol_processing(void *arg)
     /* generic per-antenna path; mutually exclusive with the fast paths above, so a
        given RE is rotated exactly once either way */
     for (int ant = 0; ant < num_log_ports; ant++) {
+      /* inside the loop body: the `else` above is unbraced (the #ifdef chain needs it that
+         way), so a statement placed between it and the `for` would capture the `else` and
+         let this loop run unconditionally. Count on the first antenna only. */
+      if (ant == 0)
+        precoder_paths++;
       int pos = 0;
       int block_start, block_end;
       while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
@@ -1033,6 +1051,10 @@ static void nr_pdsch_symbol_processing(void *arg)
         }
       }
     }
+    /* exactly one kernel per PDU: never two (the else-capture above) and, whenever there is
+       anything to precode at all, never none. A PDU with no logical ports reaches none of
+       the branches and precodes nothing, which is what it did before this dispatch existed. */
+    DevAssert(precoder_paths == (num_log_ports > 0 ? 1 : 0));
     stop_meas(&rdata->dlsch_precoding_stats);
   }
   // Task running in // completed
