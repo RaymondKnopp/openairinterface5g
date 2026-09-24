@@ -41,3 +41,22 @@ add_library(crc_byte OBJECT crc_byte.c)
 add_subdirectory(nrLDPC_coding)
 add_subdirectory(nrPolar_tools)
 add_subdirectory(nrSmallBlock)
+
+# Build the Hexagon LDPC offload ARM stub (libldpc_hexagon.so).
+# Requires the Hexagon SDK.  The DSP skel (libldpc_hexagon_skel.so) is
+# always built separately with the hexagon-clang toolchain — see
+# nrLDPC_decoder/nrLDPC_decoder_hexagon/README.md.
+#
+# Enable with:  cmake ... -DHEXAGON_LDPC=ON -DHEXAGON_SDK_ROOT=/opt/Hexagon_SDK/6.4.0.2
+option(HEXAGON_LDPC "Build Hexagon LDPC DSP offload ARM stub (libldpc_hexagon.so)" OFF)
+
+if(HEXAGON_LDPC)
+    if(NOT HEXAGON_SDK_ROOT)
+        message(FATAL_ERROR "HEXAGON_LDPC=ON requires -DHEXAGON_SDK_ROOT=<path>")
+    endif()
+    # Tell the subdirectory's CMakeLists to build the ARM stub, not the DSP skel.
+    set(OS_TYPE "HLOS")
+    add_subdirectory(nrLDPC_decoder/nrLDPC_decoder_hexagon)
+    # ldpctest should also be able to test the hexagon stub
+    add_dependencies(ldpctest ldpc_hexagon)
+endif()
