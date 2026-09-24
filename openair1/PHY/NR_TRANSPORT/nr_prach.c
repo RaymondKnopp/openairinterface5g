@@ -210,7 +210,16 @@ static prach_ru_params_t get_prach_ru_params(prach_item_t *p,
 
 void init_nr_prach(PHY_VARS_gNB *gNB)
 {
-  int num_prach = 16;
+  /* Depth of both PRACH queues.  prach_l1rx_queue is filled by the fronthaul thread
+   * and drained at the TOP of rx_func(), so anything that stalls rx_func() stops it
+   * being consumed -- and xran_fh_rx_prach_read_slot() DevAssert()s when it is full,
+   * killing the DU.  16 is too shallow to absorb a one-off stall: enabling the
+   * Hexagon LDPC offload aborted the DU within a second of the first full-size UL
+   * transport block, because the DSP session setup (VTCM acquire, signed PD, worker
+   * spawn) happens on the FIRST dispatch and FastRPC first-call init on this board
+   * has been measured around 35 ms.  64 covers that with margin and costs
+   * 64 * sizeof(prach_item_t) per queue. */
+  int num_prach = 64;
   bool ret;
   ret = spsc_q_alloc(&gNB->prach_ru_queue, num_prach, sizeof(prach_item_t));
   DevAssert(ret);
