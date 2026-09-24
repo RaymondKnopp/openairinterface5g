@@ -1327,10 +1327,12 @@ void nr_pusch_decode_and_indicate(PHY_VARS_gNB *gNB,
                                   int num_pusch,
                                   NR_UL_IND_t *UL_INFO)
 {
-  /* slot_type is carried in so this keeps w38's per-slot-type measurement rather
-   * than the plain start_meas() the original had: the deferred call runs on a
-   * different thread and a different slot, so the caller's slot_type cannot be
-   * recovered here. */
+  /* Derive slot_type here rather than take it as a parameter: when the back half
+   * is deferred this runs on another thread for a PAST slot, so the caller's
+   * slot_type is not available -- which is why the original used plain
+   * start_meas(). Recomputing it keeps w38's per-slot-type measurement correct
+   * for both the inline and the deferred caller. */
+  const int slot_type = nr_slot_select(&gNB->gNB_config, frame_rx, slot_rx);
   START_MEAS_FULL_SLOT(&gNB->ulsch_decoding_stats, slot_type, NR_UPLINK_SLOT);
   if (num_pusch > 0) {
     int ret = nr_ulsch_procedures(gNB, frame_rx, slot_rx, (int *)ulsch_idx_to_decode, num_pusch, UL_INFO);
