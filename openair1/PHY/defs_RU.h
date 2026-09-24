@@ -156,7 +156,35 @@ typedef struct {
  task_ans_t *ans;
 } feptx_cmd_t;
 
-#define RU_RX_SLOT_DEPTH 4
+/* Depth of the rxdataF ring, in slots.  MUST DIVIDE slots_per_frame, or the index
+ * aliases across the frame boundary and the extra depth buys nothing: at depth 8,
+ * 20 % 8 = 4, so slot 19 still collides with the next frame's slot 3.
+ *
+ * Only UL and mixed slots touch the ring.  With DDDSU at mu=1 those are slots
+ * 3,4,8,9,13,14,18,19, and at depth 4 they collide in pairs -- {3,19} {4,8} {9,13}
+ * {14,18} -- every pair 4 slots (2 ms) apart.  Measured on a 273 PRB / 4x4
+ * DragonWing DU over 7.2 fronthaul under a 400 Mbps DL iperf3, per 1000 dlsch_rounds:
+ *
+ *                       depth 4    depth 20
+ *   rxdataF overwrites     19.8        1.74
+ *   pucch0_DTX              6.6        1.28
+ *   dlsch_errors            1.98       0.155
+ *
+ * with TTI dispatch delays, L1 TX overruns and every fronthaul error counter at zero
+ * in both cases -- the loss was purely the ring being reused before L1 had read it.
+ * 20 gives every slot of the frame its own index, for 10 ms of reuse distance, and
+ * costs symbols_per_slot * ofdm_symbol_size * depth per antenna (17.5 MB at 273 PRB
+ * and 4 antennas, against 34 GB of RAM).
+ *
+ * NOTE for anyone re-testing this: a previous measurement concluded that depth 20
+ * broke the uplink entirely (144 RA attempts, 0 connected).  That was an artefact of
+ * a STALE liboai_transpro.so -- the fhi_72 module is dlopen'd and nr-softmodem has no
+ * build dependency on it, so the ring WRITER kept a compiled-in depth of 4 while every
+ * reader moved to 20.  Rebuild and redeploy that module with the binary, or the
+ * experiment measures nothing.  Residual overwrites at depth 20 are real L1 completion
+ * lateness (>10 ms), not aliasing, and a deeper ring cannot help: 20 is the largest
+ * depth that divides slots_per_frame. */
+#define RU_RX_SLOT_DEPTH 20
 typedef struct RU_proc_t_s {
   /// Pointer to associated RU descriptor
   struct RU_t_s *ru;
