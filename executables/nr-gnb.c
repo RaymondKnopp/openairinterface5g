@@ -489,6 +489,11 @@ static void rx_func(processingData_L1_t *info)
       syncMsg->gNB = gNB;
       syncMsg->frame_rx = frame_rx;
       syncMsg->slot_rx = slot_rx;
+      /* Stamped HERE, on the L1 thread, because this is the instant L1 stops needing
+       * this slot's rxdataF.  ru_thread only drains this queue on the next UL slot, so
+       * reading the clock at drain time would add up to one UL-slot period of slack and
+       * hide exactly the effect we are chasing. */
+      syncMsg->t_release = rdtsc_oai();
       res->key = slot_rx;
       LOG_D(NR_PHY, "Signaling completion for %d.%d (mod_slot %d) on L1_rx_out\n", frame_rx, slot_rx, slot_rx % RU_RX_SLOT_DEPTH);
       pushNotifiedFIFO(&gNB->L1_rx_out, res);
@@ -710,7 +715,7 @@ void *nrL1_stats_thread(void *param) {
     dump_L1_meas_stats(gNB, ru, output, L1STATSSTRLEN);
     fprintf(fd,"%s\n",output);
     {
-      char dbuf[640];
+      char dbuf[2048];
       defer_hist_dump(dbuf, sizeof dbuf);
       fprintf(fd, "%s", dbuf);
       ru_hist_dump(dbuf, sizeof dbuf);

@@ -562,12 +562,66 @@ int setup_RU_buffers(RU_t *ru)
  * Dumped by the 1 Hz stats thread via ru_hist_dump(). */
 static rt_hist_t g_ru_loop, g_ru_fhin, g_ru_fep;
 
+/* rxdataF ring occupancy, measured on the ring slot itself.
+ *
+ * The overwrite alarm fires when ru_thread is about to reuse a slot L1 has not
+ * released.  At depth RU_RX_SLOT_DEPTH with the same number of slots per frame, each
+ * UL slot index recurs exactly once per frame, so an overwrite means L1 held that slot
+ * for a WHOLE FRAME (10 ms at mu=1).  Every instrumented L1 stage stays under 50 us,
+ * so one of these must be true and none of the existing counters can tell them apart:
+ *
+ *   slot_hold : busy-mark -> L1's own release stamp.  This is how long L1 really held
+ *               rxdataF.  If this is small while overwrites happen, L1 is NOT the one
+ *               holding the slot and the release is going missing instead.
+ *   drain_lag : L1's release stamp -> ru_thread actually draining it.  ru_thread only
+ *               polls at the next UL slot, so some lag is expected; a large one means
+ *               ru_thread, not L1, is late to reuse.
+ *   ow_age    : at an overwrite, how long the slot had already been busy.  Should come
+ *               out near one frame if the picture above is right; anything else means
+ *               the ring index bookkeeping is wrong.
+ *
+ * marks vs releases is the cheapest test of all: they must match.  A persistent gap
+ * means some slot is marked busy and never released, which would wedge that index for
+ * the rest of the run and produce an overwrite every frame. */
+static rt_hist_t g_ru_hold, g_ru_drain, g_ru_owage;
+static uint64_t  g_ru_busy_marks, g_ru_releases, g_ru_late_rel;
+static uint64_t  g_rx_tti_t_busy[RU_RX_SLOT_DEPTH];
+
 size_t ru_hist_dump(char *o, size_t n)
 {
-  size_t k = snprintf(o, n, "ru_thread, per-slot:\n");
-  k += rt_hist_one(o + k, n - k, "loop_gap", &g_ru_loop);
-  k += rt_hist_one(o + k, n - k, "fh_in", &g_ru_fhin);
-  k += rt_hist_one(o + k, n - k, "fep_rx", &g_ru_fep);
+  /* snprintf returns what it WOULD have written, so k can run past n on a short
+   * buffer and n - k then wraps to a huge size_t.  Clamp after every append. */
+  size_t k = 0;
+#define RU_APP(...)                                  \
+  do {                                               \
+    if (k < n)                                       \
+      k += snprintf(o + k, n - k, __VA_ARGS__);      \
+    if (k > n)                                       \
+      k = n;                                         \
+  } while (0)
+#define RU_HIST(tag, h)                              \
+  do {                                               \
+    if (k < n)                                       \
+      k += rt_hist_one(o + k, n - k, (tag), (h));    \
+    if (k > n)                                       \
+      k = n;                                         \
+  } while (0)
+  RU_APP("ru_thread, per-slot:\n");
+  RU_HIST("loop_gap", &g_ru_loop);
+  RU_HIST("fh_in", &g_ru_fhin);
+  RU_HIST("fep_rx", &g_ru_fep);
+  RU_APP("rxdataF ring (depth %d):\n", RU_RX_SLOT_DEPTH);
+  RU_HIST("slot_hold", &g_ru_hold);
+  RU_HIST("drain_lag", &g_ru_drain);
+  RU_HIST("ow_age", &g_ru_owage);
+  RU_APP("  %-10s : marks=%llu releases=%llu outstanding=%lld late=%llu\n",
+         "balance",
+         (unsigned long long)g_ru_busy_marks,
+         (unsigned long long)g_ru_releases,
+         (long long)(g_ru_busy_marks - g_ru_releases),
+         (unsigned long long)g_ru_late_rel);
+#undef RU_APP
+#undef RU_HIST
   return k;
 }
 
@@ -589,12 +643,28 @@ static bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_S
     notifiedFIFO_elt_t *res;
     while ((res = pollNotifiedFIFO(L1_rx_out)) != NULL) { /* non-blocking */
       processingData_L1_t *info = NotifiedFifoData(res);
-      rx_tti_busy[info->slot_rx % RU_RX_SLOT_DEPTH] = false;
+      const int ridx = info->slot_rx % RU_RX_SLOT_DEPTH;
+      const uint64_t t_now = rdtsc_oai();
+      g_ru_releases++;
+      if (g_rx_tti_t_busy[ridx] && info->t_release > g_rx_tti_t_busy[ridx])
+        rt_hist_add(&g_ru_hold, info->t_release - g_rx_tti_t_busy[ridx], info->frame_rx, info->slot_rx);
+      else if (g_rx_tti_t_busy[ridx])
+        /* Release stamped BEFORE the mark currently held by this index, i.e. it is for a
+         * previous generation and arrived after the slot was already reused.  This is the
+         * overwrite seen from the other end, and the one case where slot_hold cannot be
+         * computed -- ow_age carries it instead. */
+        g_ru_late_rel++;
+      if (info->t_release && t_now > info->t_release)
+        rt_hist_add(&g_ru_drain, t_now - info->t_release, info->frame_rx, info->slot_rx);
+      rx_tti_busy[ridx] = false;
+      g_rx_tti_t_busy[ridx] = 0;
       delNotifiedFIFO_elt(res);
     }
     if (rx_tti_busy[idx]) {
       static uint64_t overwrites = 0;
       overwrites++;
+      if (g_rx_tti_t_busy[idx])
+        rt_hist_add(&g_ru_owage, rdtsc_oai() - g_rx_tti_t_busy[idx], frame_rx, slot_rx);
       /* rate limited, prime modulus: see the TX overrun alarm for why not 100 */
       /* Deferred: this runs on ru_thread, which drives fronthaul timing. LOG_W there does a
          blocking write(2) and has been measured stalling the DU for seconds. */
@@ -607,6 +677,8 @@ static bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_S
                      (unsigned long long)overwrites);
     }
     rx_tti_busy[idx] = true;
+    g_rx_tti_t_busy[idx] = rdtsc_oai();
+    g_ru_busy_marks++;
     return true; /* proceed regardless: never stall the fronthaul */
   }
   int idx = slot_rx % RU_RX_SLOT_DEPTH;

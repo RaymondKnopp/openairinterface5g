@@ -574,6 +574,10 @@ typedef struct processingData_L1 {
                           * job waits for a worker.  The rxdataF ring slot is only
                           * released when this job COMPLETES, so this wait is on the
                           * critical path for ring reuse. */
+  uint64_t t_release;    /* rdtsc at the moment L1 pushed this slot onto L1_rx_out, i.e.
+                          * when it really stopped needing rxdataF.  Stamped by L1 rather
+                          * than read when ru_thread drains, so the hold time is not
+                          * inflated by ru_thread's own drain period (one UL slot). */
 } processingData_L1_t;
 
 typedef struct processingData_L1tx {
