@@ -406,6 +406,19 @@ static void process_ul_data(int tti, int frame, int slot, PHY_VARS_gNB *gNB, str
   }
   join_task_ans(&ans);
 
+  /* Producer-side occupancy.  Sampling this from the CONSUMER (rx_func, ~2 kHz)
+   * read 1/64 moments before the DevAssert below killed the DU, so the queue must
+   * fill in a burst between samples.  Measured here, where it is written, a burst
+   * cannot be missed.  Only new peaks are logged, and RT_LOG_DEFER is lock-free --
+   * split7_thread must never do a blocking write. */
+  {
+    static size_t prach_peak;
+    const size_t used = spsc_q_count(&gNB->prach_l1rx_queue);
+    if (used > prach_peak) {
+      prach_peak = used;
+      RT_LOG_DEFER("prach_l1rx_queue new peak %u/%u", (unsigned)used, (unsigned)spsc_q_capacity(&gNB->prach_l1rx_queue));
+    }
+  }
   for (int i = 0; i < num_prach; i++) {
     // prach_l1rx_queue never full: emptied by rx_func() every slot
     bool success = spsc_q_put(&gNB->prach_l1rx_queue, &prach[i], sizeof(prach[i]));
