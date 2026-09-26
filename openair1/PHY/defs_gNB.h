@@ -570,6 +570,10 @@ typedef struct processingData_L1 {
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
   notifiedFIFO_elt_t *elt;
+  uint64_t t_dispatch;   /* rdtsc when queued to the RX pool; measures how long the
+                          * job waits for a worker.  The rxdataF ring slot is only
+                          * released when this job COMPLETES, so this wait is on the
+                          * critical path for ring reuse. */
 } processingData_L1_t;
 
 typedef struct processingData_L1tx {

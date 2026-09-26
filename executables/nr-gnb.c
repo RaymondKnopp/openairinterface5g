@@ -43,6 +43,8 @@
 #include "common/utils/rt_deferred_log.h"
 #include "time_meas.h"
 #include "utils.h"
+#include "common/utils/ds/spsc_q.h"
+#include "executables/rt_slot_hist.h"
 
 #define TICK_TO_US(ts) (ts.trials==0?0:ts.diff/ts.trials)
 #define L1STATSSTRLEN 16384
@@ -89,6 +91,7 @@ static void tx_func(processingData_L1tx_t *info)
   syncMsg->frame_rx = frame_rx;
   syncMsg->slot_rx = slot_rx;
   syncMsg->timestamp_tx = info->timestamp_tx;
+  syncMsg->t_dispatch = rdtsc_oai();
   res->key = slot_rx;
   pushNotifiedFIFO(&gNB->resp_L1, res);
 
@@ -252,7 +255,78 @@ static int            g_defer_up;
 typedef struct {
   PHY_VARS_gNB *gNB;
   nr_pusch_defer_t job;
+  uint64_t t_push;          /* rdtsc at hand-off, for queue latency */
 } defer_msg_t;
+
+/* Per-slot timing for the deferral.  Averages over seconds cannot see a stall
+ * that happens once a second -- 10 ms in a 5 s window is 0.2% and vanishes --
+ * so keep THRESHOLD COUNTERS and the worst slot's identity instead of a mean.
+ * Updated on RT threads, so: no locks, no LOG_*, no floating point in the hot
+ * path.  Drained by the 1 Hz stats thread via defer_hist_dump(). */
+typedef struct {
+  uint64_t n;
+  uint64_t sum_ticks;
+  uint64_t max_ticks;
+  uint32_t max_frame, max_slot;
+  uint64_t over[4];         /* > 0.5 / 1 / 5 / 10 ms */
+} defer_hist_t;
+
+static defer_hist_t g_h_semwait;  /* front half blocked handing the slot over */
+static defer_hist_t g_h_qlat;     /* push -> pop                              */
+static defer_hist_t g_h_work;     /* pop  -> NR_UL_indication returned        */
+static defer_hist_t g_h_disp;     /* RX job queued -> a pool worker starts it */
+
+/* High-water marks on the two queues that are demonstrably FULL when the DU dies:
+ * prach_l1rx_queue (xran_fh_rx_prach_read_slot DevAsserts on it) and pucch_queue
+ * ("PUCCH list is full: dropping PUCCH UE ..."). Sampled at the top of rx_func,
+ * i.e. ~2000/s, which is far finer than the 1 Hz stats file. */
+static size_t g_prach_hwm, g_pucch_hwm, g_prach_cap, g_pucch_cap;
+
+static inline void defer_hist_add(defer_hist_t *h, uint64_t ticks, int frame, int slot)
+{
+  h->n++;
+  h->sum_ticks += ticks;
+  if (ticks > h->max_ticks) { h->max_ticks = ticks; h->max_frame = frame; h->max_slot = slot; }
+  /* thresholds in ticks, computed once from the calibrated TSC frequency */
+  static uint64_t th[4];
+  if (th[0] == 0) {
+    const double tps_us = cpu_freq_GHz * 1000.0;   /* ticks per us */
+    th[0] = (uint64_t)(500.0 * tps_us);
+    th[1] = (uint64_t)(1000.0 * tps_us);
+    th[2] = (uint64_t)(5000.0 * tps_us);
+    th[3] = (uint64_t)(10000.0 * tps_us);
+  }
+  for (int i = 0; i < 4; i++)
+    if (ticks > th[i]) h->over[i]++;
+}
+
+static size_t defer_hist_one(char *o, size_t n, const char *tag, const defer_hist_t *h)
+{
+  const double tps_us = cpu_freq_GHz * 1000.0;
+  if (h->n == 0 || tps_us <= 0.0)
+    return snprintf(o, n, "  %-10s : no samples\n", tag);
+  return snprintf(o, n,
+                  "  %-10s : n=%-8llu avg=%7.1f us  max=%9.1f us @%u.%u"
+                  "  >0.5ms=%llu >1ms=%llu >5ms=%llu >10ms=%llu\n",
+                  tag, (unsigned long long)h->n,
+                  (double)h->sum_ticks / h->n / tps_us,
+                  (double)h->max_ticks / tps_us, h->max_frame, h->max_slot,
+                  (unsigned long long)h->over[0], (unsigned long long)h->over[1],
+                  (unsigned long long)h->over[2], (unsigned long long)h->over[3]);
+}
+
+static size_t defer_hist_dump(char *o, size_t n)
+{
+  size_t k = snprintf(o, n, "L1 RX deferral (depth 1), per-slot:\n");
+  k += defer_hist_one(o + k, n - k, "sem_wait", &g_h_semwait);
+  k += defer_hist_one(o + k, n - k, "queue_lat", &g_h_qlat);
+  k += defer_hist_one(o + k, n - k, "back_half", &g_h_work);
+  k += defer_hist_one(o + k, n - k, "pool_wait", &g_h_disp);
+  k += snprintf(o + k, n - k,
+                "  queue_hwm  : prach %zu/%zu   pucch %zu/%zu  (full => the DU dies)\n",
+                g_prach_hwm, g_prach_cap, g_pucch_hwm, g_pucch_cap);
+  return k;
+}
 
 static void *defer_back_half_thread(void *arg)
 {
@@ -262,10 +336,22 @@ static void *defer_back_half_thread(void *arg)
     if (res == NULL)
       break;
     defer_msg_t *m = (defer_msg_t *)NotifiedFifoData(res);
+    const uint64_t t_pop = rdtsc_oai();
+    defer_hist_add(&g_h_qlat, t_pop - m->t_push, m->job.frame, m->job.slot);
     NR_UL_IND_t *ul = &g_defer_ul[m->job.slot & 1];
     nr_pusch_decode_and_indicate(m->gNB, m->job.frame, m->job.slot, m->job.ulsch_idx,
                                  m->job.num_pusch, ul);
     m->gNB->if_inst->NR_UL_indication(ul);
+    const uint64_t t_done = rdtsc_oai();
+    defer_hist_add(&g_h_work, t_done - t_pop, m->job.frame, m->job.slot);
+    /* Name the slot for any back half that blew the ring's reuse window, so it can
+     * be matched against the "RX slot overwrite" lines, which print frame.slot too.
+     * RT_LOG_DEFER claims a slot lock-free; LOG_* here would block this thread. */
+    if ((double)(t_done - t_pop) > 2000.0 * cpu_freq_GHz * 1000.0)
+      RT_LOG_DEFER("L1_rx_back LATE %u.%u: %.0f us (qlat %.0f us)",
+                   m->job.frame, m->job.slot,
+                   (double)(t_done - t_pop) / (cpu_freq_GHz * 1000.0),
+                   (double)(t_pop - m->t_push) / (cpu_freq_GHz * 1000.0));
     delNotifiedFIFO_elt(res);
     sem_post(&g_defer_slots);
   }
@@ -295,6 +381,17 @@ static void rx_func(processingData_L1_t *info)
   int slot_rx = info->slot_rx;
   nfapi_nr_config_request_scf_t *cfg = &gNB->gNB_config;
 
+  if (info->t_dispatch)
+    defer_hist_add(&g_h_disp, rdtsc_oai() - info->t_dispatch, frame_rx, slot_rx);
+  {
+    const size_t pc = spsc_q_count(&gNB->prach_l1rx_queue);
+    const size_t uc = spsc_q_count(&gNB->pucch_queue);
+    if (pc > g_prach_hwm) g_prach_hwm = pc;
+    if (uc > g_pucch_hwm) g_pucch_hwm = uc;
+    g_prach_cap = spsc_q_capacity(&gNB->prach_l1rx_queue);
+    g_pucch_cap = spsc_q_capacity(&gNB->pucch_queue);
+  }
+
   T(T_GNB_PHY_UL_TICK, T_INT(gNB->Mod_id), T_INT(frame_rx), T_INT(slot_rx));
 
   // RX processing
@@ -312,7 +409,11 @@ static void rx_func(processingData_L1_t *info)
     NR_UL_IND_t UL_INFO_local;
     NR_UL_IND_t *ULI;
     if (defer && g_defer_up) {
+      /* This is the stall that matters: while parked here the front half is not
+       * releasing rxdataF ring slots, so the fronthaul writer laps it. */
+      const uint64_t t_w0 = rdtsc_oai();
       sem_wait(&g_defer_slots);
+      defer_hist_add(&g_h_semwait, rdtsc_oai() - t_w0, frame_rx, slot_rx);
       ULI = &g_defer_ul[slot_rx & 1];
     } else {
       ULI = &UL_INFO_local;
@@ -367,6 +468,7 @@ static void rx_func(processingData_L1_t *info)
       defer_msg_t *m = (defer_msg_t *)NotifiedFifoData(e);
       m->gNB = gNB;
       m->job = job;
+      m->t_push = rdtsc_oai();
       pushNotifiedFIFO(&g_defer_fifo, e);
     } else {
       // Call the scheduler
@@ -607,6 +709,13 @@ void *nrL1_stats_thread(void *param) {
     dump_pusch_stats(fd,gNB);
     dump_L1_meas_stats(gNB, ru, output, L1STATSSTRLEN);
     fprintf(fd,"%s\n",output);
+    {
+      char dbuf[640];
+      defer_hist_dump(dbuf, sizeof dbuf);
+      fprintf(fd, "%s", dbuf);
+      ru_hist_dump(dbuf, sizeof dbuf);
+      fprintf(fd, "%s", dbuf);
+    }
     fflush(fd);
     /* Anything ru_thread deferred: it drives fronthaul timing, and OAI's log path ends in a
        blocking write(2) on the CALLING thread, so it must never write. Drained here, on the

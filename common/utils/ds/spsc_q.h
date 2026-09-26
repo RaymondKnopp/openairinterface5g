@@ -29,6 +29,19 @@ bool spsc_q_alloc(spsc_q_t *rbn, size_t cnt, size_t elsiz);
 void spsc_q_free(spsc_q_t *rb);
 
 bool spsc_q_put(spsc_q_t *rb, const void *src, size_t elsiz);
+
+/* Current occupancy, for instrumentation only.  Racy by construction (a single
+ * producer and consumer move the indices independently), which is fine for a
+ * high-water mark: it can under-report, never invent depth that was not there. */
+static inline size_t spsc_q_count(const spsc_q_t *rb)
+{
+  const size_t w = atomic_load_explicit((atomic_size_t *)&rb->write_idx, memory_order_relaxed);
+  const size_t r = atomic_load_explicit((atomic_size_t *)&rb->read_idx, memory_order_relaxed);
+  /* indices are modulo rb->cnt, so this must wrap too -- a plain w-r underflows */
+  return (w + rb->cnt - r) % rb->cnt;
+}
+/* alloc() adds one slot so full is distinguishable from empty, so usable = cnt-1 */
+static inline size_t spsc_q_capacity(const spsc_q_t *rb) { return rb->cnt ? rb->cnt - 1 : 0; }
 bool spsc_q_get(spsc_q_t *rb, void *dest, size_t elsiz);
 
 typedef bool (*pred)(const void *data, void *user);

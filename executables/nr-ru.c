@@ -13,6 +13,7 @@
 #include <math.h>
 
 #include "common/utils/nr/nr_common.h"
+#include "executables/rt_slot_hist.h"
 #include "common/utils/assertions.h"
 #include "common/utils/system.h"
 #include "common/utils/fsn.h"
@@ -551,6 +552,25 @@ int setup_RU_buffers(RU_t *ru)
  * @param frame_rx the frame to wait for
  * @param slot_rx the slot to wait for
  */
+/* ru_thread timing.  This thread drives fronthaul timing and is the one RT
+ * thread on the critical path that was never measured: the UL loss bursts come
+ * with 15-31 ms jitter spikes, while every stage of the L1 RX chain stays under
+ * 720 us, so the stall has to be here or upstream of here.
+ *   loop_gap : top of iteration -> top of the next.  A stall IS a gap.
+ *   fh_in    : ru->fh_south_in(), which blocks for the fronthaul
+ *   fep_rx   : ru->feprx(), the front-end FFT
+ * Dumped by the 1 Hz stats thread via ru_hist_dump(). */
+static rt_hist_t g_ru_loop, g_ru_fhin, g_ru_fep;
+
+size_t ru_hist_dump(char *o, size_t n)
+{
+  size_t k = snprintf(o, n, "ru_thread, per-slot:\n");
+  k += rt_hist_one(o + k, n - k, "loop_gap", &g_ru_loop);
+  k += rt_hist_one(o + k, n - k, "fh_in", &g_ru_fhin);
+  k += rt_hist_one(o + k, n - k, "fep_rx", &g_ru_fep);
+  return k;
+}
+
 static bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_SLOT_DEPTH], int frame_rx, int slot_rx)
 {
   if (!IS_SOFTMODEM_RFSIM) {
@@ -732,8 +752,17 @@ void *ru_thread(void *param)
     // synchronization on input FH interface, acquire signals/data and block
     LOG_D(PHY,"[RU_thread] read data: frame_rx = %d, tti_rx = %d\n", frame, slot);
 
+    {
+      static uint64_t t_prev;
+      const uint64_t t_now = rdtsc_oai();
+      if (t_prev) rt_hist_add(&g_ru_loop, t_now - t_prev, frame, slot);
+      t_prev = t_now;
+    }
+
     AssertFatal(ru->fh_south_in, "No fronthaul interface at south port");
+    const uint64_t t_fh0 = rdtsc_oai();
     ru->fh_south_in(ru, &frame, &slot);
+    rt_hist_add(&g_ru_fhin, rdtsc_oai() - t_fh0, frame, slot);
 
     if (initial_wait == 1 && proc->frame_rx < 300) {
       if (proc->frame_rx > 0 && ((proc->frame_rx % 100) == 0) && proc->tti_rx == 0) {
@@ -776,7 +805,9 @@ void *ru_thread(void *param)
       if (!wait_free_rx_tti(&gNB->L1_rx_out, rx_tti_busy, proc->frame_rx, proc->tti_rx))
         break; // nothing to wait for: we have to stop
       if (ru->feprx) {
+        const uint64_t t_fep0 = rdtsc_oai();
         ru->feprx(ru,proc->tti_rx);
+        rt_hist_add(&g_ru_fep, rdtsc_oai() - t_fep0, proc->frame_rx, proc->tti_rx);
         LOG_D(NR_PHY, "Setting %d.%d (%d) to busy\n", proc->frame_rx, proc->tti_rx, proc->tti_rx % RU_RX_SLOT_DEPTH);
         //LOG_M("rxdata.m","rxs",ru->common.rxdata[0],1228800,1,1);
         LOG_D(PHY,"RU proc: frame_rx = %d, tti_rx = %d\n", proc->frame_rx, proc->tti_rx);
