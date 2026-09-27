@@ -1701,190 +1701,87 @@ static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
 	   }
       }
     }
+    // DMRS channel reference per (group, half). It does not depend on the codeword,
+    // so it is computed once, outside the codeword search.
+    c64_t dmrs_ref[ngroup][2][Prx];
+    for (int aa = 0; aa < Prx; aa++)
+      for (int g = 0; g < ngroup; g++) {
+        if (ndmrs <= 2) {
+          dmrs_ref[g][0][aa] = (c64_t){corr32[dmrspos[0]][g][aa].r, corr32[dmrspos[0]][g][aa].i};
+        } else {
+          csum(dmrs_ref[g][0][aa], corr32[dmrspos[0]][g][aa], corr32[dmrspos[1]][g][aa]);
+        }
+        if (ndmrs > 1) {
+          if (ndmrs <= 2) {
+            dmrs_ref[g][1][aa] = (c64_t){corr32[dmrspos[1]][g][aa].r, corr32[dmrspos[1]][g][aa].i};
+          } else {
+            csum(dmrs_ref[g][1][aa], corr32[dmrspos[2]][g][aa], corr32[dmrspos[3]][g][aa]);
+          }
+        }
+      }
+
+    AssertFatal(fmt >= 3, "nr_pucch23_ml_shortblock is only used for PUCCH format 3/4\n");
+    AssertFatal(ngroup == 1, "only 1 frequency group tested/supported for now (1 PRB)\n");
+    const bool second_group = (ndmrs > 1);
     uint64_t corr = 0;
     int cw_ML = 0;
-    for (int cw = 0; cw < 1 << nb_bit; cw++) {
-      uint64_t corr_tmp = 0;
-      c64_t sum_of_prod[ngroup][2][Prx];
-      if (fmt == 2) {
-        const simde__m128i *coeff = (const simde__m128i *)&pucch2_3_lut[nb_bit - 3][cw].cw;
-        for (int aa = 0; aa < Prx; aa++) {
-	  for (int g = 0 ; g < ngroup ; g++) { 
-	     if (pucch_pdu->freq_hop_flag) { 
-	        for (int d=0; d < 2; d++) {	
-	  	   sum_of_prod[g][d][aa] = (c64_t){corr32[d][g][aa].r,corr32[d][g][aa].i};
-#ifdef DEBUG_NR_PUCCH_RX
-		   printf("sum_of_prod[%d][%d][%d] %d.%d\n",g,d,aa,corr32[d][g][aa].r,corr32[d][g][aa].i);
-#endif
-		}
-	     }
-	     else if (nb_symbols==1) {
-	       sum_of_prod[g][0][aa] = (c64_t){corr32[0][g][aa].r,corr32[0][g][aa].i};
-#ifdef DEBUG_NR_PUCCH_RX
-	       printf("sum_of_prod[%d][0][%d] %d.%d\n",g,aa,corr32[0][g][aa].r,corr32[0][g][aa].i);
-#endif
-	     }
-	     else {
-	       sum_of_prod[g][0][aa] = (c64_t){corr32[0][g][aa].r+corr32[1][g][aa].r,corr32[0][g][aa].i+corr32[1][g][aa].i};
-#ifdef DEBUG_NR_PUCCH_RX
-	       printf("sum_of_prod[%d][0][%d] %lld.%lld (%d.%d)(%d.%d)\n",g,aa,sum_of_prod[g][0][aa].r,sum_of_prod[g][0][aa].i,corr32[0][g][aa].r,corr32[0][g][aa].i,corr32[1][g][aa].r,corr32[1][g][aa].i);
-#endif
-	     }
-	     
-	  }
-          int ci=0;
-          for (int symb = 0; symb < nb_symbols; symb++) {
+    // Antipodal symmetry: codeword cw+1 = cw ^ basis[0] (the all-ones basis vector), so its
+    // modulated sequence is the negation of cw's and its data correlation is -D. We therefore
+    // correlate only the even codeword to get D once, then derive both metrics --
+    // even (cw) = |dmrs_ref + D|^2, odd (cw+1) = |dmrs_ref - D|^2 -- halving the correlations.
+    for (int cw = 0; cw < 1 << nb_bit; cw += 2) {
+      const simde__m128i *modcw = (simde__m128i *)&pucch2_3_lut[nb_bit - 3][cw].cw;
+      c64_t D[ngroup][2][Prx];
+      memset(D, 0, sizeof(D));
+      for (int aa = 0; aa < Prx; aa++) {
+        int ci = 0;
+        for (int symb = 0; symb < (nb_symbols - ndmrs); symb++) {
+          const int cd = ((symb < (nb_symbols - ndmrs) / 2) || (ndmrs == 1)) ? 0 : 1;
+          for (int group = 0; group < ngroup; group++) {
             const simde__m128i *rext = (simde__m128i *)r_ext[aa][symb];
             const simde__m128i *rext2 = (simde__m128i *)r_ext2[aa][symb];
-            for (int prb = 0; prb < pucch_pdu->prb_size; prb++) {
-	      int group = prb/nc_group_size;
-            // do complex correlation
-              simde__m128i re = simde_mm_madd_epi16(coeff[ci], rext[prb]);
-              simde__m128i im = simde_mm_madd_epi16(coeff[ci], rext2[prb]);
-              simde__m128i re2 = simde_mm_madd_epi16(coeff[ci+1], rext[prb]);
-              simde__m128i im2 = simde_mm_madd_epi16(coeff[ci+1], rext2[prb]);
-	      re = simde_mm_add_epi32(re,re2);
-	      im = simde_mm_add_epi32(im,im2);
-              re = simde_mm_hadd_epi32(re, re);
-              re = simde_mm_hadd_epi32(re, re);
-              im = simde_mm_hadd_epi32(im, im);
-              im = simde_mm_hadd_epi32(im, im);
-              int32_t *re32 = (int32_t *)&re;
-              int32_t *im32 = (int32_t *)&im;
-              c64_t prod = (c64_t){re32[0], im32[0]};
-              if (pucch_pdu->freq_hop_flag) {
-		 csum(sum_of_prod[group][symb][aa], sum_of_prod[group][symb][aa],prod);
-	      }
-	      else {
-		 csum(sum_of_prod[group][0][aa], sum_of_prod[group][0][aa],prod);
-	      }
-#ifdef DEBUG_NR_PUCCH_RX
-              printf("pucch2 cw %d group %d aa %d ci %d: (%d,%d)+prod=(%ld,%ld)\n",
-                     cw,
-                     group,
-                     aa,
-		     ci,
-                     pucch_pdu->freq_hop_flag ? sum_of_prod[group][symb][aa].r : sum_of_prod[group][0][aa].r,
-                     pucch_pdu->freq_hop_flag ? sum_of_prod[group][symb][aa].i : sum_of_prod[group][0][aa].i,
-                     prod.r,
-                     prod.i);
-#endif
-	      ci+=2;
-	      ci&=3;
-	    } // symb
-	  } // group 
-	} // aa
-      } // fmt==2
-      else {
-          const simde__m128i *modcw = (simde__m128i *)&pucch2_3_lut[nb_bit - 3][cw].cw;
-          AssertFatal(ngroup==1,"only 1 frequency group tested/supported for now (1 PRB)\n");
-          for (int aa = 0; aa < Prx; aa++) {
-	    int ci=0;
-	    // compute channel references
-	    // for 2 DMRS, store both in sum_of_prod for non-coherent combining later
-	    // for 4 DMRS, coherently combine the pairs 0,1 and 2,3 and store the combinations in sum_of_prod
-	    for (int g=0;g<ngroup;g++)
-	      for (int d=0;d<2;d++) {
-		   if (ndmrs <= 2) {
-		     sum_of_prod[g][d][aa] = (c64_t){corr32[dmrspos[d]][g][aa].r,corr32[dmrspos[d]][g][aa].i};
-#ifdef DEBUG_PUCCH_NR_RX
-                     printf("ndmrs <= 2 : sum_of_prod[%d][%d][%d] %lld.%lld\n",g,d,aa,sum_of_prod[g][d][aa].r,sum_of_prod[g][d][aa].i);
-#endif
-		     if (ndmrs == 1) continue;
-		   }
-	           else { 
-		     csum(sum_of_prod[g][d][aa],corr32[dmrspos[2*d]][g][aa],corr32[dmrspos[1+(2*d)]][g][aa]);
-#ifdef DEBUG_PUCCH_NR_RX
-                     printf("ndmrs = 4 : sum_of_prod[%d][%d][%d] %lld.%lld\n",g,d/2,aa,sum_of_prod[g][d/2][aa].r,sum_of_prod[g][d/2][aa].i);
-#endif
-		   }
-	      }
-	    //loop over symbols correlating within each group, add non-coherently over groups and over symbols around each DMRS 
-            int cd=0;
-	    for (int symb=0;symb<(nb_symbols-ndmrs);symb++) {
-	      if ((symb<(nb_symbols-ndmrs)/2) || (ndmrs==1)) cd=0;
-              else cd=1;	      
-              for (int group = 0; group < ngroup; group++) {
-                const simde__m128i *rext = (simde__m128i *)r_ext[aa][symb];
-                const simde__m128i *rext2 = (simde__m128i *)r_ext2[aa][symb];
-#ifdef DEBUG_NR_PUCCH_RX
-	        log_dump(PHY,(c16_t*)rext,4,LOG_DUMP_C16,"rext0:");
-	        log_dump(PHY,(c16_t*)rext2,4,LOG_DUMP_C16,"rext20:");
-	        log_dump(PHY,(c16_t*)modcw,4,LOG_DUMP_C16,"cw0:");
-		printf("ci %d\n",ci);
-#endif
-                simde__m128i re = simde_mm_madd_epi16(modcw[ci], rext[0]);
-                simde__m128i im = simde_mm_madd_epi16(modcw[ci++], rext2[0]);
-		ci &= 3; // Note: this becomes 7 for pi4_BPSK
-#ifdef DEBUG_NR_PUCCH_RX
-		log_dump(PHY,((int32_t*)&re),2,LOG_DUMP_C32,"re:");
-	        log_dump(PHY,(c16_t*)(rext+1),4,LOG_DUMP_C16,"rext1:");
-	        log_dump(PHY,(c16_t*)(rext2+1),4,LOG_DUMP_C16,"rext21:");
-	        log_dump(PHY,(c16_t*)(modcw+1),4,LOG_DUMP_C16,"cw1:");
-		printf("ci %d\n",ci);
-#endif
-                simde__m128i re2 = simde_mm_madd_epi16(modcw[ci], rext[1]);
-                simde__m128i im2 = simde_mm_madd_epi16(modcw[ci++], rext2[1]);
-		ci &= 3; // Note: this becomes 7 for pi4_BPSK
-#ifdef DEBUG_NR_PUCCH_RX
-		log_dump(PHY,((int32_t*)&re2),2,LOG_DUMP_C32,"re2:");
-	        log_dump(PHY,(c16_t*)(rext+2),4,LOG_DUMP_C16,"rext2:");
-	        log_dump(PHY,(c16_t*)(rext2+2),4,LOG_DUMP_C16,"rext22:");
-	        log_dump(PHY,(c16_t*)(modcw+2),4,LOG_DUMP_C16,"cw2:");
-		printf("ci %d\n",ci);
-#endif
-                simde__m128i re3 = simde_mm_madd_epi16(modcw[ci], rext[2]);
-                simde__m128i im3 = simde_mm_madd_epi16(modcw[ci++], rext2[2]);
-		ci &= 3; // Note: this becomes 7 for pi4_BPSK
-                re = simde_mm_add_epi32(re, simde_mm_add_epi32(re2,re3));
-                im = simde_mm_add_epi32(im, simde_mm_add_epi32(im2,im3));
-                re = simde_mm_hadd_epi32(re, re);
-                im = simde_mm_hadd_epi32(im, im);
-                re = simde_mm_hadd_epi32(re, re);
-                im = simde_mm_hadd_epi32(im, im);
-                int32_t *re32 = (int32_t *)&re;
-                int32_t *im32 = (int32_t *)&im;
-		c32_t prod = (c32_t){re32[0],im32[0]};
-                csum(sum_of_prod[group][cd][aa], sum_of_prod[group][cd][aa], prod);
-#ifdef DEBUG_NR_PUCCH_RX
-                printf("pucch fmt 3 cw %d symb %d group %d aa %d: (%d,%d), prod (%d,%d) sum_of_prod[%d][%d][%d] (%lld,%lld)\n",
-                       cw,
-		       symb,
-                       group,
-                       aa,
-                       corr32[dmrspos[cd]][group][aa].r,
-                       corr32[dmrspos[cd]][group][aa].i,
-		       prod.r,prod.i,
-		       group,cd,aa,
-                       sum_of_prod[group][cd][aa].r,
-                       sum_of_prod[group][cd][aa].i);
-#endif
-	      } //group
-	    } // symb loop
-  	  } // aa loop
-      } //fmt==3/4
-// non-coherent combining
-      for (int group = 0 ; group < ngroup ; group++)
-        for (int aa = 0 ; aa < Prx ; aa++) {
-            corr_tmp += squaredMod(sum_of_prod[group][0][aa]);
-            if ((fmt > 2 && (ndmrs>1)) || (fmt == 2 && pucch_pdu->freq_hop_flag > 0)) 
-	       corr_tmp += squaredMod(sum_of_prod[group][1][aa]);
-#ifdef DEBUG_NR_PUCCH_RX
-	    if (fmt == 2 && pucch_pdu->freq_hop_flag == 0)
-              printf("sum_of_prod[%d][0][%d] (%lld,%lld)\n",group,aa,sum_of_prod[group][0][aa].r,sum_of_prod[group][0][aa].i);
-	    else if (ndmrs > 1)
-              printf("sum_of_prod[%d][0][%d] (%lld,%lld) sum_of_prod[%d][1][%d] (%lld,%lld)\n",group,aa,sum_of_prod[group][0][aa].r,sum_of_prod[group][0][aa].i,group,aa,sum_of_prod[group][1][aa].r,sum_of_prod[group][1][aa].i);
-	    else
-              printf("sum_of_prod[%d][0][%d] (%lld,%lld)\n",group,aa,sum_of_prod[group][0][aa].r,sum_of_prod[group][0][aa].i);
-            printf("corr_tmp %lld\n",corr_tmp);
-#endif
+            simde__m128i re = simde_mm_madd_epi16(modcw[ci], rext[0]);
+            simde__m128i im = simde_mm_madd_epi16(modcw[ci++], rext2[0]);
+            ci &= 3;
+            simde__m128i re2 = simde_mm_madd_epi16(modcw[ci], rext[1]);
+            simde__m128i im2 = simde_mm_madd_epi16(modcw[ci++], rext2[1]);
+            ci &= 3;
+            simde__m128i re3 = simde_mm_madd_epi16(modcw[ci], rext[2]);
+            simde__m128i im3 = simde_mm_madd_epi16(modcw[ci++], rext2[2]);
+            ci &= 3;
+            re = simde_mm_add_epi32(re, simde_mm_add_epi32(re2, re3));
+            im = simde_mm_add_epi32(im, simde_mm_add_epi32(im2, im3));
+            re = simde_mm_hadd_epi32(re, re);
+            im = simde_mm_hadd_epi32(im, im);
+            re = simde_mm_hadd_epi32(re, re);
+            im = simde_mm_hadd_epi32(im, im);
+            int32_t *re32 = (int32_t *)&re;
+            int32_t *im32 = (int32_t *)&im;
+            c32_t prod = (c32_t){re32[0], im32[0]};
+            csum(D[group][cd][aa], D[group][cd][aa], prod);
+          } // group
+        } // symb loop
+      } // aa loop
+
+      uint64_t corr_even = 0, corr_odd = 0;
+      for (int group = 0; group < ngroup; group++)
+        for (int aa = 0; aa < Prx; aa++) {
+          const c64_t ref0 = dmrs_ref[group][0][aa], d0 = D[group][0][aa];
+          corr_even += squaredMod(((c64_t){ref0.r + d0.r, ref0.i + d0.i}));
+          corr_odd  += squaredMod(((c64_t){ref0.r - d0.r, ref0.i - d0.i}));
+          if (second_group) {
+            const c64_t ref1 = dmrs_ref[group][1][aa], d1 = D[group][1][aa];
+            corr_even += squaredMod(((c64_t){ref1.r + d1.r, ref1.i + d1.i}));
+            corr_odd  += squaredMod(((c64_t){ref1.r - d1.r, ref1.i - d1.i}));
+          }
         }
-      if (corr_tmp > corr) {
-        corr = corr_tmp;
+      if (corr_even > corr) {
+        corr = corr_even;
         cw_ML = cw;
-#ifdef DEBUG_NR_PUCCH_RX
-        printf("slot %d PUCCH2 cw_ML %d, corr %lu\n", slot, cw_ML, corr);
-#endif
+      }
+      if (corr_odd > corr) {
+        corr = corr_odd;
+        cw_ML = cw + 1;
       }
     } // cw loop
     corr_dB = dB_fixed64(corr);
