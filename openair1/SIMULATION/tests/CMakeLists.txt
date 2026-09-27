@@ -213,6 +213,7 @@ add_physim_test(physim.5g.nr_pucchsim.test51 "Format 3 11-bit number of symbols 
 add_physim_test(physim.5g.nr_pucchsim.test52 "Format 3 3-bit number of symbols = 4, starting symbol = 0, 1/106 PRB, 4RX" nr_pucchsim -R 106 -z4 -i 4 -P 3 -q1 -b 3 -B 3 -I 0 -s-7 -n3000)
 add_physim_test(physim.5g.nr_pucchsim.test53 "Format 3 3-bit number of symbols = 4, starting symbol = 4, 1/106 PRB, 4RX" nr_pucchsim -R 106 -z4 -i 4 -P 3 -q1 -b 3 -B 3 -I 4 -s-7 -n3000)
 add_physim_test(physim.5g.nr_pucchsim.test54 "Format 3 3-bit number of symbols = 4, starting symbol = 8, 1/106 PRB, 4RX" nr_pucchsim -R 106 -z4 -i 4 -P 3 -q1 -b 3 -B 3 -I 8 -s-7 -n3000)
+add_physim_test(physim.5g.nr_pucchsim.test55 "Format 3 7-bit number of symbols = 14, no frequency hopping, 1/106 PRB, 4RX" nr_pucchsim -R 106 -z4 -i 14 -P 3 -q1 -b 7 -B 3 -e -s-11 -n3000)
 
 ####################################################################################
 ######                           nr_ulsim unit test                           ######

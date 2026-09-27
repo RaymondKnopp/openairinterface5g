@@ -110,6 +110,7 @@ int main(int argc, char **argv)
   int nr_frame_tx = 0;
   uint64_t actual_payload = 0;
   bool random_payload = true;
+  bool no_hop = false; // -e: disable intra-slot frequency hopping (format 3 no-hop test)
   int nr_bit = 1; // maximum value possible is 2
   uint8_t m0 = 0; // higher layer paramater initial cyclic shift
   uint8_t nrofSymbols = 1; // number of OFDM symbols can be 1-2 for format 1
@@ -144,7 +145,7 @@ int main(int argc, char **argv)
 
   int c;
   int nrofSymbols_set = 0;
-  while ((c = getopt(argc, argv, "--:O:f:hA:f:g:i:I:P:B:b:t:T:m:n:r:o:s:S:x:y:z:N:F:GR:IL:q:cd:C")) != -1) {
+  while ((c = getopt(argc, argv, "--:O:f:hA:f:g:i:I:P:B:b:t:T:m:n:r:o:s:S:x:y:z:N:F:GR:IL:q:cd:Ce")) != -1) {
     /* ignore long options starting with '--', option '-O' and their arguments that are handled by configmodule */
     /* with this opstring getopt returns 1 for non-option arguments, refer to 'man 3 getopt' */
     if (c == 1 || c == '-' || c == 'O')
@@ -325,6 +326,9 @@ int main(int argc, char **argv)
       case 'C':
         print_perf = 1;
         cpu_meas_enabled = 1;
+        break;
+      case 'e':
+        no_hop = true;
         break;
       default:
       case 'h':
@@ -545,7 +549,7 @@ int main(int argc, char **argv)
     pucch_tx_pdu.dmrs_scrambling_id = dmrs_scrambling_id;
     pucch_tx_pdu.data_scrambling_id = data_scrambling_id;
     // 4-symbol PUCCH 3 with intra-slot frequency hopping is not supported by the receiver
-    if (nrofSymbols > 1 && nrofSymbols != 4) {
+    if (nrofSymbols > 1 && nrofSymbols != 4 && !no_hop) {
       pucch_tx_pdu.freq_hop_flag = 1;
       pucch_tx_pdu.second_hop_prb = N_RB_DL - nrofPRB;
     } else
@@ -800,8 +804,9 @@ int main(int argc, char **argv)
         pucch_pdu.dmrs_scrambling_id = dmrs_scrambling_id;
         pucch_pdu.data_scrambling_id = data_scrambling_id;
         pucch_pdu.param_v4.numSpatialStreamIndices = n_rx;
-        // 4-symbol PUCCH 3 with intra-slot frequency hopping is not supported by the receiver
-        if (nrofSymbols > 1 && !(format == 3 && nrofSymbols == 4)) {
+        // 4-symbol PUCCH 3 with intra-slot frequency hopping is not supported by the receiver;
+        // -e (no_hop) disables hopping for format 3 (no-hop coherent-combining test)
+        if (nrofSymbols > 1 && !(format == 3 && nrofSymbols == 4) && !(format == 3 && no_hop)) {
           pucch_pdu.freq_hop_flag = 1;
           pucch_pdu.second_hop_prb = (format == 3) ? (N_RB_DL - nrofPRB) : (N_RB_DL - 1);
         } else

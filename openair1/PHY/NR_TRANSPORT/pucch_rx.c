@@ -1682,79 +1682,68 @@ static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
 	   }
       }
     }
-    // DMRS channel reference per (group, half). It does not depend on the codeword,
-    // so it is computed once, outside the codeword search.
-    c64_t dmrs_ref[ngroup][2][Prx];
+    // Format 3 is decoded as non-coherent set(s) each spanning the WHOLE allocation in frequency
+    // (transform precoding spreads every modulation symbol across all PRBs, so there is no per-PRB
+    // frequency group). With intra-slot frequency hopping the two hops see different channels and
+    // form two non-coherent sets; without hopping the whole slot is one coherent set (all symbols
+    // and all DMRS combine coherently, matching format 2). Non-coherence is only across sets and
+    // antennas. The DMRS channel reference per set is codeword-independent, computed once here.
+    AssertFatal(fmt >= 3, "nr_pucch23_ml_shortblock is only used for PUCCH format 3/4\n");
+    AssertFatal(ngroup == 1, "PUCCH 3 is decoded as a single group spanning the whole allocation\n");
+    const bool freq_hop = pucch_pdu->freq_hop_flag;
+    const int nsets = freq_hop ? 2 : 1;
+    const int nb_re_data = 12 * pucch_pdu->prb_size; // data REs per symbol over the whole allocation
+    const int nchunk = nb_re_data / 4;               // 128-bit chunks (4 complex REs each)
+    const int ndata = nb_symbols - ndmrs;
+    c64_t dmrs_ref[2][Prx];
+    memset(dmrs_ref, 0, sizeof(dmrs_ref));
     for (int aa = 0; aa < Prx; aa++)
-      for (int g = 0; g < ngroup; g++) {
-        if (ndmrs <= 2) {
-          dmrs_ref[g][0][aa] = (c64_t){corr32[dmrspos[0]][g][aa].r, corr32[dmrspos[0]][g][aa].i};
-        } else {
-          csum(dmrs_ref[g][0][aa], corr32[dmrspos[0]][g][aa], corr32[dmrspos[1]][g][aa]);
-        }
-        if (ndmrs > 1) {
-          if (ndmrs <= 2) {
-            dmrs_ref[g][1][aa] = (c64_t){corr32[dmrspos[1]][g][aa].r, corr32[dmrspos[1]][g][aa].i};
-          } else {
-            csum(dmrs_ref[g][1][aa], corr32[dmrspos[2]][g][aa], corr32[dmrspos[3]][g][aa]);
-          }
-        }
+      for (int d = 0; d < ndmrs; d++) {
+        const int set = (freq_hop && d >= ndmrs / 2) ? 1 : 0; // 1st half of DMRS -> hop 0, 2nd -> hop 1
+        csum(dmrs_ref[set][aa], dmrs_ref[set][aa], corr32[dmrspos[d]][0][aa]);
       }
 
-    AssertFatal(fmt >= 3, "nr_pucch23_ml_shortblock is only used for PUCCH format 3/4\n");
-    AssertFatal(ngroup == 1, "only 1 frequency group tested/supported for now (1 PRB)\n");
-    const bool second_group = (ndmrs > 1);
     uint64_t corr = 0;
     int cw_ML = 0;
     // Antipodal symmetry: codeword cw+1 = cw ^ basis[0] (the all-ones basis vector), so its
-    // modulated sequence is the negation of cw's and its data correlation is -D. We therefore
-    // correlate only the even codeword to get D once, then derive both metrics --
-    // even (cw) = |dmrs_ref + D|^2, odd (cw+1) = |dmrs_ref - D|^2 -- halving the correlations.
+    // modulated sequence is the negation of cw's and its data correlation is -D. We correlate
+    // only the even codeword to get D once, then derive both metrics -- even (cw) =
+    // |dmrs_ref + D|^2, odd (cw+1) = |dmrs_ref - D|^2 -- halving the correlations.
     for (int cw = 0; cw < 1 << nb_bit; cw += 2) {
       const simde__m128i *modcw = (simde__m128i *)&pucch2_lut[nb_bit - 3][cw].cw;
-      c64_t D[ngroup][2][Prx];
+      c64_t D[2][Prx];
       memset(D, 0, sizeof(D));
       for (int aa = 0; aa < Prx; aa++) {
         int ci = 0;
-        for (int symb = 0; symb < (nb_symbols - ndmrs); symb++) {
-          const int cd = ((symb < (nb_symbols - ndmrs) / 2) || (ndmrs == 1)) ? 0 : 1;
-          for (int group = 0; group < ngroup; group++) {
-            const simde__m128i *rext = (simde__m128i *)r_ext[aa][symb];
-            const simde__m128i *rext2 = (simde__m128i *)r_ext2[aa][symb];
-            simde__m128i re = simde_mm_madd_epi16(modcw[ci], rext[0]);
-            simde__m128i im = simde_mm_madd_epi16(modcw[ci++], rext2[0]);
-            ci &= 3;
-            simde__m128i re2 = simde_mm_madd_epi16(modcw[ci], rext[1]);
-            simde__m128i im2 = simde_mm_madd_epi16(modcw[ci++], rext2[1]);
-            ci &= 3;
-            simde__m128i re3 = simde_mm_madd_epi16(modcw[ci], rext[2]);
-            simde__m128i im3 = simde_mm_madd_epi16(modcw[ci++], rext2[2]);
-            ci &= 3;
-            re = simde_mm_add_epi32(re, simde_mm_add_epi32(re2, re3));
-            im = simde_mm_add_epi32(im, simde_mm_add_epi32(im2, im3));
-            re = simde_mm_hadd_epi32(re, re);
-            im = simde_mm_hadd_epi32(im, im);
-            re = simde_mm_hadd_epi32(re, re);
-            im = simde_mm_hadd_epi32(im, im);
-            int32_t *re32 = (int32_t *)&re;
-            int32_t *im32 = (int32_t *)&im;
-            c32_t prod = (c32_t){re32[0], im32[0]};
-            csum(D[group][cd][aa], D[group][cd][aa], prod);
-          } // group
+        for (int symb = 0; symb < ndata; symb++) {
+          const int set = (freq_hop && symb >= ndata / 2) ? 1 : 0;
+          const simde__m128i *rext = (simde__m128i *)r_ext[aa][symb];
+          const simde__m128i *rext2 = (simde__m128i *)r_ext2[aa][symb];
+          // coherent correlation over the whole allocation (nb_re_data REs) of this symbol
+          simde__m128i re = simde_mm_setzero_si128();
+          simde__m128i im = simde_mm_setzero_si128();
+          for (int k = 0; k < nchunk; k++) {
+            re = simde_mm_add_epi32(re, simde_mm_madd_epi16(modcw[ci], rext[k]));
+            im = simde_mm_add_epi32(im, simde_mm_madd_epi16(modcw[ci], rext2[k]));
+            ci = (ci + 1) & 3;
+          }
+          re = simde_mm_hadd_epi32(re, re);
+          re = simde_mm_hadd_epi32(re, re);
+          im = simde_mm_hadd_epi32(im, im);
+          im = simde_mm_hadd_epi32(im, im);
+          int32_t *re32 = (int32_t *)&re;
+          int32_t *im32 = (int32_t *)&im;
+          c32_t prod = (c32_t){re32[0], im32[0]};
+          csum(D[set][aa], D[set][aa], prod);
         } // symb loop
       } // aa loop
 
       uint64_t corr_even = 0, corr_odd = 0;
-      for (int group = 0; group < ngroup; group++)
+      for (int set = 0; set < nsets; set++)
         for (int aa = 0; aa < Prx; aa++) {
-          const c64_t ref0 = dmrs_ref[group][0][aa], d0 = D[group][0][aa];
-          corr_even += squaredMod(((c64_t){ref0.r + d0.r, ref0.i + d0.i}));
-          corr_odd  += squaredMod(((c64_t){ref0.r - d0.r, ref0.i - d0.i}));
-          if (second_group) {
-            const c64_t ref1 = dmrs_ref[group][1][aa], d1 = D[group][1][aa];
-            corr_even += squaredMod(((c64_t){ref1.r + d1.r, ref1.i + d1.i}));
-            corr_odd  += squaredMod(((c64_t){ref1.r - d1.r, ref1.i - d1.i}));
-          }
+          const c64_t ref = dmrs_ref[set][aa], d = D[set][aa];
+          corr_even += squaredMod(((c64_t){ref.r + d.r, ref.i + d.i}));
+          corr_odd  += squaredMod(((c64_t){ref.r - d.r, ref.i - d.i}));
         }
       if (corr_even > corr) {
         corr = corr_even;
@@ -1894,6 +1883,10 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
     }
   }
   AssertFatal(pucch_pdu->prb_size * nb_symbols > 1, "number of PRB*SYMB (%d,%d)< 2", pucch_pdu->prb_size, nb_symbols);
+  // Multi-PRB PUCCH 3 decode is not yet validated end-to-end (the TX rate-matching across the
+  // whole DFT-precoded allocation still needs to be reconciled with the receiver, which is
+  // already structured as a single group over the whole allocation).
+  AssertFatal(pucch_pdu->prb_size == 1, "PUCCH 3 currently supports a single PRB (prb_size %d)\n", pucch_pdu->prb_size);
 
   int Prx = pucch_pdu->param_v4.numSpatialStreamIndices;
   //  AssertFatal((pucch_pdu->prb_size&1) == 0,"prb_size %d is not a multiple of2\n",pucch_pdu->prb_size);
@@ -1937,7 +1930,9 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
         pucch2_3_levdB,
         scaling);
 
-  int nc_group_size = fmt == 2 ? 2 : 1; //PRB
+  // Format 2 groups PRBs in pairs for non-coherent combining across frequency; format 3 is a
+  // single group over the whole allocation (transform precoding spreads each symbol across all PRBs).
+  int nc_group_size = fmt == 2 ? 2 : pucch_pdu->prb_size;
   int ngroup = pucch_pdu->prb_size / nc_group_size;
   if (fmt == 2 && (pucch_pdu->prb_size&1)>0) ngroup++;
 
