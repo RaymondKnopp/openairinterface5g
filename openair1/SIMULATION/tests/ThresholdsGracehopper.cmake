@@ -138,3 +138,4 @@ check_threshold_variance(physim.5g.nr_pucchsim.test51 "PUCCH23 RX" AVG 198 ABS_V
 check_threshold_variance(physim.5g.nr_pucchsim.test52 "PUCCH23 RX" AVG 2 ABS_VAR 1)
 check_threshold_variance(physim.5g.nr_pucchsim.test53 "PUCCH23 RX" AVG 2 ABS_VAR 1)
 check_threshold_variance(physim.5g.nr_pucchsim.test54 "PUCCH23 RX" AVG 2 ABS_VAR 1)
+check_threshold_variance(physim.5g.nr_pucchsim.test55 "PUCCH23 RX" AVG 16 ABS_VAR 4)
