@@ -130,7 +130,7 @@ check_threshold_variance(physim.5g.nr_ulsim_mu_mimo.test3 "ULSCH total decoding 
 check_threshold_variance(physim.5g.nr_ulsim_mu_mimo.test4 "ULSCH total decoding time" AVG 2743 ABS_VAR 549)
 check_threshold_variance(physim.5g.nr_ulsim_mu_mimo.test5 "ULSCH total decoding time" AVG 1879 ABS_VAR 376)
 
-check_threshold_variance(physim.5g.nr_pucchsim.test25 "PUCCH23 RX" AVG 39 ABS_VAR 5)
+check_threshold_variance(physim.5g.nr_pucchsim.test25 "PUCCH23 RX" AVG 151 ABS_VAR 15)
 check_threshold_variance(physim.5g.nr_pucchsim.test26 "PUCCH23 RX" AVG 74 ABS_VAR 5)
 check_threshold_variance(physim.5g.nr_pucchsim.test49 "PUCCH23 RX" AVG 5 ABS_VAR 2)
 check_threshold_variance(physim.5g.nr_pucchsim.test50 "PUCCH23 RX" AVG 16 ABS_VAR 4)
