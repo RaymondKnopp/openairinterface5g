@@ -1727,13 +1727,12 @@ static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
             im = simde_mm_add_epi32(im, simde_mm_madd_epi16(modcw[ci], rext2[k]));
             ci = (ci + 1) & 3;
           }
-          re = simde_mm_hadd_epi32(re, re);
-          re = simde_mm_hadd_epi32(re, re);
-          im = simde_mm_hadd_epi32(im, im);
-          im = simde_mm_hadd_epi32(im, im);
-          int32_t *re32 = (int32_t *)&re;
-          int32_t *im32 = (int32_t *)&im;
-          c32_t prod = (c32_t){re32[0], im32[0]};
+          // Pack re and im into a single hadd chain (as nr_decode_pucch2 does): two hadds instead
+          // of four, ending in one scalar read per component.
+          simde__m128i ri = simde_mm_hadd_epi32(re, im);
+          ri = simde_mm_hadd_epi32(ri, ri);
+          const int32_t *v = (const int32_t *)&ri;
+          c32_t prod = (c32_t){v[0], v[1]};
           csum(D[set][aa], D[set][aa], prod);
         } // symb loop
       } // aa loop
