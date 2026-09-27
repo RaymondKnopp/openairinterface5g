@@ -1567,33 +1567,14 @@ void nr_decode_pucch2(PHY_VARS_gNB *gNB,
 }
 
 
-/* ===== PUCCH format 3 reception (from pucch3_L1); format 2 handled by nr_decode_pucch2 above ===== */
-static cw_t pucch2_3_3bit[8] __attribute__((aligned(32)));
-static cw_t pucch2_3_4bit[16] __attribute__((aligned(32)));
-static cw_t pucch2_3_5bit[32] __attribute__((aligned(32)));
-static cw_t pucch2_3_6bit[64] __attribute__((aligned(32)));
-static cw_t pucch2_3_7bit[128] __attribute__((aligned(32)));
-static cw_t pucch2_3_8bit[256] __attribute__((aligned(32)));
-static cw_t pucch2_3_9bit[512] __attribute__((aligned(32)));
-static cw_t pucch2_3_10bit[1024] __attribute__((aligned(32)));
-static cw_t pucch2_3_11bit[2048] __attribute__((aligned(32)));
-
-static cw_t *pucch2_3_lut[9] =
-    {pucch2_3_3bit, pucch2_3_4bit, pucch2_3_5bit, pucch2_3_6bit, pucch2_3_7bit, pucch2_3_8bit, pucch2_3_9bit, pucch2_3_10bit, pucch2_3_11bit};
-
+/* ===== PUCCH format 3 reception (from pucch3_L1); format 2 handled by nr_decode_pucch2 above =====
+ * The small-block codeword LUT is identical to format 2's (pucch2_lut, filled by
+ * init_pucch2_luts), so format 3 reuses it. Only the polar helper LUTs are format-3 specific. */
 static cw4bit_t pucch2_3_polar_4bit[16] __attribute__((aligned(32)));
 static simde__m128i pucch2_3_polar_llr_num_lut[256];
 
 void init_pucch2_3_luts()
 {
-  for (int b = 3; b < 12; b++) {
-    for (int cw = 0; cw < (1 << b); cw++) {
-      uint32_t out = encodeSmallBlock(cw, b, 0);
-      uint16_t *tmp = (uint16_t *)pucch2_3_lut[b - 3][cw].cw;
-      for (int j = 0; j < 32; j++)
-        *tmp++ = (out & (1U << j)) > 0 ? -1 : 1;
-    }
-  }
   for (int i = 0; i < 16; i++) {
     int16_t *lut_i = pucch2_3_polar_4bit[i].cw;
     *lut_i++ = (i & 0x1) <= 0;
@@ -1730,7 +1711,7 @@ static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
     // correlate only the even codeword to get D once, then derive both metrics --
     // even (cw) = |dmrs_ref + D|^2, odd (cw+1) = |dmrs_ref - D|^2 -- halving the correlations.
     for (int cw = 0; cw < 1 << nb_bit; cw += 2) {
-      const simde__m128i *modcw = (simde__m128i *)&pucch2_3_lut[nb_bit - 3][cw].cw;
+      const simde__m128i *modcw = (simde__m128i *)&pucch2_lut[nb_bit - 3][cw].cw;
       c64_t D[ngroup][2][Prx];
       memset(D, 0, sizeof(D));
       for (int aa = 0; aa < Prx; aa++) {
