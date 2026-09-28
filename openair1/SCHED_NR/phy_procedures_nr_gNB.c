@@ -1117,7 +1117,7 @@ static void handle_pucch(PHY_VARS_gNB *gNB, c16_t **rxdataF, const NR_gNB_PUCCH_
       uci->pdu_size = sizeof(nfapi_nr_uci_pucch_pdu_format_2_3_4_t);
       nfapi_nr_uci_pucch_pdu_format_2_3_4_t *uci_pdu_format3 = &uci->pucch_pdu_format_2_3_4;
       start_meas(&gNB->pucch23_proc_rx);
-      nr_decode_pucch2_3(gNB, rxdataF, pucch->frame, pucch->slot, uci_pdu_format3, pucch_pdu);
+      nr_decode_pucch3(gNB, rxdataF, pucch->frame, pucch->slot, uci_pdu_format3, pucch_pdu);
       stop_meas(&gNB->pucch23_proc_rx);
       break;
     default:

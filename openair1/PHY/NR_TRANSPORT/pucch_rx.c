@@ -1840,64 +1840,55 @@ static int nr_pucch23_decode_polar(const nfapi_nr_pucch_pdu_t *pucch_pdu,
 }
 
 
-void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
-                        c16_t **rxdataF,
-                        int frame,
-                        int slot,
-                        nfapi_nr_uci_pucch_pdu_format_2_3_4_t *uci_pdu,
-                        const nfapi_nr_pucch_pdu_t *pucch_pdu)
+void nr_decode_pucch3(PHY_VARS_gNB *gNB,
+                      c16_t **rxdataF,
+                      int frame,
+                      int slot,
+                      nfapi_nr_uci_pucch_pdu_format_2_3_4_t *uci_pdu,
+                      const nfapi_nr_pucch_pdu_t *pucch_pdu)
 {
   NR_DL_FRAME_PARMS *frame_parms = &gNB->frame_parms;
-  // pucch_GroupHopping_t pucch_GroupHopping = pucch_pdu->group_hop_flag + (pucch_pdu->sequence_hop_flag<<1);
+  const int fmt = pucch_pdu->format_type;
   const int nb_symbols = pucch_pdu->nr_of_symbols;
-  int fmt=pucch_pdu->format_type;
 
-
-  AssertFatal(fmt==2 || fmt==3, "Format %d is not 2 or 3\n",fmt);
-  if (fmt==2) AssertFatal(nb_symbols == 1 || nb_symbols == 2, "Illegal number of symbols for PUCCH 2 %d\n", nb_symbols);
-  if (fmt==3) AssertFatal(nb_symbols >= 4 && nb_symbols <= 14, "Illegal number of symbols for PUCCH 3 %d\n", nb_symbols);
-
+  AssertFatal(fmt == 3, "nr_decode_pucch3 only handles PUCCH format 3 (got %d)\n", fmt);
+  AssertFatal(nb_symbols >= 4 && nb_symbols <= 14, "Illegal number of symbols for PUCCH 3 %d\n", nb_symbols);
   AssertFatal((pucch_pdu->prb_start - ((pucch_pdu->prb_start >> 2) << 2)) == 0,
-              "Current pucch2 receiver implementation requires a PRB offset multiple of 4. The one selected is %d",
+              "Current PUCCH3 receiver implementation requires a PRB offset multiple of 4. The one selected is %d",
               pucch_pdu->prb_start);
 
   // extract pucch and dmrs first
-
 #ifdef DEBUG_NR_PUCCH_RX
-  printf("Frame.Slot %d.%d PUCCH format %d RX : start_symbol_index %d numSymb %d start_prb %d numPRB %d freq_hop %d\n",frame,slot,fmt,pucch_pdu->start_symbol_index,nb_symbols,pucch_pdu->prb_start,pucch_pdu->prb_size,pucch_pdu->freq_hop_flag);
+  printf("Frame.Slot %d.%d PUCCH format 3 RX : start_symbol_index %d numSymb %d start_prb %d numPRB %d freq_hop %d\n",
+         frame, slot, pucch_pdu->start_symbol_index, nb_symbols, pucch_pdu->prb_start, pucch_pdu->prb_size, pucch_pdu->freq_hop_flag);
 #endif
   int l2 = pucch_pdu->start_symbol_index;
   int soffset = (slot % RU_RX_SLOT_DEPTH) * frame_parms->symbols_per_slot * frame_parms->ofdm_symbol_size;
   uint16_t starting_prb = pucch_pdu->prb_start + pucch_pdu->bwp_start;
-  uint16_t second_hop_prb=starting_prb;
   int re_offset[2];
   // BWP-relative subcarrier mapping (subcarrier 0 at index 0), consistent with PUCCH formats 0/1/2
   re_offset[0] = NR_NB_SC_PER_RB * starting_prb;
   if (nb_symbols >= 2) {
-    if (pucch_pdu->freq_hop_flag) {
-      second_hop_prb = pucch_pdu->second_hop_prb;
+    if (pucch_pdu->freq_hop_flag)
       re_offset[1] = NR_NB_SC_PER_RB * (pucch_pdu->second_hop_prb + pucch_pdu->bwp_start);
-    } else {
+    else
       re_offset[1] = re_offset[0];
-    }
   }
   AssertFatal(pucch_pdu->prb_size * nb_symbols > 1, "number of PRB*SYMB (%d,%d)< 2", pucch_pdu->prb_size, nb_symbols);
-  // Multi-PRB PUCCH 3 decode is not yet validated end-to-end (the TX rate-matching across the
-  // whole DFT-precoded allocation still needs to be reconciled with the receiver, which is
-  // already structured as a single group over the whole allocation).
+  // Multi-PRB PUCCH 3 decode is not yet validated end-to-end (the TX rate-matching across the whole
+  // DFT-precoded allocation still needs to be reconciled with the receiver, which is already
+  // structured as a single group over the whole allocation).
   AssertFatal(pucch_pdu->prb_size == 1, "PUCCH 3 currently supports a single PRB (prb_size %d)\n", pucch_pdu->prb_size);
 
   int Prx = pucch_pdu->param_v4.numSpatialStreamIndices;
-  //  AssertFatal((pucch_pdu->prb_size&1) == 0,"prb_size %d is not a multiple of2\n",pucch_pdu->prb_size);
-  // use 2 for Nb antennas in case of single antenna to allow the following allocations
   const int nb_re_pucch = 12 * pucch_pdu->prb_size;
   c16_t rp[Prx][nb_symbols][nb_re_pucch];
   memset(rp, 0, sizeof(rp));
 
-  int64_t pucch2_3_lev = 0;
+  int64_t pucch3_lev = 0;
   for (int aa = 0; aa < Prx; aa++) {
     for (int symb = 0; symb < nb_symbols; symb++) {
-      c16_t *tmp_rp = ((c16_t *)&rxdataF[aa][soffset + (l2 + symb) * frame_parms->ofdm_symbol_size]);
+      c16_t *tmp_rp = (c16_t *)&rxdataF[aa][soffset + (l2 + symb) * frame_parms->ofdm_symbol_size];
       // hop index: 0 for the first half of the symbols, 1 for the second half
       const int hop = (2 * symb) / nb_symbols;
       if (re_offset[hop] + nb_re_pucch < frame_parms->ofdm_symbol_size) {
@@ -1908,359 +1899,140 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
         memcpy(rp[aa][symb], &tmp_rp[re_offset[hop]], neg_length * sizeof(c16_t));
         memcpy(&rp[aa][symb][neg_length], tmp_rp, pos_length * sizeof(c16_t));
       }
-      pucch2_3_lev += signal_energy_nodc(rp[aa][symb], nb_re_pucch);
+      pucch3_lev += signal_energy_nodc(rp[aa][symb], nb_re_pucch);
     }
   }
 
-  pucch2_3_lev /= Prx * nb_symbols;
-  int pucch2_3_levdB = dB_fixed(pucch2_3_lev);
-  int scaling = max((log2_approx64(pucch2_3_lev) >> 1) - 8, 0);
+  pucch3_lev /= Prx * nb_symbols;
+  int pucch3_levdB = dB_fixed(pucch3_lev);
+  int scaling = max((log2_approx64(pucch3_lev) >> 1) - 8, 0);
   LOG_D(NR_PHY,
-        "%d.%d Decoding pucch %d for %d symbols, %d PRB, nb_harq %d, nb_sr %d, nb_csi %d/%d, pucch2_lev %d dB (scaling %d)\n",
+        "%d.%d Decoding pucch 3 for %d symbols, %d PRB, nb_harq %d, nb_sr %d, nb_csi %d/%d, pucch3_lev %d dB (scaling %d)\n",
         frame,
         slot,
-	fmt,
         nb_symbols,
         pucch_pdu->prb_size,
         pucch_pdu->bit_len_harq,
         pucch_pdu->sr_flag,
         pucch_pdu->bit_len_csi_part1,
         pucch_pdu->bit_len_csi_part2,
-        pucch2_3_levdB,
+        pucch3_levdB,
         scaling);
 
-  // Format 2 groups PRBs in pairs for non-coherent combining across frequency; format 3 is a
-  // single group over the whole allocation (transform precoding spreads each symbol across all PRBs).
-  int nc_group_size = fmt == 2 ? 2 : pucch_pdu->prb_size;
-  int ngroup = pucch_pdu->prb_size / nc_group_size;
-  if (fmt == 2 && (pucch_pdu->prb_size&1)>0) ngroup++;
+  // Format 3 is decoded as a single non-coherent group over the whole allocation (transform
+  // precoding spreads each modulation symbol across all PRBs).
+  const int nc_group_size = pucch_pdu->prb_size;
+  const int ngroup = pucch_pdu->prb_size / nc_group_size;
 
   c32_t corr32[nb_symbols][ngroup][Prx];
   memset(corr32, 0, sizeof(corr32));
 
-  int nb_re_data;
-  int nb_re_dmrs;
   int dmrspos[4] = {-1, -1, -1, -1};
-  int ndmrs = 0;
+  const int ndmrs = nr_pucch3_dmrs_positions(nb_symbols, pucch_pdu->freq_hop_flag, pucch_pdu->add_dmrs_flag, dmrspos);
+  const int nb_re_data = 12 * pucch_pdu->prb_size;
+  const int nb_re_dmrs = 12 * pucch_pdu->prb_size;
 
-  if (fmt==2) {
-    nb_re_data = 8 * pucch_pdu->prb_size;
-    nb_re_dmrs = 4 * pucch_pdu->prb_size;
-  }
-  else {
-    nb_re_data = 12 * pucch_pdu->prb_size;
-    nb_re_dmrs = 12 * pucch_pdu->prb_size;
-    ndmrs = nr_pucch3_dmrs_positions(nb_symbols, pucch_pdu->freq_hop_flag, pucch_pdu->add_dmrs_flag, dmrspos);
-  }
-  #define ALIGN 32
-
+#define ALIGN 32
   size_t row_bytes = nb_re_data * sizeof(c16_t);
   size_t row_bytes_aligned = (row_bytes + ALIGN - 1) & ~(ALIGN - 1);
   size_t nb_re_data_padded = row_bytes_aligned / sizeof(c16_t);
 
-  c16_t r_ext[Prx][nb_symbols-ndmrs][nb_re_data_padded]
-      __attribute__((aligned(32)));
+  c16_t r_ext[Prx][nb_symbols - ndmrs][nb_re_data_padded] __attribute__((aligned(32)));
+  c16_t r_ext2[Prx][nb_symbols - ndmrs][nb_re_data_padded] __attribute__((aligned(32)));
 
-  c16_t r_ext2[Prx][nb_symbols-ndmrs][nb_re_data_padded]
-      __attribute__((aligned(32)));
+  const simde__m128i swap128 = simde_mm_set_epi8(13, 12, 15, 14, 9, 8, 11, 10, 5, 4, 7, 6, 1, 0, 3, 2);
 
-  const simde__m128i swap128 = simde_mm_set_epi8(13,
-                                                 12,
-                                                 15,
-                                                 14,
-                                                 9,
-                                                 8,
-                                                 11,
-                                                 10,
-                                                 5,
-                                                 4,
-                                                 7,
-                                                 6,
-                                                 1,
-                                                 0,
-                                                 3,
-                                                 2);
-  // prepare scrambling sequence for data
+  // prepare scrambling sequence for the data
   uint32_t x2 = ((pucch_pdu->rnti) << 15) + pucch_pdu->data_scrambling_id;
-#ifdef DEBUG_NR_PUCCH_RX
-  printf("x2 %x\n", x2);
-#endif
-  c16_t scramb_data[(nb_symbols-ndmrs) * nb_re_data] __attribute__((aligned(32)));
-
+  c16_t scramb_data[(nb_symbols - ndmrs) * nb_re_data] __attribute__((aligned(32)));
   uint32_t *sGold = gold_cache(x2, nb_symbols * nb_re_data / 2);
   uint8_t *sGold8 = (uint8_t *)sGold;
-  for (int i = 0; i < (nb_symbols-ndmrs)*nb_re_data; i += 4) {
+  for (int i = 0; i < (nb_symbols - ndmrs) * nb_re_data; i += 4)
     *(simde__m128i *)(scramb_data + i) = byte2m128i[*sGold8++];
-#ifdef DEBUG_NR_PUCCH_RX
-    log_dump(PHY,scramb_data+i,4, LOG_DUMP_C16, "scram %d",i);
-#endif
-  }
 
-  c16_t rdmrs_ext[Prx][nb_re_dmrs * ((fmt==2)?nb_symbols : ndmrs)] __attribute__((aligned(32)));
-  c16_t pil_dmrs[2][nb_re_dmrs] __attribute__((aligned(32)));
-  c16_t r_u_v_alpha_delta_dmrs[(fmt==2? 1 : ndmrs)*nb_re_dmrs] __attribute__((aligned(32)));
-  c16_t *r_u_v_alpha_delta_dmrs_p = r_u_v_alpha_delta_dmrs; 
-  for (int d = 0; d < (fmt==2?nb_symbols : ndmrs); d++) {
-
-    int symb = fmt == 2 ? d : dmrspos[d];
+  // Extract each DMRS symbol and generate its transmitted low-PAPR reference sequence.
+  c16_t rdmrs_ext[Prx][nb_re_dmrs * ndmrs] __attribute__((aligned(32)));
+  c16_t r_u_v_alpha_delta_dmrs[ndmrs * nb_re_dmrs] __attribute__((aligned(32)));
+  for (int d = 0; d < ndmrs; d++) {
+    const int symb = dmrspos[d];
 
     // extract DMRS
-#ifdef DEBUG_NR_PUCCH_RX
-    printf("Extracting PUCCH DMRS %d (%d): nb_re_dmrs %d, symb %d\n",d,dmrspos[d],nb_re_dmrs,symb);
-#endif
     for (int aa = 0; aa < Prx; aa++) {
-      c16_t *rdmrs_ext_p = rdmrs_ext[aa] + nb_re_dmrs*d;
+      c16_t *rdmrs_ext_p = rdmrs_ext[aa] + nb_re_dmrs * d;
       c16_t *rp_base = rp[aa][symb];
       for (int prb = 0; prb < pucch_pdu->prb_size; prb++) {
-	if (fmt==2) {
-          for (int idx = 0; idx < 4; idx++) {
-            rp_base++;
-            *rdmrs_ext_p++ = *rp_base++;
-            rp_base++;
-          }
-	}
-	else {
-           memcpy(rdmrs_ext_p,rp_base,NR_NB_SC_PER_RB*sizeof(c16_t));
-#ifdef DEBUG_NR_PUCCH_RX
-           log_dump(PHY, rp_base,NR_NB_SC_PER_RB, LOG_DUMP_C16, "Ant %d dmrs(base) %d:\n", aa,d);
-#endif
-	   rp_base+=NR_NB_SC_PER_RB;
-	   rdmrs_ext_p+=NR_NB_SC_PER_RB;
-	}
+        memcpy(rdmrs_ext_p, rp_base, NR_NB_SC_PER_RB * sizeof(c16_t));
+        rp_base += NR_NB_SC_PER_RB;
+        rdmrs_ext_p += NR_NB_SC_PER_RB;
       }
     }
 
-#ifdef DEBUG_NR_PUCCH_RX
-    for (int aa = 0; aa < Prx; aa++)
-      log_dump(PHY, rdmrs_ext[aa]+d*nb_re_dmrs, nb_re_dmrs, LOG_DUMP_C16, "Ant %d dmrs %d:\n", aa,d);
-#endif
-
-    // first compute DMRS component
-    const int scramble = pucch_pdu->dmrs_scrambling_id * 2;
-    uint32_t x2 =
-        ((1ULL << 17) * ((frame_parms->symbols_per_slot * slot + pucch_pdu->start_symbol_index + symb + 1) * (scramble + 1))
-         + scramble)
-        % (1U << 31); // c_init calculation according to TS38.211 subclause
-#ifdef DEBUG_NR_PUCCH_RX
-    printf("slot %d, start_symbol_index %d, symbol %d, dmrs_scrambling_id %d\n",
-           slot,
-           pucch_pdu->start_symbol_index,
-           symb,
-           pucch_pdu->dmrs_scrambling_id);
-#endif 
-    if (fmt == 2) {
-      int prb = (d==0) ? starting_prb : second_hop_prb;
-	      
-      uint32_t *sGold = gold_cache(x2, prb / 4 + ngroup / 2);
-      // Compute pilot conjugate
-      uint8_t *sGold8 = (uint8_t *)(sGold + prb / 4);
-      for (int re = 0; re < nb_re_dmrs; re += 4) {
-        *(simde__m128i *)(pil_dmrs[symb] + re) = oai_mm_conj(byte2m128i[*sGold8++]);
-      }
+    // generate the transmitted DMRS sequence
+    AssertFatal(nb_re_dmrs <= 36, "PUCCH3 nb_re_dmrs %d not supported (should be <= 36)\n", nb_re_dmrs);
+    const bool intraSlotFrequencyHopping = pucch_pdu->prb_start != pucch_pdu->second_hop_prb;
+    pucch_GroupHopping_t pucch_GroupHopping = pucch_pdu->group_hop_flag + (pucch_pdu->sequence_hop_flag << 1);
+    const int l = dmrspos[d];
+    // n_hop = 0 without hopping; with hopping, 0 for the first hop and 1 for the second
+    const int n_hop = intraSlotFrequencyHopping && l >= pucch_pdu->nr_of_symbols / 2 ? 1 : 0;
+    uint8_t u = 0, v = 0;
+    const uint8_t mcs = 0;
+    const int lprime = pucch_pdu->start_symbol_index;
+    nr_group_sequence_hopping(pucch_GroupHopping, pucch_pdu->hopping_id, n_hop, slot, &u, &v); // u and v
+    // cyclic shift hopping, TS 38.211 6.3.2.2.2
+    const double alpha = nr_cyclic_shift_hopping(pucch_pdu->hopping_id, pucch_pdu->initial_cyclic_shift, mcs, l, lprime, slot);
+    for (int n = 0; n < nb_re_dmrs; n++) { // low-PAPR sequence
+      const c16_t angle = {lround(32767 * cos(alpha * n)), lround(32767 * sin(alpha * n))};
+      const c16_t table = {table_5_2_2_2_2_Re[u][n], table_5_2_2_2_2_Im[u][n]};
+      r_u_v_alpha_delta_dmrs[n + (d * nb_re_dmrs)] = c16mulShift(angle, table, 15);
+      r_u_v_alpha_delta_dmrs[n + (d * nb_re_dmrs)].i = -r_u_v_alpha_delta_dmrs[n + (d * nb_re_dmrs)].i;
     }
-    else {
-      // generating transmitted sequence and dmrs
-      if (fmt==3) AssertFatal(nb_re_dmrs<=36,"PUCCH3 nb_re_dmrs %d not supported (should be <= 36)\n",nb_re_dmrs);
-      if (fmt==4) AssertFatal(nb_re_dmrs==12,"PUCCH4 nb_re_dmrs %d not supported (should be 12)\n",nb_re_dmrs); 
-      const bool intraSlotFrequencyHopping = pucch_pdu->prb_start != pucch_pdu->second_hop_prb;
-      pucch_GroupHopping_t pucch_GroupHopping = pucch_pdu->group_hop_flag + (pucch_pdu->sequence_hop_flag << 1);
-      int l = dmrspos[d]; 
-#ifdef DEBUG_NR_PUCCH_RX
-      printf("\t [nr_decode_pucch2_3] dmrs symbol l=%d (ndmrs %d)\n", l, ndmrs);
-#endif
-      // if frequency hopping is disabled, intraSlotFrequencyHopping is not
-      // provided
-      //              n_hop = 0
-      // if frequency hopping is enabled,  intraSlotFrequencyHopping is provided
-      //              n_hop = 0 for first hop
-      //              n_hop = 1 for second hop
-      const int n_hop = intraSlotFrequencyHopping && l >= pucch_pdu->nr_of_symbols / 2 ? 1 : 0;
-      uint8_t u = 0, v = 0; //,delta=0;
-      const uint8_t mcs = 0;
-      const int lprime = pucch_pdu->start_symbol_index;
-
-#ifdef DEBUG_NR_PUCCH_RX
-      printf("\t [nr_decode_pucch2_3] entering function nr_group_sequence_hopping with n_hop=%d, nr_tti_tx=%d\n", n_hop, slot);
-#endif
-
-      nr_group_sequence_hopping(pucch_GroupHopping, pucch_pdu->hopping_id, n_hop, slot, &u, &v); // calculating u and v value
-      // Defining cyclic shift hopping TS 38.211 Subclause 6.3.2.2.2
-      double alpha = nr_cyclic_shift_hopping(pucch_pdu->hopping_id, pucch_pdu->initial_cyclic_shift, mcs, l, lprime, slot);
-#ifdef DEBUG_NR_PUCCH_RX
-      printf("\t [nr_decode_pucch2_3] alpha %f\n",alpha);
-#endif
-      for (int n = 0; n < nb_re_dmrs; n++) { // generating low papr sequences
-        const c16_t angle = {lround(32767 * cos(alpha * n)), lround(32767 * sin(alpha * n))};
-        const c16_t table = {table_5_2_2_2_2_Re[u][n], table_5_2_2_2_2_Im[u][n]};
-        r_u_v_alpha_delta_dmrs[n+(d*nb_re_dmrs)] = /*c16mulRealShift(*/c16mulShift(angle, table, 15)/*, amp, 15)*/;
-	    r_u_v_alpha_delta_dmrs[n+(d*nb_re_dmrs)].i = -r_u_v_alpha_delta_dmrs[n+(d*nb_re_dmrs)].i;
-#ifdef DEBUG_NR_PUCCH_RX
-        /*
-          printf(
-            "\t [nr_decode_pucch2_3] sequence generation \tu=%d \tv=%d "
-            "\talpha=%lf \tr_u_v_alpha_delta[n=%d]=(%d,%d) "
-            "\ty_n[n=%d]=(%f,%f)\n",
-            u,
-            v,
-            alpha,
-            n,
-            r_u_v_alpha_delta[n].r,
-            r_u_v_alpha_delta[n].i,
-            n,
-            y_n[n].r,
-            y_n[n].i);
-          */
-#endif
-      } // loop over nb_re_dmrs
-#ifdef DEBUG_NR_PUCCH_RX
-      log_dump(PHY, r_u_v_alpha_delta_dmrs+(d*nb_re_dmrs), nb_re_dmrs, LOG_DUMP_C16, "r_u_v_alpha_delta_%d:\n",d);
-#endif
-    } // format 2/3
   } // d
-  // Compute delay
-  c16_t ch_ls[128] __attribute__((aligned(32))) = {0};
-  int lendmrs=((fmt==2) ? nb_symbols : ndmrs)*nb_re_dmrs;
-  if (fmt==2) {
-    c16_t rdmrs_gold[nb_re_dmrs] __attribute__((aligned(32)));
-    for (int aa = 0; aa < Prx; aa++) {
-      mult_complex_vectors(rdmrs_ext[aa], pil_dmrs[0], rdmrs_gold, lendmrs, 0);
-      c16_t *ch_ls_ptr = ch_ls;
-      c16_t *end = ch_ls_ptr + 128;
-      for (int i = 0; i < nb_re_dmrs; i++)
-        for (int k = 0; k < 3 && ch_ls_ptr < end; k++)
-          *ch_ls_ptr++ = rdmrs_gold[i];
-    }
-  }
-  delay_t delay = {0};
 
-  if (fmt==2) {
-    c16_t ch_temp[128] __attribute__((aligned(32)));
-    nr_est_delay(128, ch_ls, ch_temp, &delay);
-  }
+  // allocate the per-antenna IDFT output buffers (transform-precoding despread)
+  c16_t *idft_out[Prx];
+  for (int aa = 0; aa < Prx; aa++)
+    idft_out[aa] = __builtin_alloca_with_align(nb_re_data * sizeof(c16_t), 32 * 8);
 
-  // Format 3/4: allocate memory for IDFT output buffers
-  c16_t *fmt3_4_idft_out[Prx];
-  if (fmt >= 3) {
-    for (int aa = 0 ; aa < Prx ; aa++) {
-      fmt3_4_idft_out[aa] = __builtin_alloca_with_align(nb_re_data*sizeof(c16_t),32*8);
-    }
-  }
+  c16_t *r_u_v_alpha_delta_dmrs_p = r_u_v_alpha_delta_dmrs;
   int s3 = 0;
-  for (int symb = 0 ; symb < nb_symbols ; symb++) { 
-    if (fmt == 2) {
-      // Apply delay compensation on the input
-      if (delay.est_delay != 0) {
-        int delay_idx = get_delay_idx(delay.est_delay, MAX_DELAY_COMP);
-        // printf("pucch2 est delay %d\n",delay.est_delay);
-        c16_t *delay_table = frame_parms->delay_table128[delay_idx];
-        for (int aa = 0; aa < Prx; aa++)
-          mult_complex_vectors(rp[aa][symb], delay_table, rp[aa][symb], nb_re_pucch, 8);
-      }
-      // else printf("pucch2 no delay\n");
+  for (int symb = 0; symb < nb_symbols; symb++) {
+    const bool is_dmrs = is_pucch3_dmrs_symbol(symb, dmrspos);
 
-      // extract again DMRS, and signal, after delay compensation
+    if (is_dmrs) {
+      // DMRS symbol: accumulate the (channel) reference correlation per group and antenna
+      int d = 0;
+      if (symb == dmrspos[1]) d = 1;
+      if (symb == dmrspos[2]) d = 2;
+      if (symb == dmrspos[3]) d = 3;
       for (int aa = 0; aa < Prx; aa++) {
-        c16_t *r_ext_p = r_ext[aa][symb];
-        c16_t *rdmrs_ext_p = rdmrs_ext[aa];
-        c16_t *rp_base = rp[aa][symb];
+        c16_t *pil_ptr = r_u_v_alpha_delta_dmrs_p;
         for (int prb = 0; prb < pucch_pdu->prb_size; prb++) {
-          for (int idx = 0; idx < 4; idx++) {
-            *r_ext_p++ = *rp_base++;
-            *rdmrs_ext_p++ = *rp_base++;
-            *r_ext_p++ = *rp_base++;
+          c16_t *rdmrs_p = rdmrs_ext[aa] + (d * nb_re_dmrs) + (12 * prb);
+          for (int z = 0; z < 12; z++) {
+            c16_t tmp = c16mulShift(*rdmrs_p++, *pil_ptr++, 15);
+            corr32[symb][prb / nc_group_size][aa].r += tmp.r;
+            corr32[symb][prb / nc_group_size][aa].i += tmp.i;
           }
         }
-      } // aa
-    } // fmt==2
-    else if (!is_pucch3_dmrs_symbol(symb, dmrspos)) {
+      }
+      r_u_v_alpha_delta_dmrs_p += nb_re_dmrs;
+    } else {
+      // data symbol: extract, IDFT-despread and unscramble into r_ext (Re Im) / r_ext2 (Im -Re)
       for (int aa = 0; aa < Prx; aa++) {
-        memcpy(r_ext[aa][s3],rp[aa][symb],nb_re_pucch*sizeof(c16_t));
-      } // aa
-    }
-    int d=0;
-    if (symb == dmrspos[1]) d=1;
-    if (symb == dmrspos[2]) d=2;
-    if (symb == dmrspos[3]) d=3;
-#ifdef DEBUG_NR_PUCCH_RX
-    for (int aa = 0; aa < Prx; aa++) {
-      if (fmt==2 || is_pucch3_dmrs_symbol(symb, dmrspos)) log_dump(PHY, rdmrs_ext[aa]+((fmt>2) ? (d*nb_re_dmrs) : 0), nb_re_dmrs, LOG_DUMP_C16, "after delay compensation ant %d symb %d dmrs:\n", aa,symb);
-      if (fmt>2 && !is_pucch3_dmrs_symbol(symb, dmrspos)) log_dump(PHY, r_ext[aa][s3], nb_re_data, LOG_DUMP_C16, "after delay compensation ant %d symb %d data:\n", aa,symb);
-    }
-#endif
-    if (fmt==2 || is_pucch3_dmrs_symbol(symb, dmrspos)) {
-      for (int aa = 0; aa < Prx; aa++) {
-        c16_t *pil_ptr = (fmt==2) ? pil_dmrs[symb] : r_u_v_alpha_delta_dmrs_p;
-#ifdef DEBUG_NR_PUCCH_RX
-	printf("computing corr32 for symb %d, ngroup %d, nc_group_size %d\n",symb,ngroup,nc_group_size);
-#endif
-        for (int prb = 0; prb < pucch_pdu->prb_size; prb++) {
-        // non-coherent combining across groups
-          c16_t *rdmrs_p = rdmrs_ext[aa] + ((fmt==2) ? (symb*nb_re_dmrs) + (4*prb) : (d*nb_re_dmrs) + (12*prb));
-          for (int z = 0; z < ((fmt==2) ? 4 : 12); z++) {
-#ifdef DEBUG_NR_PUCCH_RX
-            printf("prb %d, grp %d: %d.%d X %d.%d\n",prb,prb/nc_group_size,rdmrs_p->r,rdmrs_p->i,pil_ptr->r,pil_ptr->i);
-#endif
-            c16_t tmp = c16mulShift(*rdmrs_p++, *pil_ptr++, fmt>=3 ? 15 : scaling);
-#ifdef DEBUG_NR_PUCCH_RX
-	    printf("tmp = %d+j(%d)\n",tmp.r,tmp.i);
-#endif
-            corr32[symb][prb/nc_group_size][aa].r += tmp.r;
-            corr32[symb][prb/nc_group_size][aa].i += tmp.i;
-#ifdef DEBUG_NR_PUCCH_RX
-	    printf("aa %d, group %d: corr32 %d+j(%d)\n",aa,prb/nc_group_size,corr32[symb][prb/nc_group_size][aa].r,corr32[symb][prb/nc_group_size][aa].i);
-#endif
-          } //z
-        } //prb
-      } // aa
-      if (fmt>2) r_u_v_alpha_delta_dmrs_p+=nb_re_dmrs;
-    }
-#ifdef DEBUG_NR_PUCCH_RX
-    if (fmt==2 || is_pucch3_dmrs_symbol(symb, dmrspos)) log_dump(PHY, corr32[symb][0], Prx, LOG_DUMP_C32, "corr32:");
-#endif
-
-    if (fmt>=3) { // copy rx_ext to IDFT buffers and do idft and unscrambling if required
-       if (!is_pucch3_dmrs_symbol(symb, dmrspos)) {
-	  for (int aa = 0 ; aa < Prx ; aa++) {
-	    dft_size_idx_t dftsize = get_dft(nb_re_data);
-  	    idft(dftsize,(int16_t*)r_ext[aa][s3],(int16_t*)fmt3_4_idft_out[aa],1);
-            simde__m128i *c_ptr = (simde__m128i *)scramb_data + (s3*nb_re_data/4);
-            simde__m128i *br_ptr = (simde__m128i *)r_ext[aa][s3];
-            simde__m128i *bi_ptr = (simde__m128i *)r_ext2[aa][s3];
-	    for (int i=0; i < nb_re_data/4 ; i++) {
-               simde__m128i tmp = simde_mm_srai_epi16(((simde__m128i *)fmt3_4_idft_out[aa])[i], scaling);
-               br_ptr[i] = simde_mm_sign_epi16(tmp, c_ptr[i]); // this contains unscrambled [Re Im] sequence
-               bi_ptr[i] = oai_mm_conj(simde_mm_sign_epi16(simde_mm_shuffle_epi8(tmp, swap128), c_ptr[i])); // this contains unscramble [Im -Re] requence
-#ifdef DEBUG_NR_PUCCH_RX
-	       log_dump(PHY,(c16_t*)&tmp,4,LOG_DUMP_C16,"btilde_ptr:");
-	       log_dump(PHY,(c16_t*)(c_ptr+i),4,LOG_DUMP_C16,"cptr:");
-	       log_dump(PHY,(c16_t*)(br_ptr+i),4,LOG_DUMP_C16,"brptr:");
-	       log_dump(PHY,(c16_t*)(bi_ptr+i),4,LOG_DUMP_C16,"biptr:");
-#endif
-	     }
-	  } // aa
-       } // symb check
-    } // fmt 3/4 check
-    
-    // apply gold sequence on data symbols (unscrambling)
-    if (fmt==2) {
-      for (int aa = 0; aa < Prx; aa++) {
-#ifdef DEBUG_NR_PUCCH_RX
-	printf("unscrambling symbol %d, nb_re_data %d\n",s3,nb_re_data);
-	log_dump(PHY,scramb_data + s3*nb_re_data,nb_re_data,LOG_DUMP_C16,"c:");
-	log_dump(PHY,r_ext[aa][s3],nb_re_data,LOG_DUMP_C16,"r:");
-#endif
-	simde__m128i *c_ptr = (simde__m128i *)(scramb_data + s3*nb_re_data);
-        simde__m128i *end = (simde__m128i *)(scramb_data + (s3+1)*nb_re_data);
-        for (simde__m128i *ptr = (simde__m128i *)r_ext[aa][s3], *ptr2 = (simde__m128i *)r_ext2[aa][s3]; c_ptr < end;
-             ptr++, c_ptr++, ptr2++) {
-          simde__m128i tmp = simde_mm_srai_epi16(*ptr, scaling);
-          *ptr2 = oai_mm_conj(simde_mm_sign_epi16(simde_mm_shuffle_epi8(tmp, swap128), *c_ptr)); // r_ext(im -re)(i) * c(i)
-          *ptr = simde_mm_sign_epi16(tmp, *c_ptr); // r_ext(i) * c(i)
+        memcpy(r_ext[aa][s3], rp[aa][symb], nb_re_pucch * sizeof(c16_t));
+        dft_size_idx_t dftsize = get_dft(nb_re_data);
+        idft(dftsize, (int16_t *)r_ext[aa][s3], (int16_t *)idft_out[aa], 1);
+        simde__m128i *c_ptr = (simde__m128i *)scramb_data + (s3 * nb_re_data / 4);
+        simde__m128i *br_ptr = (simde__m128i *)r_ext[aa][s3];
+        simde__m128i *bi_ptr = (simde__m128i *)r_ext2[aa][s3];
+        for (int i = 0; i < nb_re_data / 4; i++) {
+          simde__m128i tmp = simde_mm_srai_epi16(((simde__m128i *)idft_out[aa])[i], scaling);
+          br_ptr[i] = simde_mm_sign_epi16(tmp, c_ptr[i]); // unscrambled [Re Im] sequence
+          bi_ptr[i] = oai_mm_conj(simde_mm_sign_epi16(simde_mm_shuffle_epi8(tmp, swap128), c_ptr[i])); // unscrambled [Im -Re] sequence
         }
-      } //aa loop
-    }//fmt == 2
-    if (!is_pucch3_dmrs_symbol(symb, dmrspos))
+      }
       s3++;
+    }
   } // symb loop
 
   int nb_bit = pucch_pdu->bit_len_harq + pucch_pdu->sr_flag + pucch_pdu->bit_len_csi_part1 + pucch_pdu->bit_len_csi_part2;
@@ -2282,9 +2054,14 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
   int max_n0 = gNB->measurements.n0_subband_power_tot_dB[starting_prb];
   for (int p = 1; p < pucch_pdu->prb_size; p++)
     max_n0 = max(max_n0, gNB->measurements.n0_subband_power_tot_dB[starting_prb + p]);
-  if (pucch2_3_levdB < max_n0 + (gNB->pucch0_thres / 10))
-    decoderState = 1; // assuming missed detection, only attempt to decode for polar case (with CRC)
-  LOG_D(NR_PHY,"pucch2_3_levdB %d n0+thres %d (thres %d) decoderState %d\n", pucch2_3_levdB, max_n0 + (gNB->pucch0_thres / 10), gNB->pucch0_thres / 10, decoderState);
+  if (pucch3_levdB < max_n0 + (gNB->pucch0_thres / 10))
+    decoderState = 1; // assuming missed detection, only attempt to decode for the polar case (with CRC)
+  LOG_D(NR_PHY,
+        "pucch3_levdB %d n0+thres %d (thres %d) decoderState %d\n",
+        pucch3_levdB,
+        max_n0 + (gNB->pucch0_thres / 10),
+        gNB->pucch0_thres / 10,
+        decoderState);
 
   if (nb_bit < 12 && decoderState == 2) { // short blocklength case
     decodedPayload[0] = nr_pucch23_ml_shortblock(pucch_pdu, slot, fmt, Prx, nb_symbols, ndmrs, ngroup,
@@ -2293,22 +2070,14 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
   } else if (nb_bit >= 12) { // polar coded case
     decoderState = nr_pucch23_decode_polar(pucch_pdu, Prx, nb_symbols, ndmrs, ngroup, nc_group_size,
                                            nb_bit, nb_re_data_padded, r_ext, r_ext2, corr32, decodedPayload);
-  } else
+  } else {
     LOG_D(PHY, "PUCCH not processed: nb_bit %d decoderState %d\n", nb_bit, decoderState);
+  }
 
-  LOG_D(PHY,"UCI decoderState %d, payload[0] %llu\n", decoderState, (unsigned long long)decodedPayload[0]);
+  LOG_D(PHY, "UCI decoderState %d, payload[0] %llu\n", decoderState, (unsigned long long)decodedPayload[0]);
 
-  // estimate CQI for MAC (from antenna port 0 only)
-  // TODO this computation is wrong -> to be ignored at MAC for now
+  // CQI estimate for MAC is not reliable yet -> ignored at MAC for now
   int cqi = 0xff;
-  /*int SNRtimes10 =
-    dB_fixed_times10(signal_energy_nodc((int32_t *)&rxdataF[0][soffset + (l2 * frame_parms->ofdm_symbol_size) + re_offset[0]],
-    12 * pucch_pdu->prb_size))
-    - (10 * gNB->measurements.n0_power_tot_dB);
-    int cqi,bit_left;
-    if (SNRtimes10 < -640) cqi=0;
-    else if (SNRtimes10 >  635) cqi=255;
-    else cqi=(640+SNRtimes10)/5;*/
 
   uci_pdu->harq.harq_bit_len = pucch_pdu->bit_len_harq;
   uci_pdu->pduBitmap = 0;
@@ -2329,16 +2098,14 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
     uci_pdu->pduBitmap |= 2;
     uci_pdu->harq.harq_payload = (uint8_t *)malloc(harq_bytes);
     uci_pdu->harq.harq_crc = decoderState;
-    LOG_D(PHY, "[DLSCH/PDSCH/PUCCH2] %d.%d HARQ bytes (%d) Decoder state %d\n", frame, slot, harq_bytes, decoderState);
+    LOG_D(PHY, "[DLSCH/PDSCH/PUCCH3] %d.%d HARQ bytes (%d) Decoder state %d\n", frame, slot, harq_bytes, decoderState);
     int i = 0;
     for (; i < harq_bytes - 1; i++) {
       uci_pdu->harq.harq_payload[i] = decodedPayload[0] & 255;
-      LOG_D(PHY, "[DLSCH/PDSCH/PUCCH2] %d.%d HARQ payload (%d) = %d\n", frame, slot, i, uci_pdu->harq.harq_payload[i]);
       decodedPayload[0] >>= 8;
     }
     int bit_left = pucch_pdu->bit_len_harq - ((harq_bytes - 1) << 3);
     uci_pdu->harq.harq_payload[i] = decodedPayload[0] & ((1 << bit_left) - 1);
-    LOG_D(PHY, "[DLSCH/PDSCH/PUCCH2] %d.%d HARQ payload (%d) = %d\n", frame, slot, i, uci_pdu->harq.harq_payload[i]);
     decodedPayload[0] >>= pucch_pdu->bit_len_harq;
   }
 
@@ -2349,6 +2116,7 @@ void nr_decode_pucch2_3(PHY_VARS_gNB *gNB,
     uci_pdu->sr.sr_payload[0] = decodedPayload[0] & 1;
     decodedPayload[0] = decodedPayload[0] >> 1;
   }
+
   // csi
   if (pucch_pdu->bit_len_csi_part1 > 0) {
     uci_pdu->pduBitmap |= 4;

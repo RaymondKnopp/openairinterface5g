@@ -813,7 +813,7 @@ int main(int argc, char **argv)
           pucch_pdu.freq_hop_flag = 0;
         start_meas(&gNB->pucch23_proc_rx);
         if (format == 3)
-          nr_decode_pucch2_3(gNB, rxdataF, nr_frame_tx, nr_slot_tx, &uci_pdu, &pucch_pdu);
+          nr_decode_pucch3(gNB, rxdataF, nr_frame_tx, nr_slot_tx, &uci_pdu, &pucch_pdu);
         else
           nr_decode_pucch2(gNB, rxdataF, nr_frame_tx, nr_slot_tx, &uci_pdu, &pucch_pdu);
         stop_meas(&gNB->pucch23_proc_rx);
