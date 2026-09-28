@@ -1570,20 +1570,20 @@ void nr_decode_pucch2(PHY_VARS_gNB *gNB,
 /* ===== PUCCH format 3 reception (from pucch3_L1); format 2 handled by nr_decode_pucch2 above =====
  * The small-block codeword LUT is identical to format 2's (pucch2_lut, filled by
  * init_pucch2_luts), so format 3 reuses it. Only the polar helper LUTs are format-3 specific. */
-static cw4bit_t pucch2_3_polar_4bit[16] __attribute__((aligned(32)));
-static simde__m128i pucch2_3_polar_llr_num_lut[256];
+static cw4bit_t pucch3_polar_4bit[16] __attribute__((aligned(32)));
+static simde__m128i pucch3_polar_llr_num_lut[256];
 
-void init_pucch2_3_luts()
+void init_pucch3_luts()
 {
   for (int i = 0; i < 16; i++) {
-    int16_t *lut_i = pucch2_3_polar_4bit[i].cw;
+    int16_t *lut_i = pucch3_polar_4bit[i].cw;
     *lut_i++ = (i & 0x1) <= 0;
     *lut_i++ = (i & 0x2) <= 0;
     *lut_i++ = (i & 0x4) <= 0;
     *lut_i++ = (i & 0x8) <= 0;
   }
   for (int cw = 0; cw < 256; cw++) {
-    int16_t *lut_num_i = (int16_t *)&pucch2_3_polar_llr_num_lut[cw];
+    int16_t *lut_num_i = (int16_t *)&pucch3_polar_llr_num_lut[cw];
     *lut_num_i++ = (cw & 0x1) <= 0;
     *lut_num_i++ = (cw & 0x10) <= 0;
     *lut_num_i++ = (cw & 0x2) <= 0;
@@ -1643,9 +1643,8 @@ static int nr_pucch3_dmrs_positions(int nb_symbols, bool freq_hop, bool add_dmrs
 
 // Short-block (< 12 bit) maximum-likelihood decode for PUCCH format 2/3: correlate the received
 // data against every candidate codeword and return the ML codeword.
-static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
+static uint64_t nr_pucch3_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
                                          int slot,
-                                         int fmt,
                                          int Prx,
                                          int nb_symbols,
                                          int ndmrs,
@@ -1659,37 +1658,32 @@ static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
                                          c32_t corr32[nb_symbols][ngroup][Prx])
 {
   uint8_t corr_dB;
-    // fill corr rable wit symbols for format 3/4
-    if (fmt >= 3) {
-      int dmrsp=-1;
-      for (int symb=0;symb<nb_symbols;symb++) {
-	     if (is_pucch3_dmrs_symbol(symb, dmrspos)) continue;
-	     if ( (symb<=(dmrspos[0] + (dmrspos[1]-dmrspos[0])/2))) // symb is around 1st DMRS
-              dmrsp = dmrspos[0];
-  	     else if ((ndmrs == 2 || (ndmrs == 4 && symb < dmrspos[1] + (dmrspos[2] - dmrspos[1])/2))) 
-              dmrsp = dmrspos[1];
-             else if (ndmrs == 4 && symb < dmrspos[2] + (dmrspos[3] - dmrspos[2])/2)
-              dmrsp = dmrspos[2];
-             else if (ndmrs == 4)
-              dmrsp = dmrspos[3];
-	     AssertFatal(dmrsp>0,"dmrsp %d should not be <=0\n",dmrsp);
-             for (int group=0;group<ngroup;group++)
-                for (int aa = 0 ; aa < Prx ; aa++) {
-#ifdef DEBUG_NR_PUCCH_RX
-	          printf("Copying core32 dmrsp %d group %d aa %d (%d,%d) to symb %d\n",dmrsp,group,aa,corr32[dmrsp][group][aa].r,corr32[dmrsp][group][aa].i,symb);
-#endif
-	          corr32[symb][group][aa] = corr32[dmrsp][group][aa];
-	   }
-      }
-    }
-    // Format 3 is decoded as non-coherent set(s) each spanning the WHOLE allocation in frequency
-    // (transform precoding spreads every modulation symbol across all PRBs, so there is no per-PRB
-    // frequency group). With intra-slot frequency hopping the two hops see different channels and
-    // form two non-coherent sets; without hopping the whole slot is one coherent set (all symbols
-    // and all DMRS combine coherently, matching format 2). Non-coherence is only across sets and
-    // antennas. The DMRS channel reference per set is codeword-independent, computed once here.
-    AssertFatal(fmt >= 3, "nr_pucch23_ml_shortblock is only used for PUCCH format 3/4\n");
-    AssertFatal(ngroup == 1, "PUCCH 3 is decoded as a single group spanning the whole allocation\n");
+  // The channel reference lives on the DMRS symbols; give each data symbol the correlation of its
+  // nearest DMRS symbol so the per-symbol combining below has a channel estimate.
+  int dmrsp = -1;
+  for (int symb = 0; symb < nb_symbols; symb++) {
+    if (is_pucch3_dmrs_symbol(symb, dmrspos))
+      continue;
+    if (symb <= (dmrspos[0] + (dmrspos[1] - dmrspos[0]) / 2)) // around the 1st DMRS
+      dmrsp = dmrspos[0];
+    else if (ndmrs == 2 || (ndmrs == 4 && symb < dmrspos[1] + (dmrspos[2] - dmrspos[1]) / 2))
+      dmrsp = dmrspos[1];
+    else if (ndmrs == 4 && symb < dmrspos[2] + (dmrspos[3] - dmrspos[2]) / 2)
+      dmrsp = dmrspos[2];
+    else if (ndmrs == 4)
+      dmrsp = dmrspos[3];
+    AssertFatal(dmrsp > 0, "dmrsp %d should not be <= 0\n", dmrsp);
+    for (int group = 0; group < ngroup; group++)
+      for (int aa = 0; aa < Prx; aa++)
+        corr32[symb][group][aa] = corr32[dmrsp][group][aa];
+  }
+  // Format 3 is decoded as non-coherent set(s) each spanning the WHOLE allocation in frequency
+  // (transform precoding spreads every modulation symbol across all PRBs, so there is no per-PRB
+  // frequency group). With intra-slot frequency hopping the two hops see different channels and
+  // form two non-coherent sets; without hopping the whole slot is one coherent set (all symbols
+  // and all DMRS combine coherently, matching format 2). Non-coherence is only across sets and
+  // antennas. The DMRS channel reference per set is codeword-independent, computed once here.
+  AssertFatal(ngroup == 1, "PUCCH 3 is decoded as a single group spanning the whole allocation\n");
     const bool freq_hop = pucch_pdu->freq_hop_flag;
     const int nsets = freq_hop ? 2 : 1;
     const int nb_re_data = 12 * pucch_pdu->prb_size; // data REs per symbol over the whole allocation
@@ -1764,7 +1758,7 @@ static uint64_t nr_pucch23_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
 
 // Polar-coded (>= 12 bit) decode for PUCCH format 2/3: build non-coherent LLRs on half-PRB
 // groups, run the polar decoder and return its decoder state; decodedPayload receives the bits.
-static int nr_pucch23_decode_polar(const nfapi_nr_pucch_pdu_t *pucch_pdu,
+static int nr_pucch3_decode_polar(const nfapi_nr_pucch_pdu_t *pucch_pdu,
                                    int Prx,
                                    int nb_symbols,
                                    int ndmrs,
@@ -1791,8 +1785,8 @@ static int nr_pucch23_decode_polar(const nfapi_nr_pucch_pdu_t *pucch_pdu,
         for (int cw = 0; cw < 256; cw++) {
           int64_t corr_tmp = 0;
           for (int aa = 0; aa < Prx; aa++) {
-            simde__m128i part1 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch2_3_polar_4bit[cw & 15].cw);
-            simde__m128i part2 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch2_3_polar_4bit[cw >> 4].cw);
+            simde__m128i part1 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch3_polar_4bit[cw & 15].cw);
+            simde__m128i part2 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch3_polar_4bit[cw >> 4].cw);
             simde__m128i factor = simde_mm_unpacklo_epi16(part1, part2);
             simde__m128i re = *(simde__m128i *)&r_ext[aa][symb][half_prb * 4];
             simde__m128i im = *(simde__m128i *)&r_ext2[aa][symb][half_prb * 4];
@@ -1814,8 +1808,8 @@ static int nr_pucch23_decode_polar(const nfapi_nr_pucch_pdu_t *pucch_pdu,
               corr += squaredMod(corr32[symb][group][aa]);
           }
           simde__m128i corr16 = simde_mm_set1_epi16((int16_t)(corr_tmp >> 8));
-          simde__m128i den = simde_mm_xor_si128(pucch2_3_polar_llr_num_lut[cw], ones);
-          llr_num = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, pucch2_3_polar_llr_num_lut[cw]), llr_num);
+          simde__m128i den = simde_mm_xor_si128(pucch3_polar_llr_num_lut[cw], ones);
+          llr_num = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, pucch3_polar_llr_num_lut[cw]), llr_num);
           llr_den = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, den), llr_den);
         }
         // compute llrs
@@ -2064,11 +2058,11 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
         decoderState);
 
   if (nb_bit < 12 && decoderState == 2) { // short blocklength case
-    decodedPayload[0] = nr_pucch23_ml_shortblock(pucch_pdu, slot, fmt, Prx, nb_symbols, ndmrs, ngroup,
-                                                 nc_group_size, nb_bit, dmrspos, nb_re_data_padded,
-                                                 r_ext, r_ext2, corr32);
+    decodedPayload[0] = nr_pucch3_ml_shortblock(pucch_pdu, slot, Prx, nb_symbols, ndmrs, ngroup,
+                                                nc_group_size, nb_bit, dmrspos, nb_re_data_padded,
+                                                r_ext, r_ext2, corr32);
   } else if (nb_bit >= 12) { // polar coded case
-    decoderState = nr_pucch23_decode_polar(pucch_pdu, Prx, nb_symbols, ndmrs, ngroup, nc_group_size,
+    decoderState = nr_pucch3_decode_polar(pucch_pdu, Prx, nb_symbols, ndmrs, ngroup, nc_group_size,
                                            nb_bit, nb_re_data_padded, r_ext, r_ext2, corr32, decodedPayload);
   } else {
     LOG_D(PHY, "PUCCH not processed: nb_bit %d decoderState %d\n", nb_bit, decoderState);
