@@ -8,7 +8,7 @@ as specified in 3GPP TS 38.211, 38.212, and 38.213.
 > **Note:** line-number references in this document are indicative and may drift
 > as the source evolves; use the function names as the primary anchor. Formats 0,
 > 1 and 2 are decoded by `nr_decode_pucch0` / `nr_decode_pucch1` /
-> `nr_decode_pucch2`; format 3 is decoded by `nr_decode_pucch2_3`.
+> `nr_decode_pucch2`; format 3 is decoded by `nr_decode_pucch3`.
 
 ---
 
@@ -17,7 +17,7 @@ as specified in 3GPP TS 38.211, 38.212, and 38.213.
 1. [Overview](#1-overview)
 2. [Format 0 — `nr_decode_pucch0`](#2-pucch-format-0--nr_decode_pucch0)
 3. [Format 1 — `nr_decode_pucch1`](#3-pucch-format-1--nr_decode_pucch1)
-4. [Formats 2 & 3 — `nr_decode_pucch2` / `nr_decode_pucch2_3`](#4-pucch-formats-2--3--nr_decode_pucch2--nr_decode_pucch2_3)
+4. [Formats 2 & 3 — `nr_decode_pucch2` / `nr_decode_pucch3`](#4-pucch-formats-2--3--nr_decode_pucch2--nr_decode_pucch3)
 5. [Helper / Initialisation Functions](#5-helper--initialisation-functions)
 6. [Data Types and Key Structures](#6-data-types-and-key-structures)
 7. [Standards References](#7-standards-references)
@@ -116,15 +116,16 @@ PRB offset on the second symbol.
 ### 2.4 Correlation via 12-Point IDFT
 
 The received vector $\mathbf{y}$ is correlated against each candidate sequence using
-a 12-point IDFT with pre-computed integer tables (`idft12_re`, `idft12_im`):
+a 12-point IDFT with pre-computed integer tables `idft12_re` / `idft12_im`
+(written $T^{\mathrm{re}}_{m,n}$ / $T^{\mathrm{im}}_{m,n}$ below):
 
 $$C_{aa}[m_\text{cs}] = \sum_{n=0}^{11} y_{aa}[n] \cdot s_{m_\text{cs}}^*[n]$$
 
 implemented in fixed-point as:
 
-$$C_{aa}[m_\text{cs}].\mathrm{re} = \sum_n \bigl( y[n].\mathrm{re} \cdot \texttt{idft12\_re}[m_\text{cs}][n] + y[n].\mathrm{im} \cdot \texttt{idft12\_im}[m_\text{cs}][n] \bigr)$$
+$$C_{aa}[m_\text{cs}].\mathrm{re} = \sum_n \bigl( y[n].\mathrm{re} \cdot T^{\mathrm{re}}_{m_\text{cs},n} + y[n].\mathrm{im} \cdot T^{\mathrm{im}}_{m_\text{cs},n} \bigr)$$
 
-$$C_{aa}[m_\text{cs}].\mathrm{im} = \sum_n \bigl( y[n].\mathrm{im} \cdot \texttt{idft12\_re}[m_\text{cs}][n] - y[n].\mathrm{re} \cdot \texttt{idft12\_im}[m_\text{cs}][n] \bigr)$$
+$$C_{aa}[m_\text{cs}].\mathrm{im} = \sum_n \bigl( y[n].\mathrm{im} \cdot T^{\mathrm{re}}_{m_\text{cs},n} - y[n].\mathrm{re} \cdot T^{\mathrm{im}}_{m_\text{cs},n} \bigr)$$
 
 ### 2.5 Multi-Symbol Combining
 
@@ -141,8 +142,8 @@ The ML decision is $\hat{m}_\text{cs} = \arg\max_{m_\text{cs}} \Lambda(m_\text{c
 | `nb_harq_bits` | SR present | Decision |
 |----------------|------------|----------|
 | 0 | yes | SR $= 1$ if $\Lambda_\max > \text{threshold}$, else $0$ |
-| 1 | no/yes | HARQ $= \hat{m}_\text{cs} \gg 3$; SR $= \hat{m}_\text{cs} \mathbin{\&} 1$ |
-| 2 | no/yes | HARQ bits from $(\hat{m}_\text{cs} \gg 2)\mathbin{\&}1$, $(\hat{m}_\text{cs} \gg 3)\mathbin{\&}1$; SR $= \hat{m}_\text{cs} \mathbin{\&} 1$ |
+| 1 | no/yes | HARQ $= \hat{m}_\text{cs} \gg 3$; SR $= \hat{m}_\text{cs} \bmod 2$ |
+| 2 | no/yes | HARQ bits $(\hat{m}_\text{cs} \gg 2)\bmod 2$, $(\hat{m}_\text{cs} \gg 3)\bmod 2$; SR $= \hat{m}_\text{cs} \bmod 2$ |
 
 SNR is computed from the peak-to-average metric ratio and mapped to a CQI
 value (0–255, covering $-64$ to $+63.5$ dB). A configurable threshold
@@ -221,7 +222,7 @@ For frequency hopping, metrics from both hops are summed non-coherently.
 
 ---
 
-## 4. PUCCH Formats 2 & 3 — `nr_decode_pucch2` / `nr_decode_pucch2_3`
+## 4. PUCCH Formats 2 & 3 — `nr_decode_pucch2` / `nr_decode_pucch3`
 
 **Variable symbols and PRBs, 3–64 bits**
 
@@ -233,12 +234,12 @@ small-block code (3–11 bits) or a polar code (12–64 bits), but are decoded b
   (optimised for high connected-UE counts). It uses a width-parameterised ML
   search (`#if defined(__AVX2__)` 256-bit on x86, native 128-bit otherwise) with
   the antipodal even/odd symmetry described in Section 4.6.
-- **Format 3 — `nr_decode_pucch2_3`** — signal extraction, DM-RS processing and
+- **Format 3 — `nr_decode_pucch3`** — signal extraction, DM-RS processing and
   channel estimation for the DFT-s-OFDM format 3, then dispatch of the payload
   decode to one of two helpers by codeword length:
-  - **`nr_pucch23_ml_shortblock()`** — short-block (3–11 bit) maximum-likelihood
+  - **`nr_pucch3_ml_shortblock()`** — short-block (3–11 bit) maximum-likelihood
     correlation decode (Sections 4.6 / 4.6.1).
-  - **`nr_pucch23_decode_polar()`** — polar-coded (12–64 bit) LLR computation and
+  - **`nr_pucch3_decode_polar()`** — polar-coded (12–64 bit) LLR computation and
     decode (Section 4.7).
 
 (Both functions consume `rxdataF` with the same **BWP-relative subcarrier
@@ -247,7 +248,7 @@ mapping** as formats 0/1 — subcarrier index `12 * (prb_start + bwp_start)`, no
 
 | | Format 2 | Format 3 |
 |---|---|---|
-| Function | `nr_decode_pucch2` | `nr_decode_pucch2_3` |
+| Function | `nr_decode_pucch2` | `nr_decode_pucch3` |
 | Symbols | 1–2 | 4–14 |
 | DM-RS density | Every symbol, RE positions 1,4,7,10 per PRB | Sparse: 2 or 4 dedicated DMRS symbols |
 | DM-RS generation | Gold sequence (TS 38.211 §6.4.1.3.2) | Low-PAPR sequence with group/cyclic-shift hopping |
@@ -256,9 +257,10 @@ mapping** as formats 0/1 — subcarrier index `12 * (prb_start + bwp_start)`, no
 ### 4.1 Signal Extraction and Scaling
 
 All received REs are extracted per antenna and symbol into
-`rp[Prx][nb_symbols][nb_re_pucch]`.  Total signal energy is accumulated:
+`rp[Prx][nb_symbols][nb_re_pucch]`.  Total signal energy is accumulated with
+`signal_energy_nodc()` (sum of squared magnitudes, DC removed):
 
-$$E = \sum_{aa,\,l} \texttt{signal\_energy\_nodc}(\mathbf{r}_{aa,l})$$
+$$E = \sum_{aa,\,l} \lVert \mathbf{r}_{aa,l} \rVert^2$$
 
 A scaling exponent is derived to keep subsequent fixed-point products in range:
 
@@ -284,9 +286,9 @@ Throughout the decoder, the predicate `is_pucch3_dmrs_symbol()` (lines
 
 ### 4.3 Data Scrambling
 
-A Gold sequence is initialised with:
+A Gold sequence is initialised with ($n_\text{ID}$ = `data_scrambling_id`):
 
-$$c_\text{init} = (\text{RNTI} \ll 15) + \text{data\_scrambling\_id}$$
+$$c_\text{init} = (\text{RNTI} \ll 15) + n_\text{ID}$$
 
 The binary scrambling sequence is packed into SIMD registers and applied to
 data REs via `simde_mm_sign_epi16()` (multiply by $\pm 1$ per bit).
@@ -334,7 +336,7 @@ reference (and is not populated by the simulator).
 `init_pucch2_luts()` pre-encodes every information word with
 `encodeSmallBlock()` (Reed-Muller / simplex code) and stores the BPSK-mapped
 symbols $b[k] \in \{1,-1\}$ in `pucch2_lut[N-3][cw]` (shared by formats 2 and 3).
-Note that $b[i]$ in TS 38.211 is a binary ${0,1}$ sequence which is mapped to BPSK here for convenience in the receiver.
+Note that $b[i]$ in TS 38.211 is a binary $\{0,1\}$ sequence which is mapped to BPSK here for convenience in the receiver.
 
 #### Signal model and group structure
 
@@ -388,8 +390,8 @@ Let $b'(i) = (1-2b(i))$ and $c'(i) = (1-2c(i))$ so that $\tilde{b}'(i)=(1-2b(i))
 dimension is
 $$r_\text{data}(k) =(b'(2k)c'(2k)+jb'(2k+1)c'(2k+1))h(k) + z(k)$$
 The $k^{\text{th}}$ component of the desired correlation is
-$$\begin{align}r_\text{data}(k)(b'(2k)c'(2k) -jb'(2k+1)c'(2k+1)) = & \text{Re}(r_\text{data}(k))c'(2k)b'(2k) + \text{Im}(r_\text{data}(k))c'(2k+1)b'(2k+1) + \\
-& j(\text{Im}(r_\text{data}(k))c'(2k)b'(2k) - \text{Re}(r_\text{data}(k))c'(2k+1)b'(2k+1))\end{align}$$
+$$\begin{aligned}r_\text{data}(k)(b'(2k)c'(2k) -jb'(2k+1)c'(2k+1)) = & \text{Re}(r_\text{data}(k))c'(2k)b'(2k) + \text{Im}(r_\text{data}(k))c'(2k+1)b'(2k+1) + \\
+& j(\text{Im}(r_\text{data}(k))c'(2k)b'(2k) - \text{Re}(r_\text{data}(k))c'(2k+1)b'(2k+1))\end{aligned}$$
 The receiver first applies the Gold sequence (`c_ptr`) to descramble the received
 REs, splitting into components which will later allow for separation of the real and imaginary components (`r_ext` and `r_ext2`
 in the code). These two components correspond to the real and imaginary parts of the $k^\text{th}$ component of the overall correlation shown above and are
@@ -403,10 +405,10 @@ For each candidate codeword
 $\mathbf{b}$, the descrambled REs are correlated against the LUT and accumulated
 into $Z$:
 
-$$\begin{align} Z[g,aa](\mathbf{b}) \mathrel{+}= \sum_{l} \sum_{k \in \mathcal{K}_\text{data}(g)}
+$$\begin{aligned} Z[g,aa](\mathbf{b}) \mathrel{+}= \sum_{l} \sum_{k \in \mathcal{K}_\text{data}(g)}
 \bigl(&\mathrm{Re}(r_\text{ext}[aa,l,k]) \cdot b'[2k] + \mathrm{Im}(r_\text{ext}[aa,l,k]) \cdot b'[2k+1] + \bigr. \\
 & j(\mathrm{Re}(r_\text{ext2}[aa,l,k]) \cdot b'[2k] + \mathrm{Im}(r_\text{ext2}[aa,l,k]) \cdot b'[2k+1]) \bigr)
-\end{align}$$
+\end{aligned}$$
 
 where $L$ is the number of data symbols. After both DMRS initialisation and
 data accumulation:
@@ -510,7 +512,7 @@ $$\lambda_b^+ = \max_{\mathbf{c}:\,c_b=1} \rho(\mathbf{c}), \qquad
 $$\text{LLR}[b] = \lambda_b^+ - \lambda_b^-$$
 
 where $\rho(\mathbf{c})$ is the per-group correlation energy. LUT tables
-(`pucch2_3_polar_llr_num_lut`) pre-encode the bit-to-pattern mapping as SIMD
+(`pucch3_polar_llr_num_lut`) pre-encode the bit-to-pattern mapping as SIMD
 registers, enabling vectorised accumulation.
 
 **Polar decoding:**
@@ -545,11 +547,11 @@ calls `nr_cyclic_shift_hopping()`, converts to an integer index (dividing by
 $\pi/6$), and stores in a flat LUT.  Returns the cache slot index for use by
 `nr_decode_pucch0`.
 
-### `init_pucch2_3_luts()`
+### `init_pucch3_luts()`
 
 Called once at gNB startup. Populates only the format-3 **polar** helper LUTs:
 
-- `pucch2_3_polar_4bit[16]` and `pucch2_3_polar_llr_num_lut[256]` — 4-/8-bit
+- `pucch3_polar_4bit[16]` and `pucch3_polar_llr_num_lut[256]` — 4-/8-bit
   partial-codeword patterns packed into SIMD registers for the polar LLR
   computation.
 
@@ -573,12 +575,12 @@ Format 2, whose `dmrspos[]` entries are all `-1`).
 Fills the Format 3 DMRS symbol positions `dmrspos[0..3]` from TS 38.211
 Table 6.4.1.3.3.2-1 and returns the number of DMRS symbols (see Section 4.2).
 
-### `nr_pucch23_ml_shortblock()` (lines 1149–1380)
+### `nr_pucch3_ml_shortblock()` (lines 1149–1380)
 
 Short-block (3–11 bit) maximum-likelihood decode for Formats 2 and 3
 (Sections 4.6 / 4.6.1).  Returns the ML codeword.
 
-### `nr_pucch23_decode_polar()` (lines 1385–1458)
+### `nr_pucch3_decode_polar()` (lines 1385–1458)
 
 Polar-coded (12–64 bit) decode for Formats 2 and 3 (Section 4.7).  Computes
 non-coherent LLRs, runs the polar decoder, and returns its decoder state.

@@ -515,7 +515,7 @@ void nr_decode_pucch1(PHY_VARS_gNB *gNB,
   // regardless of whether the frequency-hop distance is zero or not,
   // otherwise no intra-slot frequency hopping shall be assumed
   // uint8_t PUCCH_Frequency_Hopping = 0 ; // from higher layers
-  const bool intraSlotFrequencyHopping = pucch_pdu->prb_start != pucch_pdu->second_hop_prb;
+  const bool intraSlotFrequencyHopping = pucch_pdu->freq_hop_flag;
   const float inv_sqrt2 = 0.70710678118f; // 1 / sqrt(2)
   int64_t signal_energy = 0, signal_energy_ant0 = 0;
   uint8_t nb_re_pucch = pucch_pdu->prb_size * NR_NB_SC_PER_RB;
@@ -1963,7 +1963,7 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
 
     // generate the transmitted DMRS sequence
     AssertFatal(nb_re_dmrs <= 36, "PUCCH3 nb_re_dmrs %d not supported (should be <= 36)\n", nb_re_dmrs);
-    const bool intraSlotFrequencyHopping = pucch_pdu->prb_start != pucch_pdu->second_hop_prb;
+    const bool intraSlotFrequencyHopping = pucch_pdu->freq_hop_flag;
     pucch_GroupHopping_t pucch_GroupHopping = pucch_pdu->group_hop_flag + (pucch_pdu->sequence_hop_flag << 1);
     const int l = dmrspos[d];
     // n_hop = 0 without hopping; with hopping, 0 for the first hop and 1 for the second

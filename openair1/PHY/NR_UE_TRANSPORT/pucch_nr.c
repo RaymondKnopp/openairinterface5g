@@ -1046,8 +1046,12 @@ void nr_generate_pucch3_4(c16_t **txdataF,
     pucch_GroupHopping_t pucch_GroupHopping = pucch_pdu->group_hop_flag + (pucch_pdu->sequence_hop_flag<<1);
     nr_group_sequence_hopping(pucch_GroupHopping,pucch_pdu->hopping_id,n_hop,nr_slot_tx,&u,&v); // calculating u and v value
 
+    // (u,v) only change at the hop boundary (nr_group_sequence_hopping depends on n_hop, not the
+    // symbol index), so regenerate the base sequence on the first symbol of each hop only.
+    const bool regen_base = (l == 0) || (intraSlotFrequencyHopping && l == (int)floor(nrofSymbols / 2));
+
     // Next we proceed to calculate base sequence for DM-RS signal, according to TS 38.211 subclause 6.4.1.33
-    if (l==0 && nrofPRB >= 3) { // TS 38.211 subclause 5.2.2.1 (Base sequences of length 36 or larger) applies
+    if (regen_base && nrofPRB >= 3) { // TS 38.211 subclause 5.2.2.1 (Base sequences of length 36 or larger) applies
       // N_ZC is the largest prime number such that N_ZC < (12*nrofPRB)
       int i = 4;
       while (list_of_prime_numbers[i] < (12 * nrofPRB))
@@ -1071,7 +1075,7 @@ void nr_generate_pucch3_4(c16_t **txdataF,
       }
     }
 
-    if (l==0 && nrofPRB == 2) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-4) applies
+    if (regen_base && nrofPRB == 2) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-4) applies
       for (int n = 0; n < 12 * nrofPRB; n++) {
         c16_t table = {table_5_2_2_2_4_Re[u][n], table_5_2_2_2_4_Im[u][n]};
         r_u_v_base[n] = c16mulRealShift(table, amp, 15);
@@ -1085,7 +1089,7 @@ void nr_generate_pucch3_4(c16_t **txdataF,
       }
     }
 
-    if (l==0 && nrofPRB == 1) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-2) applies
+    if (regen_base && nrofPRB == 1) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-2) applies
       for (int n = 0; n < 12 * nrofPRB; n++) {
         c16_t table = {table_5_2_2_2_2_Re[u][n], table_5_2_2_2_2_Im[u][n]};
         r_u_v_base[n] = c16mulRealShift(table, amp, 15);
