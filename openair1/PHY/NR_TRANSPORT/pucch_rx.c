@@ -1566,7 +1566,6 @@ void nr_decode_pucch2(PHY_VARS_gNB *gNB,
   }
 }
 
-
 /* ===== PUCCH format 3 reception (from pucch3_L1); format 2 handled by nr_decode_pucch2 above =====
  * The small-block codeword LUT is identical to format 2's (pucch2_lut, filled by
  * init_pucch2_luts), so format 3 reuses it. Only the polar helper LUTs are format-3 specific. */
@@ -1598,12 +1597,12 @@ void init_pucch3_luts()
   }
 }
 
-static const int dmrs0[11] = {0,0,1,1,1,1,2,2,2,2,3};
-static const int dmrs1[11] = {2,3,4,4,5,6,7,7,8,9,10};
-static const int dmrs0add[11] = {0,0,1,1,1,1,1,1,1,1,1};
-static const int dmrs1add[11] = {2,3,4,4,5,6,3,3,4,4,5};
-static const int dmrs2add[11] = {-1,-1,-1,-1,-1,-1,6,6,7,7,8};
-static const int dmrs3add[11] = {-1,-1,-1,-1,-1,-1,8,9,10,11,12};
+static const int dmrs0[11] = {0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3};
+static const int dmrs1[11] = {2, 3, 4, 4, 5, 6, 7, 7, 8, 9, 10};
+static const int dmrs0add[11] = {0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+static const int dmrs1add[11] = {2, 3, 4, 4, 5, 6, 3, 3, 4, 4, 5};
+static const int dmrs2add[11] = {-1, -1, -1, -1, -1, -1, 6, 6, 7, 7, 8};
+static const int dmrs3add[11] = {-1, -1, -1, -1, -1, -1, 8, 9, 10, 11, 12};
 
 // Returns true if PUCCH format 3/4 symbol index symb carries DMRS.
 // Unused entries in dmrspos[] are -1, so this is always false for format 2.
@@ -1644,18 +1643,18 @@ static int nr_pucch3_dmrs_positions(int nb_symbols, bool freq_hop, bool add_dmrs
 // Short-block (< 12 bit) maximum-likelihood decode for PUCCH format 2/3: correlate the received
 // data against every candidate codeword and return the ML codeword.
 static uint64_t nr_pucch3_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
-                                         int slot,
-                                         int Prx,
-                                         int nb_symbols,
-                                         int ndmrs,
-                                         int ngroup,
-                                         int nc_group_size,
-                                         int nb_bit,
-                                         const int dmrspos[4],
-                                         int nb_re_data_padded,
-                                         c16_t r_ext[Prx][nb_symbols - ndmrs][nb_re_data_padded],
-                                         c16_t r_ext2[Prx][nb_symbols - ndmrs][nb_re_data_padded],
-                                         c32_t corr32[nb_symbols][ngroup][Prx])
+                                        int slot,
+                                        int Prx,
+                                        int nb_symbols,
+                                        int ndmrs,
+                                        int ngroup,
+                                        int nc_group_size,
+                                        int nb_bit,
+                                        const int dmrspos[4],
+                                        int nb_re_data_padded,
+                                        c16_t r_ext[Prx][nb_symbols - ndmrs][nb_re_data_padded],
+                                        c16_t r_ext2[Prx][nb_symbols - ndmrs][nb_re_data_padded],
+                                        c32_t corr32[nb_symbols][ngroup][Prx])
 {
   uint8_t corr_dB;
   // The channel reference lives on the DMRS symbols; give each data symbol the correlation of its
@@ -1684,155 +1683,153 @@ static uint64_t nr_pucch3_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
   // and all DMRS combine coherently, matching format 2). Non-coherence is only across sets and
   // antennas. The DMRS channel reference per set is codeword-independent, computed once here.
   AssertFatal(ngroup == 1, "PUCCH 3 is decoded as a single group spanning the whole allocation\n");
-    const bool freq_hop = pucch_pdu->freq_hop_flag;
-    const int nsets = freq_hop ? 2 : 1;
-    const int nb_re_data = 12 * pucch_pdu->prb_size; // data REs per symbol over the whole allocation
-    const int nchunk = nb_re_data / 4;               // 128-bit chunks (4 complex REs each)
-    const int ndata = nb_symbols - ndmrs;
-    c64_t dmrs_ref[2][Prx];
-    memset(dmrs_ref, 0, sizeof(dmrs_ref));
-    for (int aa = 0; aa < Prx; aa++)
-      for (int d = 0; d < ndmrs; d++) {
-        const int set = (freq_hop && d >= ndmrs / 2) ? 1 : 0; // 1st half of DMRS -> hop 0, 2nd -> hop 1
-        csum(dmrs_ref[set][aa], dmrs_ref[set][aa], corr32[dmrspos[d]][0][aa]);
-      }
+  const bool freq_hop = pucch_pdu->freq_hop_flag;
+  const int nsets = freq_hop ? 2 : 1;
+  const int nb_re_data = 12 * pucch_pdu->prb_size; // data REs per symbol over the whole allocation
+  const int nchunk = nb_re_data / 4; // 128-bit chunks (4 complex REs each)
+  const int ndata = nb_symbols - ndmrs;
+  c64_t dmrs_ref[2][Prx];
+  memset(dmrs_ref, 0, sizeof(dmrs_ref));
+  for (int aa = 0; aa < Prx; aa++)
+    for (int d = 0; d < ndmrs; d++) {
+      const int set = (freq_hop && d >= ndmrs / 2) ? 1 : 0; // 1st half of DMRS -> hop 0, 2nd -> hop 1
+      csum(dmrs_ref[set][aa], dmrs_ref[set][aa], corr32[dmrspos[d]][0][aa]);
+    }
 
-    uint64_t corr = 0;
-    int cw_ML = 0;
-    // Antipodal symmetry: codeword cw+1 = cw ^ basis[0] (the all-ones basis vector), so its
-    // modulated sequence is the negation of cw's and its data correlation is -D. We correlate
-    // only the even codeword to get D once, then derive both metrics -- even (cw) =
-    // |dmrs_ref + D|^2, odd (cw+1) = |dmrs_ref - D|^2 -- halving the correlations.
-    for (int cw = 0; cw < 1 << nb_bit; cw += 2) {
-      const simde__m128i *modcw = (simde__m128i *)&pucch2_lut[nb_bit - 3][cw].cw;
-      c64_t D[2][Prx];
-      memset(D, 0, sizeof(D));
-      for (int aa = 0; aa < Prx; aa++) {
-        int ci = 0;
-        for (int symb = 0; symb < ndata; symb++) {
-          const int set = (freq_hop && symb >= ndata / 2) ? 1 : 0;
-          const simde__m128i *rext = (simde__m128i *)r_ext[aa][symb];
-          const simde__m128i *rext2 = (simde__m128i *)r_ext2[aa][symb];
-          // coherent correlation over the whole allocation (nb_re_data REs) of this symbol
-          simde__m128i re = simde_mm_setzero_si128();
-          simde__m128i im = simde_mm_setzero_si128();
-          for (int k = 0; k < nchunk; k++) {
-            re = simde_mm_add_epi32(re, simde_mm_madd_epi16(modcw[ci], rext[k]));
-            im = simde_mm_add_epi32(im, simde_mm_madd_epi16(modcw[ci], rext2[k]));
-            ci = (ci + 1) & 3;
-          }
-          // Pack re and im into a single hadd chain (as nr_decode_pucch2 does): two hadds instead
-          // of four, ending in one scalar read per component.
-          simde__m128i ri = simde_mm_hadd_epi32(re, im);
-          ri = simde_mm_hadd_epi32(ri, ri);
-          const int32_t *v = (const int32_t *)&ri;
-          c32_t prod = (c32_t){v[0], v[1]};
-          csum(D[set][aa], D[set][aa], prod);
-        } // symb loop
-      } // aa loop
-
-      uint64_t corr_even = 0, corr_odd = 0;
-      for (int set = 0; set < nsets; set++)
-        for (int aa = 0; aa < Prx; aa++) {
-          const c64_t ref = dmrs_ref[set][aa], d = D[set][aa];
-          corr_even += squaredMod(((c64_t){ref.r + d.r, ref.i + d.i}));
-          corr_odd  += squaredMod(((c64_t){ref.r - d.r, ref.i - d.i}));
+  uint64_t corr = 0;
+  int cw_ML = 0;
+  // Antipodal symmetry: codeword cw+1 = cw ^ basis[0] (the all-ones basis vector), so its
+  // modulated sequence is the negation of cw's and its data correlation is -D. We correlate
+  // only the even codeword to get D once, then derive both metrics -- even (cw) =
+  // |dmrs_ref + D|^2, odd (cw+1) = |dmrs_ref - D|^2 -- halving the correlations.
+  for (int cw = 0; cw < 1 << nb_bit; cw += 2) {
+    const simde__m128i *modcw = (simde__m128i *)&pucch2_lut[nb_bit - 3][cw].cw;
+    c64_t D[2][Prx];
+    memset(D, 0, sizeof(D));
+    for (int aa = 0; aa < Prx; aa++) {
+      int ci = 0;
+      for (int symb = 0; symb < ndata; symb++) {
+        const int set = (freq_hop && symb >= ndata / 2) ? 1 : 0;
+        const simde__m128i *rext = (simde__m128i *)r_ext[aa][symb];
+        const simde__m128i *rext2 = (simde__m128i *)r_ext2[aa][symb];
+        // coherent correlation over the whole allocation (nb_re_data REs) of this symbol
+        simde__m128i re = simde_mm_setzero_si128();
+        simde__m128i im = simde_mm_setzero_si128();
+        for (int k = 0; k < nchunk; k++) {
+          re = simde_mm_add_epi32(re, simde_mm_madd_epi16(modcw[ci], rext[k]));
+          im = simde_mm_add_epi32(im, simde_mm_madd_epi16(modcw[ci], rext2[k]));
+          ci = (ci + 1) & 3;
         }
-      if (corr_even > corr) {
-        corr = corr_even;
-        cw_ML = cw;
+        // Pack re and im into a single hadd chain (as nr_decode_pucch2 does): two hadds instead
+        // of four, ending in one scalar read per component.
+        simde__m128i ri = simde_mm_hadd_epi32(re, im);
+        ri = simde_mm_hadd_epi32(ri, ri);
+        const int32_t *v = (const int32_t *)&ri;
+        c32_t prod = (c32_t){v[0], v[1]};
+        csum(D[set][aa], D[set][aa], prod);
+      } // symb loop
+    } // aa loop
+
+    uint64_t corr_even = 0, corr_odd = 0;
+    for (int set = 0; set < nsets; set++)
+      for (int aa = 0; aa < Prx; aa++) {
+        const c64_t ref = dmrs_ref[set][aa], d = D[set][aa];
+        corr_even += squaredMod(((c64_t){ref.r + d.r, ref.i + d.i}));
+        corr_odd += squaredMod(((c64_t){ref.r - d.r, ref.i - d.i}));
       }
-      if (corr_odd > corr) {
-        corr = corr_odd;
-        cw_ML = cw + 1;
-      }
-    } // cw loop
-    corr_dB = dB_fixed64(corr);
+    if (corr_even > corr) {
+      corr = corr_even;
+      cw_ML = cw;
+    }
+    if (corr_odd > corr) {
+      corr = corr_odd;
+      cw_ML = cw + 1;
+    }
+  } // cw loop
+  corr_dB = dB_fixed64(corr);
 #ifdef DEBUG_NR_PUCCH_RX
-    printf("slot %d PUCCH2 cw_ML %d, metric %d \n", slot, cw_ML, corr_dB);
+  printf("slot %d PUCCH2 cw_ML %d, metric %d \n", slot, cw_ML, corr_dB);
 #endif
   (void)corr_dB;
   return (uint64_t)cw_ML;
 }
 
-
 // Polar-coded (>= 12 bit) decode for PUCCH format 2/3: build non-coherent LLRs on half-PRB
 // groups, run the polar decoder and return its decoder state; decodedPayload receives the bits.
 static int nr_pucch3_decode_polar(const nfapi_nr_pucch_pdu_t *pucch_pdu,
-                                   int Prx,
-                                   int nb_symbols,
-                                   int ndmrs,
-                                   int ngroup,
-                                   int nc_group_size,
-                                   int nb_bit,
-                                   int nb_re_data_padded,
-                                   c16_t r_ext[Prx][nb_symbols - ndmrs][nb_re_data_padded],
-                                   c16_t r_ext2[Prx][nb_symbols - ndmrs][nb_re_data_padded],
-                                   c32_t corr32[nb_symbols][ngroup][Prx],
-                                   uint64_t *decodedPayload)
+                                  int Prx,
+                                  int nb_symbols,
+                                  int ndmrs,
+                                  int ngroup,
+                                  int nc_group_size,
+                                  int nb_bit,
+                                  int nb_re_data_padded,
+                                  c16_t r_ext[Prx][nb_symbols - ndmrs][nb_re_data_padded],
+                                  c16_t r_ext2[Prx][nb_symbols - ndmrs][nb_re_data_padded],
+                                  c32_t corr32[nb_symbols][ngroup][Prx],
+                                  uint64_t *decodedPayload)
 {
   int decoderState;
   uint8_t corr_dB;
-    simde__m128i llrs[pucch_pdu->prb_size * 2 * nb_symbols];
-    // non-coherent LLR computation on groups of 4 REs (half-PRBs)
-    uint64_t corr = 0;
-    const simde__m128i ones = simde_mm_set1_epi16(1);
-    for (int symb = 0; symb < nb_symbols; symb++) {
-      for (int half_prb = 0; half_prb < (2 * pucch_pdu->prb_size); half_prb++) {
-	int group = (6*half_prb)/(12*nc_group_size);
-        simde__m128i llr_num = simde_mm_set1_epi16(0);
-        simde__m128i llr_den = simde_mm_set1_epi16(0);
-        for (int cw = 0; cw < 256; cw++) {
-          int64_t corr_tmp = 0;
-          for (int aa = 0; aa < Prx; aa++) {
-            simde__m128i part1 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch3_polar_4bit[cw & 15].cw);
-            simde__m128i part2 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch3_polar_4bit[cw >> 4].cw);
-            simde__m128i factor = simde_mm_unpacklo_epi16(part1, part2);
-            simde__m128i re = *(simde__m128i *)&r_ext[aa][symb][half_prb * 4];
-            simde__m128i im = *(simde__m128i *)&r_ext2[aa][symb][half_prb * 4];
-            simde__m128i prod_re = simde_mm_madd_epi16(re, factor);
-            simde__m128i prod_im = simde_mm_madd_epi16(im, factor);
-            prod_re = simde_mm_hadd_epi32(prod_re, prod_re);
-            prod_im = simde_mm_hadd_epi32(prod_im, prod_im);
-            prod_re = simde_mm_hadd_epi32(prod_re, prod_re);
-            prod_im = simde_mm_hadd_epi32(prod_im, prod_im);
-            simde__m128i prod = simde_mm_srai_epi32(simde_mm_unpacklo_epi32(prod_re, prod_im), 5);
-            c64_t corr64 = (c64_t){corr32[symb][group][aa].r / (2 * nc_group_size * 4 / 2),
-                                   corr32[symb][group][aa].i / (2 * nc_group_size * 4 / 2)};
-            //  _mm_srai_epi64 is missing in SIMDE package, we need to update it
-            c64_t prod2 = {simde_mm_extract_epi32(prod, 0), simde_mm_extract_epi32(prod, 1)};
-            csum(prod2, prod2, corr64);
-            corr_tmp += squaredMod(prod2) >> (Prx / 2);
-            // this is for UL CQI measurement
-            if (cw == 0)
-              corr += squaredMod(corr32[symb][group][aa]);
-          }
-          simde__m128i corr16 = simde_mm_set1_epi16((int16_t)(corr_tmp >> 8));
-          simde__m128i den = simde_mm_xor_si128(pucch3_polar_llr_num_lut[cw], ones);
-          llr_num = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, pucch3_polar_llr_num_lut[cw]), llr_num);
-          llr_den = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, den), llr_den);
+  simde__m128i llrs[pucch_pdu->prb_size * 2 * nb_symbols];
+  // non-coherent LLR computation on groups of 4 REs (half-PRBs)
+  uint64_t corr = 0;
+  const simde__m128i ones = simde_mm_set1_epi16(1);
+  for (int symb = 0; symb < nb_symbols; symb++) {
+    for (int half_prb = 0; half_prb < (2 * pucch_pdu->prb_size); half_prb++) {
+      int group = (6 * half_prb) / (12 * nc_group_size);
+      simde__m128i llr_num = simde_mm_set1_epi16(0);
+      simde__m128i llr_den = simde_mm_set1_epi16(0);
+      for (int cw = 0; cw < 256; cw++) {
+        int64_t corr_tmp = 0;
+        for (int aa = 0; aa < Prx; aa++) {
+          simde__m128i part1 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch3_polar_4bit[cw & 15].cw);
+          simde__m128i part2 = simde_mm_set_epi64x(0ULL, *(int64_t *)&pucch3_polar_4bit[cw >> 4].cw);
+          simde__m128i factor = simde_mm_unpacklo_epi16(part1, part2);
+          simde__m128i re = *(simde__m128i *)&r_ext[aa][symb][half_prb * 4];
+          simde__m128i im = *(simde__m128i *)&r_ext2[aa][symb][half_prb * 4];
+          simde__m128i prod_re = simde_mm_madd_epi16(re, factor);
+          simde__m128i prod_im = simde_mm_madd_epi16(im, factor);
+          prod_re = simde_mm_hadd_epi32(prod_re, prod_re);
+          prod_im = simde_mm_hadd_epi32(prod_im, prod_im);
+          prod_re = simde_mm_hadd_epi32(prod_re, prod_re);
+          prod_im = simde_mm_hadd_epi32(prod_im, prod_im);
+          simde__m128i prod = simde_mm_srai_epi32(simde_mm_unpacklo_epi32(prod_re, prod_im), 5);
+          c64_t corr64 = (c64_t){corr32[symb][group][aa].r / (2 * nc_group_size * 4 / 2),
+                                 corr32[symb][group][aa].i / (2 * nc_group_size * 4 / 2)};
+          //  _mm_srai_epi64 is missing in SIMDE package, we need to update it
+          c64_t prod2 = {simde_mm_extract_epi32(prod, 0), simde_mm_extract_epi32(prod, 1)};
+          csum(prod2, prod2, corr64);
+          corr_tmp += squaredMod(prod2) >> (Prx / 2);
+          // this is for UL CQI measurement
+          if (cw == 0)
+            corr += squaredMod(corr32[symb][group][aa]);
         }
-        // compute llrs
-        llrs[half_prb + symb * 2 * pucch_pdu->prb_size] = simde_mm_subs_epi16(llr_num, llr_den);
-        LOG_DDUMP(PHY, llrs + half_prb + symb * 2 * pucch_pdu->prb_size, 8, LOG_DUMP_I16, "llrs:");
-      } // half_prb
-    } // symb
+        simde__m128i corr16 = simde_mm_set1_epi16((int16_t)(corr_tmp >> 8));
+        simde__m128i den = simde_mm_xor_si128(pucch3_polar_llr_num_lut[cw], ones);
+        llr_num = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, pucch3_polar_llr_num_lut[cw]), llr_num);
+        llr_den = simde_mm_max_epi16(simde_mm_mullo_epi16(corr16, den), llr_den);
+      }
+      // compute llrs
+      llrs[half_prb + symb * 2 * pucch_pdu->prb_size] = simde_mm_subs_epi16(llr_num, llr_den);
+      LOG_DDUMP(PHY, llrs + half_prb + symb * 2 * pucch_pdu->prb_size, 8, LOG_DUMP_I16, "llrs:");
+    } // half_prb
+  } // symb
 
-    // run polar decoder on llrs
-    decoderState =
-        polar_decoder_int16((int16_t *)llrs, decodedPayload, 0, NR_POLAR_UCI_PUCCH_MESSAGE_TYPE, nb_bit, pucch_pdu->prb_size);
+  // run polar decoder on llrs
+  decoderState =
+      polar_decoder_int16((int16_t *)llrs, decodedPayload, 0, NR_POLAR_UCI_PUCCH_MESSAGE_TYPE, nb_bit, pucch_pdu->prb_size);
 
-    // Decoder reversal
-    decodedPayload[0] = reverse_bits(decodedPayload[0], nb_bit);
+  // Decoder reversal
+  decodedPayload[0] = reverse_bits(decodedPayload[0], nb_bit);
 
-    if (decoderState > 0)
-      decoderState = 1;
-    corr_dB = dB_fixed64(corr);
-    LOG_D(PHY, "metric %d dB\n", corr_dB);
+  if (decoderState > 0)
+    decoderState = 1;
+  corr_dB = dB_fixed64(corr);
+  LOG_D(PHY, "metric %d dB\n", corr_dB);
   (void)corr_dB;
   return decoderState;
 }
-
 
 void nr_decode_pucch3(PHY_VARS_gNB *gNB,
                       c16_t **rxdataF,
@@ -1854,7 +1851,13 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
   // extract pucch and dmrs first
 #ifdef DEBUG_NR_PUCCH_RX
   printf("Frame.Slot %d.%d PUCCH format 3 RX : start_symbol_index %d numSymb %d start_prb %d numPRB %d freq_hop %d\n",
-         frame, slot, pucch_pdu->start_symbol_index, nb_symbols, pucch_pdu->prb_start, pucch_pdu->prb_size, pucch_pdu->freq_hop_flag);
+         frame,
+         slot,
+         pucch_pdu->start_symbol_index,
+         nb_symbols,
+         pucch_pdu->prb_start,
+         pucch_pdu->prb_size,
+         pucch_pdu->freq_hop_flag);
 #endif
   int l2 = pucch_pdu->start_symbol_index;
   int soffset = (slot % RU_RX_SLOT_DEPTH) * frame_parms->symbols_per_slot * frame_parms->ofdm_symbol_size;
@@ -1995,9 +1998,12 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
     if (is_dmrs) {
       // DMRS symbol: accumulate the (channel) reference correlation per group and antenna
       int d = 0;
-      if (symb == dmrspos[1]) d = 1;
-      if (symb == dmrspos[2]) d = 2;
-      if (symb == dmrspos[3]) d = 3;
+      if (symb == dmrspos[1])
+        d = 1;
+      if (symb == dmrspos[2])
+        d = 2;
+      if (symb == dmrspos[3])
+        d = 3;
       for (int aa = 0; aa < Prx; aa++) {
         c16_t *pil_ptr = r_u_v_alpha_delta_dmrs_p;
         for (int prb = 0; prb < pucch_pdu->prb_size; prb++) {
@@ -2022,7 +2028,8 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
         for (int i = 0; i < nb_re_data / 4; i++) {
           simde__m128i tmp = simde_mm_srai_epi16(((simde__m128i *)idft_out[aa])[i], scaling);
           br_ptr[i] = simde_mm_sign_epi16(tmp, c_ptr[i]); // unscrambled [Re Im] sequence
-          bi_ptr[i] = oai_mm_conj(simde_mm_sign_epi16(simde_mm_shuffle_epi8(tmp, swap128), c_ptr[i])); // unscrambled [Im -Re] sequence
+          bi_ptr[i] =
+              oai_mm_conj(simde_mm_sign_epi16(simde_mm_shuffle_epi8(tmp, swap128), c_ptr[i])); // unscrambled [Im -Re] sequence
         }
       }
       s3++;
@@ -2058,12 +2065,32 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
         decoderState);
 
   if (nb_bit < 12 && decoderState == 2) { // short blocklength case
-    decodedPayload[0] = nr_pucch3_ml_shortblock(pucch_pdu, slot, Prx, nb_symbols, ndmrs, ngroup,
-                                                nc_group_size, nb_bit, dmrspos, nb_re_data_padded,
-                                                r_ext, r_ext2, corr32);
+    decodedPayload[0] = nr_pucch3_ml_shortblock(pucch_pdu,
+                                                slot,
+                                                Prx,
+                                                nb_symbols,
+                                                ndmrs,
+                                                ngroup,
+                                                nc_group_size,
+                                                nb_bit,
+                                                dmrspos,
+                                                nb_re_data_padded,
+                                                r_ext,
+                                                r_ext2,
+                                                corr32);
   } else if (nb_bit >= 12) { // polar coded case
-    decoderState = nr_pucch3_decode_polar(pucch_pdu, Prx, nb_symbols, ndmrs, ngroup, nc_group_size,
-                                           nb_bit, nb_re_data_padded, r_ext, r_ext2, corr32, decodedPayload);
+    decoderState = nr_pucch3_decode_polar(pucch_pdu,
+                                          Prx,
+                                          nb_symbols,
+                                          ndmrs,
+                                          ngroup,
+                                          nc_group_size,
+                                          nb_bit,
+                                          nb_re_data_padded,
+                                          r_ext,
+                                          r_ext2,
+                                          corr32,
+                                          decodedPayload);
   } else {
     LOG_D(PHY, "PUCCH not processed: nb_bit %d decoderState %d\n", nb_bit, decoderState);
   }

@@ -763,26 +763,110 @@ void nr_generate_pucch3_4(c16_t **txdataF,
   uint16_t startingPRB = pucch_pdu->prb_start + pucch_pdu->bwp_start;
   uint8_t add_dmrs = pucch_pdu->add_dmrs_flag;
 #ifdef DEBUG_NR_PUCCH_TX
-  int ndmrs=0;
+  int ndmrs = 0;
 #endif
   uint8_t table_6_4_1_3_3_2_1_dmrs_positions[11][14] = {
-    {(intraSlotFrequencyHopping==0)?0:1,(intraSlotFrequencyHopping==0)?1:0,(intraSlotFrequencyHopping==0)?0:1,0,0,0,0,0,0,0,0,0,0,0}, // PUCCH length = 4
-    {1,0,0,1,0,0,0,0,0,0,0,0,0,0}, // PUCCH length = 5
-    {0,1,0,0,1,0,0,0,0,0,0,0,0,0}, // PUCCH length = 6
-    {0,1,0,0,1,0,0,0,0,0,0,0,0,0}, // PUCCH length = 7
-    {0,1,0,0,0,1,0,0,0,0,0,0,0,0}, // PUCCH length = 8
-    {0,1,0,0,0,0,1,0,0,0,0,0,0,0}, // PUCCH length = 9
-    {0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),(add_dmrs==0?0:1),0,0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),(add_dmrs==0?0:1),0,0,0,0,0}, // PUCCH length = 10
-    {0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),(add_dmrs==0?0:1),0,0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0,0,0,0}, // PUCCH length = 11
-    {0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0,0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0,0,0}, // PUCCH length = 12
-    {0,(add_dmrs==0?0:1),(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0,0,(add_dmrs==0?0:1),0,(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0,0}, // PUCCH length = 13
-    {0,(add_dmrs==0?0:1),0,(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0,0,(add_dmrs==0?0:1),0,(add_dmrs==0?1:0),0,(add_dmrs==0?0:1),0}  // PUCCH length = 14
+      {(intraSlotFrequencyHopping == 0) ? 0 : 1,
+       (intraSlotFrequencyHopping == 0) ? 1 : 0,
+       (intraSlotFrequencyHopping == 0) ? 0 : 1,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0,
+       0}, // PUCCH length = 4
+      {1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // PUCCH length = 5
+      {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // PUCCH length = 6
+      {0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0}, // PUCCH length = 7
+      {0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0}, // PUCCH length = 8
+      {0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0}, // PUCCH length = 9
+      {0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       0,
+       0,
+       0}, // PUCCH length = 10
+      {0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       0,
+       0}, // PUCCH length = 11
+      {0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       0}, // PUCCH length = 12
+      {0,
+       (add_dmrs == 0 ? 0 : 1),
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0}, // PUCCH length = 13
+      {0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0,
+       (add_dmrs == 0 ? 1 : 0),
+       0,
+       (add_dmrs == 0 ? 0 : 1),
+       0} // PUCCH length = 14
   };
 #ifdef DEBUG_NR_PUCCH_TX
-  for (int l=0;l<nrofSymbols;l++)  
-     if (table_6_4_1_3_3_2_1_dmrs_positions[nrofSymbols-4][l] == 1) ndmrs++;
+  for (int l = 0; l < nrofSymbols; l++)
+    if (table_6_4_1_3_3_2_1_dmrs_positions[nrofSymbols - 4][l] == 1)
+      ndmrs++;
 
-    printf("\t [nr_generate_pucch3_4] nrofSymbols %d, nrofPRB %d, startingPRB %d, add_dmrs %d is_pi_over_2_bpsk_enabled %d\n",nrofSymbols,nrofPRB,startingPRB,add_dmrs,is_pi_over_2_bpsk_enabled);
+  printf("\t [nr_generate_pucch3_4] nrofSymbols %d, nrofPRB %d, startingPRB %d, add_dmrs %d is_pi_over_2_bpsk_enabled %d\n",
+         nrofSymbols,
+         nrofPRB,
+         startingPRB,
+         add_dmrs,
+         is_pi_over_2_bpsk_enabled);
 #endif
 
   M_bit = nr_pucch_output_sequence_length(pucch_pdu->format_type,
@@ -1075,7 +1159,8 @@ void nr_generate_pucch3_4(c16_t **txdataF,
       }
     }
 
-    if (regen_base && nrofPRB == 2) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-4) applies
+    if (regen_base
+        && nrofPRB == 2) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-4) applies
       for (int n = 0; n < 12 * nrofPRB; n++) {
         c16_t table = {table_5_2_2_2_4_Re[u][n], table_5_2_2_2_4_Im[u][n]};
         r_u_v_base[n] = c16mulRealShift(table, amp, 15);
@@ -1089,7 +1174,8 @@ void nr_generate_pucch3_4(c16_t **txdataF,
       }
     }
 
-    if (regen_base && nrofPRB == 1) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-2) applies
+    if (regen_base
+        && nrofPRB == 1) { // TS 38.211 subclause 5.2.2.2 (Base sequences of length less than 36 using table 5.2.2.2-2) applies
       for (int n = 0; n < 12 * nrofPRB; n++) {
         c16_t table = {table_5_2_2_2_2_Re[u][n], table_5_2_2_2_2_Im[u][n]};
         r_u_v_base[n] = c16mulRealShift(table, amp, 15);
@@ -1108,7 +1194,8 @@ void nr_generate_pucch3_4(c16_t **txdataF,
     alpha = nr_cyclic_shift_hopping(pucch_pdu->hopping_id,m0,mcs,l,startingSymbolIndex,nr_slot_tx);
 
     for (int rb=0; rb<nrofPRB; rb++) {
-      if ((intraSlotFrequencyHopping == 1) && (l>=floor(nrofSymbols/2))) { // intra-slot hopping enabled, we need to calculate new offset PRB
+      if ((intraSlotFrequencyHopping == 1)
+          && (l >= floor(nrofSymbols / 2))) { // intra-slot hopping enabled, we need to calculate new offset PRB
         startingPRB = pucch_pdu->second_hop_prb;
       }
       const int baseRB = rb + startingPRB;
@@ -1116,18 +1203,19 @@ void nr_generate_pucch3_4(c16_t **txdataF,
       re_offset = ((l + startingSymbolIndex) * frame_parms->ofdm_symbol_size) + 12 * baseRB;
 
 #ifdef DEBUG_NR_PUCCH_TX
-      printf("re_offset=%u,baseRB=%d\n", re_offset-((l + startingSymbolIndex) * frame_parms->ofdm_symbol_size), baseRB);
+      printf("re_offset=%u,baseRB=%d\n", re_offset - ((l + startingSymbolIndex) * frame_parms->ofdm_symbol_size), baseRB);
 #endif
 
-      for (int n=0; n<12; n++) {
+      for (int n = 0; n < 12; n++) {
         if (table_6_4_1_3_3_2_1_dmrs_positions[nrofSymbols-4][l] == 0) { // mapping PUCCH according to TS38.211 subclause 6.3.2.5.3
           txdataF[0][re_offset] = z[n + k];
 #ifdef DEBUG_NR_PUCCH_TX
           printf(
-              "\t [nr_generate_pucch3_4] (l=%d,rb=%d,n=%d,k=%d) mapping PUCCH DATA to RE \t amp=%d \tofdm_symbol_size=%d \tN_RB_DL=%d "
+              "\t [nr_generate_pucch3_4] (l=%d,rb=%d,n=%d,k=%d) mapping PUCCH DATA to RE \t amp=%d \tofdm_symbol_size=%d "
+              "\tN_RB_DL=%d "
               "\tfirst_carrier_offset=%d \tz_pucch[%d]=txptr(%u)=(z(l=%d,n=%d)=(%d,%d))[%d]\n",
               l,
-              startingPRB+rb,
+              startingPRB + rb,
               n,
               k,
               amp,
@@ -1140,7 +1228,7 @@ void nr_generate_pucch3_4(c16_t **txdataF,
               n,
               txdataF[0][re_offset].r,
               txdataF[0][re_offset].i,
-	      re_offset-(l + startingSymbolIndex) * frame_parms->ofdm_symbol_size);
+              re_offset - (l + startingSymbolIndex) * frame_parms->ofdm_symbol_size);
 #endif
         }
         if (table_6_4_1_3_3_2_1_dmrs_positions[nrofSymbols-4][l] == 1) { // mapping DM-RS signal according to TS38.211 subclause 6.4.1.3.2
@@ -1148,13 +1236,14 @@ void nr_generate_pucch3_4(c16_t **txdataF,
           txdataF[0][re_offset] = c16mulShift(angle, r_u_v_base[n + j], 15);
 #ifdef DEBUG_NR_PUCCH_TX
           printf(
-              "\t [nr_generate_pucch3_4] (l=%d,rb=%d,n=%d,j=%d,alpha %f) mapping PUCCH DM-RS to RE \t amp=%d \tofdm_symbol_size=%d \tN_RB_DL=%d "
+              "\t [nr_generate_pucch3_4] (l=%d,rb=%d,n=%d,j=%d,alpha %f) mapping PUCCH DM-RS to RE \t amp=%d \tofdm_symbol_size=%d "
+              "\tN_RB_DL=%d "
               "\tfirst_carrier_offset=%d \tz_dm-rs[%d]=txptr(%u)=(r_u_v(l=%d,n=%d)=(%d,%d))\n",
               l,
-              rb+startingPRB,
+              rb + startingPRB,
               n,
               j,
-	      alpha,
+              alpha,
               amp,
               frame_parms->ofdm_symbol_size,
               frame_parms->N_RB_DL,
@@ -1165,7 +1254,7 @@ void nr_generate_pucch3_4(c16_t **txdataF,
               n,
               txdataF[0][re_offset].r,
               txdataF[0][re_offset].i,
-	      re_offset-(l + startingSymbolIndex) * frame_parms->ofdm_symbol_size);
+              re_offset - (l + startingSymbolIndex) * frame_parms->ofdm_symbol_size);
 #endif
         }
 
