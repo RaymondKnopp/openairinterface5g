@@ -602,8 +602,9 @@ void nr_decode_pucch1(PHY_VARS_gNB *gNB,
   signal_energy /= (nb_symbols * n_rx);
   signal_energy_ant0 /= nb_symbols;
   int pucch_power_dBtimes10 = 10 * dB_fixed(signal_energy);
-  int max_n0 = max(gNB->measurements.n0_subband_power_tot_dB[pucch_pdu->bwp_start + pucch_pdu->prb_start],
-                   gNB->measurements.n0_subband_power_tot_dB[pucch_pdu->bwp_start + pucch_pdu->second_hop_prb]);
+  int max_n0 = gNB->measurements.n0_subband_power_tot_dB[pucch_pdu->bwp_start + pucch_pdu->prb_start];
+  if (pucch_pdu->freq_hop_flag)
+    max_n0 = max(max_n0, gNB->measurements.n0_subband_power_tot_dB[pucch_pdu->bwp_start + pucch_pdu->second_hop_prb]);
   const int SNRtimes10 = pucch_power_dBtimes10 - (10 * max_n0);
 
   LOG_D(PHY,
