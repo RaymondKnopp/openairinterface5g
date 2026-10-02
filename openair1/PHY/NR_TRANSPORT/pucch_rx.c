@@ -543,9 +543,9 @@ void nr_decode_pucch1(PHY_VARS_gNB *gNB,
   c16_t z_rx[16][MAX_SIZE_Z] = {0};
   c16_t z_dmrs_rx[16][MAX_SIZE_Z] = {0};
   c16_t z[16][12] = {0};
-  // use a local prb_start for the 2nd hop instead of mutating pucch_pdu->prb_start, which
-  // would otherwise double-count bwp_start in the max_n0 computation below (freq-hopping fix)
-  int prb_start = pucch_pdu->prb_start;
+  // Local BWP-relative PRB index for RE extraction. Do not mutate pucch_pdu->prb_start: the
+  // max_n0 computation below reads pucch_pdu->prb_start / second_hop_prb directly.
+  int prb_start = pucch_pdu->bwp_start + pucch_pdu->prb_start;
   for (int l = 0; l < nb_symbols; l++) { // extracting data and dmrs from rxdataF
     if (intraSlotFrequencyHopping && (l >= nb_symbols / 2)) { // intra-slot hopping enabled, we need
       // to calculate new offset PRB
@@ -1657,25 +1657,6 @@ static uint64_t nr_pucch3_ml_shortblock(const nfapi_nr_pucch_pdu_t *pucch_pdu,
                                         c32_t corr32[nb_symbols][ngroup][Prx])
 {
   uint8_t corr_dB;
-  // The channel reference lives on the DMRS symbols; give each data symbol the correlation of its
-  // nearest DMRS symbol so the per-symbol combining below has a channel estimate.
-  int dmrsp = -1;
-  for (int symb = 0; symb < nb_symbols; symb++) {
-    if (is_pucch3_dmrs_symbol(symb, dmrspos))
-      continue;
-    if (symb <= (dmrspos[0] + (dmrspos[1] - dmrspos[0]) / 2)) // around the 1st DMRS
-      dmrsp = dmrspos[0];
-    else if (ndmrs == 2 || (ndmrs == 4 && symb < dmrspos[1] + (dmrspos[2] - dmrspos[1]) / 2))
-      dmrsp = dmrspos[1];
-    else if (ndmrs == 4 && symb < dmrspos[2] + (dmrspos[3] - dmrspos[2]) / 2)
-      dmrsp = dmrspos[2];
-    else if (ndmrs == 4)
-      dmrsp = dmrspos[3];
-    AssertFatal(dmrsp > 0, "dmrsp %d should not be <= 0\n", dmrsp);
-    for (int group = 0; group < ngroup; group++)
-      for (int aa = 0; aa < Prx; aa++)
-        corr32[symb][group][aa] = corr32[dmrsp][group][aa];
-  }
   // Format 3 is decoded as non-coherent set(s) each spanning the WHOLE allocation in frequency
   // (transform precoding spreads every modulation symbol across all PRBs, so there is no per-PRB
   // frequency group). With intra-slot frequency hopping the two hops see different channels and
@@ -1844,9 +1825,8 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
 
   AssertFatal(fmt == 3, "nr_decode_pucch3 only handles PUCCH format 3 (got %d)\n", fmt);
   AssertFatal(nb_symbols >= 4 && nb_symbols <= 14, "Illegal number of symbols for PUCCH 3 %d\n", nb_symbols);
-  AssertFatal((pucch_pdu->prb_start - ((pucch_pdu->prb_start >> 2) << 2)) == 0,
-              "Current PUCCH3 receiver implementation requires a PRB offset multiple of 4. The one selected is %d",
-              pucch_pdu->prb_start);
+  // Note: unlike format 2, format 3 does not require a PRB offset multiple of 4 (the data scrambling
+  // gold sequence is indexed by length, not by PRB), so any starting PRB is accepted.
 
   // extract pucch and dmrs first
 #ifdef DEBUG_NR_PUCCH_RX
@@ -1886,8 +1866,8 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
   for (int aa = 0; aa < Prx; aa++) {
     for (int symb = 0; symb < nb_symbols; symb++) {
       c16_t *tmp_rp = (c16_t *)&rxdataF[aa][soffset + (l2 + symb) * frame_parms->ofdm_symbol_size];
-      // hop index: 0 for the first half of the symbols, 1 for the second half
-      const int hop = (2 * symb) / nb_symbols;
+      // hop index: 0 for the first floor(nb_symbols/2) symbols, 1 for the second hop (matches TX)
+      const int hop = (pucch_pdu->freq_hop_flag && symb >= nb_symbols / 2) ? 1 : 0;
       if (re_offset[hop] + nb_re_pucch < frame_parms->ofdm_symbol_size) {
         memcpy(rp[aa][symb], &tmp_rp[re_offset[hop]], nb_re_pucch * sizeof(c16_t));
       } else {
@@ -2104,7 +2084,7 @@ void nr_decode_pucch3(PHY_VARS_gNB *gNB,
   uci_pdu->pduBitmap = 0;
   uci_pdu->rnti = pucch_pdu->rnti;
   uci_pdu->handle = pucch_pdu->handle;
-  uci_pdu->pucch_format = 0;
+  uci_pdu->pucch_format = 1; // SCF 222: 0 = format 2, 1 = format 3
   uci_pdu->ul_cqi = cqi;
   uci_pdu->timing_advance = 0xffff; // currently not valid
   uci_pdu->rssi =

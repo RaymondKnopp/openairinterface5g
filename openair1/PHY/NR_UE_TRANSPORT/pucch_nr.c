@@ -1196,7 +1196,7 @@ void nr_generate_pucch3_4(c16_t **txdataF,
     for (int rb=0; rb<nrofPRB; rb++) {
       if ((intraSlotFrequencyHopping == 1)
           && (l >= floor(nrofSymbols / 2))) { // intra-slot hopping enabled, we need to calculate new offset PRB
-        startingPRB = pucch_pdu->second_hop_prb;
+        startingPRB = pucch_pdu->second_hop_prb + pucch_pdu->bwp_start;
       }
       const int baseRB = rb + startingPRB;
       // BWP-relative subcarrier mapping (subcarrier 0 at index 0), consistent with PUCCH formats 0/1/2
