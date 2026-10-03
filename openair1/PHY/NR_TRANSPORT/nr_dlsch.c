@@ -1107,16 +1107,15 @@ static void nr_pdsch_symbol_processing(void *arg)
       int pos = 0;
       int block_start, block_end;
       while (find_next_rb_block(freq_alloc->bitmap, rel15->BWPSize, &pos, &block_start, &block_end)) {
-        do_txdataF_2x2(txdataF,
-                       symbol_sz,
-                       txdataF_precoding,
-                       gNB,
-                       rel15,
-                       ant0,
-                       ant1,
-                       block_start,
-                       block_end - block_start + 1,
-                       txdataF_offset_per_symbol);
+        do_txdataF(txdataF,
+                   symbol_sz,
+                   txdataF_precoding,
+                   gNB,
+                   rel15,
+                   rdata->ant_to_map[ant],
+                   block_start,
+                   block_end - block_start + 1,
+                   txdataF_offset_per_symbol);
 
         if (gNB->phase_comp) {
 	  int start_sc = get_block_start_sc(block_start, rel15->BWPStart, symbol_sz);

@@ -556,6 +556,8 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
     first_symbol_with_data++;
   }
 
+  uint32_t dl_valid_re[NR_SYMBOLS_PER_SLOT] = {0};
+
   int32_t log2_maxh = 0;
 
   start_meas_nr_ue_phy(ue, RX_PDSCH_STATS);
@@ -578,6 +580,7 @@ static int nr_ue_pdsch_procedures(PHY_VARS_NR_UE *ue,
 
   int16_t *llr_out = llr;
   for (int m = dlschCfg->start_symbol; m < (dlschCfg->number_symbols + dlschCfg->start_symbol); m++) {
+    bool first_symbol_flag = (m == first_symbol_with_data);
     // Symbol fully occupied by DMRS with no multiplexed data (e.g. DMRS Type 1 with
     // n_dmrs_cdm_groups == 2): skip the call entirely, nr_rx_pdsch would just report 0 REs.
     if (dmrs_data_re == 0 && (dlschCfg->dlDmrsSymbPos & (1 << m)))

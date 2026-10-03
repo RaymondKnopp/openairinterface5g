@@ -128,7 +128,6 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
                       time_stats_t *dlsch_segmentation_stats,
 		      time_stats_t *dlsch_crc_stats)
 {
-  time_stats_t *dlsch_crc_stats = &gNB->dlsch_crc_stats;
   nrLDPC_TB_encoding_parameters_t TBs[n_dlsch];
   memset(TBs, 0, sizeof(TBs));
 
@@ -176,7 +175,6 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
      * Skip it (geometry only) when TB-mode offload is active. Gated so CPU/T2 and the
      * CB-mode fallback -- which need dlsch->c[] filled -- are untouched. */
     int noseg = (getenv("LDPC_AAL_TB") != NULL) && (getenv("LDPC_AAL_NOSEG") != NULL);
-    start_meas(&gNB->dlsch_crc_stats);
     int B;
     if (A > NR_MAX_PDSCH_TBS) {
       // Add 24-bit crc (polynomial A) to payload
@@ -209,7 +207,6 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
     nrLDPC_TB_encoding_parameters_t *TB_parameters = &TBs[i];
 
     // The harq_pid is not unique among the active HARQ processes in the instance so we use i instead
-    stop_meas(&gNB->dlsch_crc_stats);
     TB_parameters->harq_unique_pid = i;
     TB_parameters->BG = rel15->maintenance_parms_v3.ldpcBaseGraph;
     TB_parameters->A = A;
