@@ -128,6 +128,7 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
                       time_stats_t *dlsch_segmentation_stats,
 		      time_stats_t *dlsch_crc_stats)
 {
+  time_stats_t *dlsch_crc_stats = &gNB->dlsch_crc_stats;
   nrLDPC_TB_encoding_parameters_t TBs[n_dlsch];
   memset(TBs, 0, sizeof(TBs));
 

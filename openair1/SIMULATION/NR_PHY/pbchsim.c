@@ -17,7 +17,7 @@
 #include "PHY/defs_nr_common.h"
 #include "PHY/defs_nr_UE.h"
 #include "PHY/defs_gNB.h"
-#include "PHY/MODULATION/modulation_eNB.h"
+#include "PHY/MODULATION/phy_ofdm_mod.h"
 #include "PHY/MODULATION/modulation_UE.h"
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/INIT/nr_phy_init.h"
@@ -29,7 +29,6 @@
 #include "openair1/SIMULATION/TOOLS/sim.h"
 #include "openair1/SIMULATION/RF/rf.h"
 #include "openair1/SIMULATION/NR_PHY/nr_unitary_defs.h"
-#include "openair1/PHY/MODULATION/nr_modulation.h"
 #include <executables/softmodem-common.h>
 #include <executables/nr-uesoftmodem.h>
 #include "nfapi/oai_integration/vendor_ext.h"
@@ -481,8 +480,6 @@ int main(int argc, char **argv)
   nfapi_nr_dl_tti_ssb_pdu ssb_pdu[64] = {0};
   if (input_fd==NULL) {
     const int prb_mask_words = (frame_parms->N_RB_DL + 63) / 64;
-    uint64_t phase_comp_prb_mask[gNB->common_vars.num_beams_period][frame_parms->symbols_per_slot][prb_mask_words];
-    memset(phase_comp_prb_mask, 0, sizeof(phase_comp_prb_mask));
 
     for (i=0; i<frame_parms->Lmax; i++) {
       if((SSB_positions >> i) & 0x01) {
@@ -500,49 +497,36 @@ int main(int argc, char **argv)
         for (aa=0; aa<gNB->frame_parms.nb_antennas_tx; aa++)
           memset(gNB->common_vars.txdataF[aa], 0, frame_parms->samples_per_slot_wCP * sizeof(int32_t));
 
-        nr_common_signal_procedures(gNB,
-                                    frame,
-                                    slot,
-                                    &ssb_pdu[i],
-                                    &phase_comp_prb_mask[0][0][0],
-                                    prb_mask_words);
+        nr_common_signal_procedures(gNB, frame, slot, &ssb_pdu[i], prb_mask_words);
 
         int samp = get_samples_slot_timestamp(frame_parms, slot);
         for (aa = 0; aa < gNB->frame_parms.nb_antennas_tx; aa++) {
-          c16_t fft_in_buff[frame_parms->ofdm_symbol_size * frame_parms->symbols_per_slot] __attribute__((aligned(64)));
-          memset(fft_in_buff, 0, sizeof(fft_in_buff));
           if (cyclic_prefix_type == 1) {
-            fft_shift(gNB->common_vars.txdataF[aa],
-                      frame_parms->ofdm_symbol_size,
-                      frame_parms->N_RB_DL,
-                      fft_in_buff,
-                      frame_parms->ofdm_symbol_size,
-                      0,
-                      12);
+            for (int i = 0; i < 12; i++)
+              fftshift_inverse_inplace(gNB->common_vars.txdataF[aa] + i * frame_parms->ofdm_symbol_size,
+                                       frame_parms->N_RB_DL * NR_NB_SC_PER_RB,
+                                       frame_parms->ofdm_symbol_size);
 
-            PHY_ofdm_mod((int *)fft_in_buff,
+            PHY_ofdm_mod((int *)gNB->common_vars.txdataF[aa],
                          (int *)&txdata[aa][samp],
                          frame_parms->ofdm_symbol_size,
                          12,
                          frame_parms->nb_prefix_samples,
                          CYCLIC_PREFIX);
           } else {
-            fft_shift(gNB->common_vars.txdataF[aa],
-                      frame_parms->ofdm_symbol_size,
-                      frame_parms->N_RB_DL,
-                      fft_in_buff,
-                      frame_parms->ofdm_symbol_size,
-                      0,
-                      14);
+            for (int i = 0; i < 14; i++)
+              fftshift_inverse_inplace(gNB->common_vars.txdataF[aa] + i * frame_parms->ofdm_symbol_size,
+                                       frame_parms->N_RB_DL * NR_NB_SC_PER_RB,
+                                       frame_parms->ofdm_symbol_size);
 
-            PHY_ofdm_mod((int *)fft_in_buff,
+            PHY_ofdm_mod((int *)gNB->common_vars.txdataF[aa],
                          (int *)&txdata[aa][samp],
                          frame_parms->ofdm_symbol_size,
                          1,
                          frame_parms->nb_prefix_samples0,
                          CYCLIC_PREFIX);
 
-            PHY_ofdm_mod((int *)fft_in_buff + frame_parms->ofdm_symbol_size,
+            PHY_ofdm_mod((int *)gNB->common_vars.txdataF[aa] + frame_parms->ofdm_symbol_size,
                          (int *)&txdata[aa][samp + frame_parms->nb_prefix_samples0 + frame_parms->ofdm_symbol_size],
                          frame_parms->ofdm_symbol_size,
                          13,
@@ -622,24 +606,27 @@ int main(int argc, char **argv)
            0.0,  // IQ imbalance (dB),
 	   0.0); // IQ phase imbalance (rad)
 
+      c16_t *rxdata[frame_parms->nb_antennas_rx];
+      for (aa = 0; aa < frame_parms->nb_antennas_rx; aa++)
+        rxdata[aa] = malloc(frame_length_complex_samples * sizeof(**rxdata));
       for (i=0; i<frame_length_complex_samples; i++) {
         for (aa=0; aa<frame_parms->nb_antennas_rx; aa++) {
-          UE->common_vars.rxdata[aa][i].r = (short)(r_re[aa][i] + sqrt(sigma2 / 2) * gaussdouble(0.0, 1.0));
-          UE->common_vars.rxdata[aa][i].i = (short)(r_im[aa][i] + sqrt(sigma2 / 2) * gaussdouble(0.0, 1.0));
+          rxdata[aa][i].r = (short)(r_re[aa][i] + sqrt(sigma2 / 2) * gaussdouble(0.0, 1.0));
+          rxdata[aa][i].i = (short)(r_im[aa][i] + sqrt(sigma2 / 2) * gaussdouble(0.0, 1.0));
         }
       }
 
       if (n_trials==1) {
-        LOG_M("rxsig0.m", "rxs0", UE->common_vars.rxdata[0], frame_parms->samples_per_frame, 1, 1);
+        LOG_M("rxsig0.m", "rxs0", rxdata[0], frame_parms->samples_per_frame, 1, 1);
         if (gNB->frame_parms.nb_antennas_tx > 1)
-          LOG_M("rxsig1.m", "rxs1", UE->common_vars.rxdata[1], frame_parms->samples_per_frame, 1, 1);
+          LOG_M("rxsig1.m", "rxs1", rxdata[1], frame_parms->samples_per_frame, 1, 1);
       }
       if (UE->is_synchronized == 0) {
         UE_nr_rxtx_proc_t proc = {0};
         nr_gscn_info_t gscnInfo[MAX_GSCN_BAND] = {0};
         const int numGscn = 1;
         gscnInfo[0].ssbFirstSC = frame_parms->ssb_start_subcarrier;
-        nr_initial_sync_t ret = nr_initial_sync(&proc, UE, 1, gscnInfo, numGscn);
+        nr_initial_sync_t ret = nr_initial_sync(&proc, UE, frame_length_complex_samples, rxdata, gscnInfo, numGscn);
         printf("nr_initial_sync1 returns %s\n", ret.cell_detected ? "cell detected" : "cell not detected");
         if (!ret.cell_detected)
           n_errors++;
@@ -658,14 +645,7 @@ int main(int argc, char **argv)
         int16_t pbch_e_rx[NR_POLAR_PBCH_E];
         uint8_t log2_maxh = 0;
         for (int i = UE->symbol_offset + 1; i < UE->symbol_offset + 4; i++) {
-          nr_slot_fep(UE,
-                      frame_parms,
-                      proc.nr_slot_rx,
-                      i % frame_parms->symbols_per_slot,
-                      rxdataF,
-                      link_type_dl,
-                      0,
-                      UE->common_vars.rxdata);
+          nr_slot_fep(UE, frame_parms, proc.nr_slot_rx, i % frame_parms->symbols_per_slot, rxdataF, link_type_dl, 0, rxdata);
           __attribute__((aligned(32))) struct complex16 rxdataF_symb[frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size];
           __attribute__((aligned(32))) struct complex16 dl_ch_estimates[frame_parms->nb_antennas_rx][frame_parms->ofdm_symbol_size];
 
@@ -729,6 +709,8 @@ int main(int argc, char **argv)
         if (ret != 0)
           n_errors++;
       }
+      for (aa = 0; aa < frame_parms->nb_antennas_rx; aa++)
+        free(rxdata[aa]);
     } //noise trials
     printf("SNR %f: trials %d, n_errors_crc = %d, n_errors_payload %d\n", SNR,n_trials,n_errors,n_errors_payload);
 

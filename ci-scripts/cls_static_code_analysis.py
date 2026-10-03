@@ -5,47 +5,42 @@
 #
 #   Required Python Version
 #     Python 3.x
-#
-#   Required Python Package
-#     pexpect
 #---------------------------------------------------------------------
 
 #-----------------------------------------------------------
 # Import
 #-----------------------------------------------------------
-import sys              # arg
 import re               # reg
 import logging
 import os
-from pathlib import Path
 
 #-----------------------------------------------------------
 # OAI Testing modules
 #-----------------------------------------------------------
-import helpreadme as HELP
-import constants as CONST
 import cls_cmd
 from cls_ci_helper import archiveArtifact
 
 class StaticCodeAnalysis():
 
-	def LicenceAndFormattingCheck(ctx, node, HTML, d, branch, allowMerge, targetBranch):
+	def LicenceAndFormattingCheck(ctx, node, HTML):
 		# Workspace is no longer recreated from scratch.
 		# It implies that this method shall be called last within a build pipeline
 		# where workspace is already created
 
+		d = ctx.g.workspace
 		if not node or not d:
 			raise ValueError(f"{d=} {node=}")
 		logging.debug('Building on server: ' + node)
 		cmd = cls_cmd.getConnection(node)
 		check_options = ''
-		if allowMerge:
+		if ctx.g.merge:
+			branch = ctx.g.branch
 			check_options = f'--build-arg MERGE_REQUEST=true --build-arg SRC_BRANCH={branch}'
-			if targetBranch == '':
+			if ctx.g.targetBranch == '':
 				if branch != 'develop' and branch != 'origin/develop':
 					check_options += ' --build-arg TARGET_BRANCH=develop'
 			else:
-				check_options += f' --build-arg TARGET_BRANCH={targetBranch}'
+				check_options += f' --build-arg TARGET_BRANCH={ctx.g.targetBranch}'
 
 		logDir = f'{d}/cmake_targets/log/'
 		cmd.run(f'mkdir -p {logDir}')
@@ -111,7 +106,7 @@ class StaticCodeAnalysis():
 			if analyzed:
 				logging.debug('files not formatted properly: ' + str(nbFilesNotFormatted))
 				if nbFilesNotFormatted == 0:
-					HTML.CreateHtmlTestRow('File(s) Format', 'OK', CONST.ALL_PROCESSES_OK)
+					HTML.CreateHtmlTestRowQueue('File(s) Format', 'OK', [])
 				else:
 					html_cell = f'Number of files not following OAI Rules: {nbFilesNotFormatted}\n'
 					for nFile in listFilesNotFormatted:
@@ -121,7 +116,7 @@ class StaticCodeAnalysis():
 
 				logging.debug('header files not respecting the circular dependency protection: ' + str(len(circularHeaderDependencyFiles)))
 				if len(circularHeaderDependencyFiles) == 0:
-					HTML.CreateHtmlTestRow('Header Circular Dependency', 'OK', CONST.ALL_PROCESSES_OK)
+					HTML.CreateHtmlTestRowQueue('Header Circular Dependency', 'OK', [])
 				else:
 					html_cell = f'Number of files not respecting: {len(circularHeaderDependencyFiles)}\n'
 					for nFile in circularHeaderDependencyFiles:
@@ -132,7 +127,7 @@ class StaticCodeAnalysis():
 
 				logging.debug('files with a GNU GPL license: ' + str(len(gnuGplLicenceFiles)))
 				if len(gnuGplLicenceFiles) == 0:
-					HTML.CreateHtmlTestRow('Files w/ GNU GPL License', 'OK', CONST.ALL_PROCESSES_OK)
+					HTML.CreateHtmlTestRowQueue('Files w/ GNU GPL License', 'OK', [])
 				else:
 					html_cell = f'Number of files not respecting: {len(gnuGplLicenceFiles)}\n'
 					for nFile in gnuGplLicenceFiles:
@@ -143,7 +138,7 @@ class StaticCodeAnalysis():
 
 				logging.debug('files with a suspect license: ' + str(len(suspectLicenceFiles)))
 				if len(suspectLicenceFiles) == 0:
-					HTML.CreateHtmlTestRow('Files with suspect license', 'OK', CONST.ALL_PROCESSES_OK)
+					HTML.CreateHtmlTestRowQueue('Files with suspect license', 'OK', [])
 				else:
 					html_cell = f'Number of files not respecting: {len(suspectLicenceFiles)}\n'
 					for nFile in suspectLicenceFiles:
@@ -154,11 +149,9 @@ class StaticCodeAnalysis():
 
 			else:
 				finalStatus = -1
-				HTML.htmleNBFailureMsg = 'Could not fully analyze oai-formatting-check.txt file'
-				HTML.CreateHtmlTestRow('N/A', 'KO', CONST.ENB_PROCESS_NOLOGFILE_TO_ANALYZE)
+				HTML.CreateHtmlTestRowQueue('N/A', 'OK?', ['Could not fully analyze oai-formatting-check.txt file'])
 		else:
 			finalStatus = -1
-			HTML.htmleNBFailureMsg = 'Could not access oai-formatting-check.txt file'
-			HTML.CreateHtmlTestRow('N/A', 'KO', CONST.ENB_PROCESS_NOLOGFILE_TO_ANALYZE)
+			HTML.CreateHtmlTestRowQueue('N/A', 'OK?', ['Could not access oai-formatting-check.txt file'])
 
 		return finalStatus == 0

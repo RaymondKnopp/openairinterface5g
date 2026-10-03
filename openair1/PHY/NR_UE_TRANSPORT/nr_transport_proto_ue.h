@@ -11,7 +11,6 @@
 #include "SCHED_NR_UE/defs.h"
 #include "PHY/NR_TRANSPORT/nr_transport_common_proto.h"
 #include <math.h>
-#include "PHY/nr_phy_common/inc/nr_phy_common.h"
 #include "PHY/CODING/nrPolar_tools/nr_polar_psbch_defs.h"
 #include "common/utils/bits.h"
 
@@ -20,6 +19,8 @@ typedef struct pdsch_scope_req_s {
   bool copy_chanest_to_scope;
   bool copy_rxdataF_to_scope;
   size_t scope_rxdataF_offset;
+  bool copy_rxdataF_comp_to_scope;
+  size_t scope_rxdataF_comp_offset;
 } pdsch_scope_req_t;
 
 // Functions below implement 36-211 and 36-212
@@ -61,13 +62,11 @@ void nr_dlsch_decoding(PHY_VARS_NR_UE *phy_vars_ue,
                        int number_rbs,
                        int G);
 
-int nr_ulsch_pre_encoding(PHY_VARS_NR_UE *ue,
-                          const NR_UE_ULSCH_t *ulsch,
-                          const uint32_t frame,
-                          const uint8_t slot,
-                          const unsigned int *G,
-                          const int nb_ulsch,
-                          const uint8_t *ULSCH_ids);
+int nr_ulsch_pre_encoding(NR_UL_UE_HARQ_t *harq_process,
+                          uint32_t tb_size_bytes,
+                          uint8_t nrOfLayers,
+                          uint8_t ldpcBaseGraph);
+
 /** \brief This is the alternative top-level entry point for ULSCH encoding in UE.
     It handles all the HARQ processes in only one call. The routine first
     computes the segmentation information, followed by LDPC encoding algorithm of the
@@ -169,7 +168,8 @@ double nr_ue_pbch_freq_offset(const NR_DL_FRAME_PARMS *frame_parms,
 */
 nr_initial_sync_t nr_initial_sync(UE_nr_rxtx_proc_t *proc,
                                   PHY_VARS_NR_UE *phy_vars_ue,
-                                  int n_frames,
+                                  int input_sz,
+                                  c16_t **input,
                                   nr_gscn_info_t gscnInfo[MAX_GSCN_BAND],
                                   int numGscn);
 
@@ -221,7 +221,6 @@ void nr_sl_rf_card_config_freq(PHY_VARS_NR_UE *ue,
     @param pdsch_est_size
     @param dl_ch_estimates
     @param llr
-    @param dl_valid_re
     @param rxdataF
     @param llr_offset
     @param log2_maxhrx_size_symbol
@@ -294,7 +293,7 @@ int nr_psbch_decode(PHY_VARS_NR_UE *ue,
 
 void nr_tx_psbch(PHY_VARS_NR_UE *UE, uint32_t frame_tx, uint32_t slot_tx, sl_nr_tx_config_psbch_pdu_t *psbch_vars, c16_t **txdataF);
 
-nr_initial_sync_t sl_nr_slss_search(PHY_VARS_NR_UE *UE, UE_nr_rxtx_proc_t *proc, int num_frames);
+nr_initial_sync_t sl_nr_slss_search(PHY_VARS_NR_UE *UE, UE_nr_rxtx_proc_t *proc, int num_frames, int input_sz, c16_t **input);
 
 // Reuse already existing PBCH functions
 void nr_pbch_channel_compensation(const struct complex16 rxdataF_ext[][PBCH_MAX_RE_PER_SYMBOL],
@@ -336,4 +335,3 @@ int nr_pbch_decode(PHY_VARS_NR_UE *ue,
                    fapiPbch_t *result);
 /**@}*/
 #endif
-

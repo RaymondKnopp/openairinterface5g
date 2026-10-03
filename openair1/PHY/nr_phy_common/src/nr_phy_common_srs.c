@@ -2,9 +2,11 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
-#include "PHY/nr_phy_common/inc/nr_phy_common.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common_srs.h"
 #include "PHY/NR_REFSIG/dmrs_nr.h"
 #include "PHY/NR_REFSIG/ul_ref_seq_nr.h"
+#include "PHY/TOOLS/tools_defs.h"
+#include "log.h"
 
 #define SRS_PERIODICITY                 (17)
 static const uint16_t srs_periodicity[SRS_PERIODICITY] = {1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64, 80, 160, 320, 640, 1280, 2560};
@@ -204,7 +206,7 @@ bool generate_srs_nr(const NR_DL_FRAME_PARMS *frame_parms,
   if(nr_srs_info) {
     nr_srs_info->srs_generated_signal_bits = log2_approx(amp);
   }
-  uint64_t subcarrier_offset = frame_parms->first_carrier_offset + bwp_start * NR_NB_SC_PER_RB;
+  const uint64_t subcarrier_offset = bwp_start * NR_NB_SC_PER_RB;
   float amp_sqrt_N_ap = amp / sqrt(N_ap);
   int n_b[nr_srs_info->B_SRS + 1];
 
@@ -294,7 +296,7 @@ bool generate_srs_nr(const NR_DL_FRAME_PARMS *frame_parms,
       LOG_I(NR_PHY,"k_0_p = %i\n", k_0_p);
 #endif
 
-      int subcarrier = CIRCULAR_INC(subcarrier_offset, k_0_p, frame_parms->ofdm_symbol_size);
+      uint32_t subcarrier = subcarrier_offset + k_0_p;
       uint16_t l_line_offset = l_line * frame_parms->ofdm_symbol_size;
       // For each port, and for each OFDM symbol, here it is computed and mapped an SRS sequence with M_sc_b_SRS symbols
       for (int k = 0; k < M_sc_b_SRS; k++) {
@@ -310,10 +312,7 @@ bool generate_srs_nr(const NR_DL_FRAME_PARMS *frame_parms,
                        (((int32_t)(amp_sqrt_N_ap * r.i)) >> 15)};
 
 #ifdef SRS_DEBUG
-        int subcarrier_log = subcarrier-subcarrier_offset;
-        if(subcarrier_log < 0) {
-          subcarrier_log = subcarrier_log + frame_parms->ofdm_symbol_size;
-        }
+        int subcarrier_log = subcarrier - subcarrier_offset;
         if(subcarrier_log%12 == 0) {
           LOG_I(NR_PHY,"------------ %d ------------\n", subcarrier_log/12);
         }
@@ -323,7 +322,7 @@ bool generate_srs_nr(const NR_DL_FRAME_PARMS *frame_parms,
         txdataF[p_index][symbol_offset + l_line_offset + subcarrier] = r_amp;
 
         // Subcarrier increment
-        subcarrier = CIRCULAR_INC(subcarrier, K_TC, frame_parms->ofdm_symbol_size);
+        subcarrier += K_TC;
       } // for (int k = 0; k < M_sc_b_SRS; k++)
     } // for (int l_line = 0; l_line < N_symb_SRS; l_line++)
   } // for (int p_index = 0; p_index < N_ap; p_index++)

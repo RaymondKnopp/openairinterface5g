@@ -10,6 +10,7 @@
 #include <stdio.h> // OAI_LBEST_DBG diagnostic (stderr); analysis-only
 #include "PHY/sse_intrin.h"
 #include "PHY/impl_defs_top.h"
+#include "PHY/TOOLS/tools_defs.h"
 #ifdef __aarch64__
 #define USE_128BIT
 #endif

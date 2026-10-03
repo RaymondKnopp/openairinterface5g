@@ -25,7 +25,6 @@
 #include "PHY/INIT/nr_phy_init.h"
 #include "PHY/MODULATION/nr_modulation.h"
 #include "PHY/NR_TRANSPORT/nr_transport_proto.h"
-#include "PHY/TOOLS/tools_defs.h"
 #include "PHY/defs_RU.h"
 #include "PHY/defs_gNB.h"
 #include "PHY/defs_nr_common.h"
@@ -183,6 +182,7 @@ static void tx_func(processingData_L1tx_t *info)
   res->key = slot_rx;
   pushNotifiedFIFO(&gNB->resp_L1, res);
 
+  RU_t *ru = gNB->RU_list[0];
   int tx_slot_type = nr_slot_select(cfg, frame_tx, slot_tx);
   // TODO check for analog_bf_vendor_ext set to 1 is a workaround while no beam API for beam selection is implemented
   const bool tx_this_slot = tx_slot_type == NR_DOWNLINK_SLOT || tx_slot_type == NR_MIXED_SLOT
@@ -342,6 +342,17 @@ static void tx_func(processingData_L1tx_t *info)
     pend.slot = slot_tx;
     pend.timestamp_tx = info->timestamp_tx;
   }
+
+  // beam API - fill TX and/or RX beam IDs
+  if (gNB->common_vars.analog_bf) {
+    if (ru->fh_south_ctrl)
+      ru->fh_south_ctrl(ru, frame_tx, slot_tx, info->timestamp_tx);
+  }
+
+  if (tx_slot_type == NR_DOWNLINK_SLOT || tx_slot_type == NR_MIXED_SLOT || get_softmodem_params()->continuous_tx || IS_SOFTMODEM_RFSIM) {
+    if (ru->fh_south_out)
+      ru->fh_south_out(ru, frame_tx, slot_tx, info->timestamp_tx);
+  }
 }
 
 void *L1_rx_thread(void *arg) 
@@ -461,25 +472,26 @@ static void rx_func(processingData_L1_t *info)
     while (spsc_q_get(&gNB->prach_l1rx_queue, &p, sizeof(p)))
       L1_nr_prach_procedures(gNB, &p, &UL_INFO.rach_ind);
 
-    //WA: comment rotation in tx/rx
+    // apply the rx signal rotation here
     if (gNB->phase_comp) {
-      //apply the rx signal rotation here
-      int soffset = (slot_rx % RU_RX_SLOT_DEPTH) * gNB->frame_parms.symbols_per_slot * gNB->frame_parms.ofdm_symbol_size;
       const NR_DL_FRAME_PARMS *fp = &gNB->frame_parms;
+      const uint soffset = (slot_rx % RU_RX_SLOT_DEPTH) * fp->symbols_per_slot * fp->ofdm_symbol_size;
       for (int aa = 0; aa < fp->nb_antennas_rx; aa++) {
-        const uint max_symb = fp->Ncp == NR_EXTENDED ? 12 : 14;
-        for (int sym = 0; sym < max_symb; sym++)
-          apply_nr_rotation_symbol_RX(fp->symbols_per_slot,
-                                      fp->slots_per_subframe,
-                                      fp->timeshift_symbol_rotation,
-                                      fp->first_carrier_offset,
-                                      gNB->common_vars.rxdataF[aa] + soffset + sym * fp->ofdm_symbol_size,
-                                      fp->symbol_rotation[1],
-                                      fp->N_RB_UL,
-                                      slot_rx,
-                                      sym);
+        for (int sym = 0; sym < fp->symbols_per_slot; sym++) {
+          c16_t *this_symbol = gNB->common_vars.rxdataF[aa] + soffset + sym * fp->ofdm_symbol_size;
+          apply_nr_rotation_symbol_fftshifted_RX(fp->symbols_per_slot,
+                                                 fp->slots_per_subframe,
+                                                 fp->timeshift_symbol_rotation,
+                                                 this_symbol,
+                                                 fp->symbol_rotation[1],
+                                                 fp->N_RB_UL,
+                                                 slot_rx,
+                                                 sym);
+        }
       }
     }
+
+    // Call PHY Rx signal procedures
     phy_procedures_gNB_uespec_RX(gNB, frame_rx, slot_rx, &UL_INFO);
 
     // Call the scheduler
@@ -520,6 +532,8 @@ static void nrL1_stats_init_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru, unsigned in
   init_sorted_list_meas(&gNB->dlsch_modulation_stats, size);
   init_sorted_list_meas(&gNB->dlsch_pdsch_generation_stats, size);
   init_sorted_list_meas(&gNB->phy_proc_rx, size);
+  init_sorted_list_meas(&gNB->pucch01_proc_rx, size);
+  init_sorted_list_meas(&gNB->pucch23_proc_rx, size);
   init_sorted_list_meas(&gNB->ulsch_decoding_stats, size);
   init_sorted_list_meas(&gNB->ts_ldpc_decode, size);
   init_sorted_list_meas(&gNB->ul_indication_stats, size);
@@ -554,6 +568,8 @@ static void nrL1_stats_free_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru)
   free_sorted_list_meas(&gNB->dlsch_modulation_stats);
   free_sorted_list_meas(&gNB->dlsch_pdsch_generation_stats);
   free_sorted_list_meas(&gNB->phy_proc_rx);
+  free_sorted_list_meas(&gNB->pucch01_proc_rx);
+  free_sorted_list_meas(&gNB->pucch23_proc_rx);
   free_sorted_list_meas(&gNB->ulsch_decoding_stats);
   free_sorted_list_meas(&gNB->ts_ldpc_decode);
   free_sorted_list_meas(&gNB->ul_indication_stats);
@@ -592,6 +608,8 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->dlsch_pdsch_generation_stats);
   reset_meas(&gNB->phy_proc_rx);
   reset_meas(&gNB->rx_dispatch_lag);
+  reset_meas(&gNB->pucch01_proc_rx);
+  reset_meas(&gNB->pucch23_proc_rx);
   reset_meas(&gNB->ulsch_decoding_stats);
   reset_meas(&gNB->ts_ldpc_decode);
   reset_meas(&gNB->ul_indication_stats);
@@ -649,6 +667,8 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->dlsch_resource_mapping_stats, "  PDSCH RE mapping", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->dlsch_precoding_stats, "  PDSCH precoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->phy_proc_rx, "L1 Rx processing", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pucch01_proc_rx, "PUCCH01 reception", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pucch23_proc_rx, "PUCCH23 reception", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ulsch_decoding_stats, "ULSCH decoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_dispatch_lag, "RX dispatch lag", NULL, NULL, output, end - output);
   if (output < end)

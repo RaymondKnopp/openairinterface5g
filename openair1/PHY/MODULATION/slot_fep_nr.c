@@ -25,21 +25,26 @@ void nr_symbol_fep(const NR_DL_FRAME_PARMS *frame_parms,
   AssertFatal(slot < frame_parms->slots_per_frame, "slot_fep: Ns must be between 0 and %d\n", frame_parms->slots_per_frame - 1);
 
   dft_size_idx_t dftsize = get_dft(frame_parms->ofdm_symbol_size);
+  const bool is_sl = (link_type == link_type_sl);
+  const int nb_rb = is_sl ? frame_parms->N_RB_SL : frame_parms->N_RB_DL;
   for (unsigned char aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+    // OFDM Demod
     if (dft_stats) start_meas(dft_stats);
     dft(dftsize, (int16_t *)rxdata[aa], (int16_t *)rxdataF[aa], 1);
     if (dft_stats) stop_meas(dft_stats);
 
-    const bool is_sl = (link_type == link_type_sl);
-    apply_nr_rotation_symbol_RX(frame_parms->symbols_per_slot,
-                                frame_parms->slots_per_subframe,
-                                frame_parms->timeshift_symbol_rotation,
-                                frame_parms->first_carrier_offset,
-                                rxdataF[aa],
-                                frame_parms->symbol_rotation[link_type],
-                                is_sl ? frame_parms->N_RB_SL : frame_parms->N_RB_DL,
-                                slot,
-                                symbol);
+    // FFT-shift
+    fftshift_inplace(rxdataF[aa], nb_rb * NR_NB_SC_PER_RB, frame_parms->ofdm_symbol_size);
+
+    // Phase compensation
+    apply_nr_rotation_symbol_fftshifted_RX(frame_parms->symbols_per_slot,
+                                           frame_parms->slots_per_subframe,
+                                           frame_parms->timeshift_symbol_rotation,
+                                           rxdataF[aa],
+                                           frame_parms->symbol_rotation[link_type],
+                                           nb_rb,
+                                           slot,
+                                           symbol);
   }
 }
 
@@ -162,42 +167,20 @@ int nr_symbol_fep_ul(const NR_DL_FRAME_PARMS *fp,
   return 0;
 }
 
-void apply_nr_rotation_symbol_RX(const int symbols_per_slot,
-                                 const int slots_per_subframe,
-                                 const c16_t *shift_rot,
-                                 const int first_carrier_offset,
-                                 c16_t *rxdataF,
-                                 const c16_t *rot,
-                                 int nb_rb,
-                                 int slot,
-                                 int symbol)
+void apply_nr_rotation_symbol_fftshifted_RX(const int symbols_per_slot,
+                                            const int slots_per_subframe,
+                                            const c16_t *shift_rot,
+                                            c16_t *rxdataF,
+                                            const c16_t *rot,
+                                            const int nb_rb,
+                                            const int slot,
+                                            const int symbol)
 {
   const int symb_offset = (slot % slots_per_subframe) * symbols_per_slot;
-
   c16_t rot2 = rot[symbol + symb_offset];
   rot2.i = -rot2.i;
-  LOG_D(PHY, "slot %d, symb_offset %d symbol %d rotating by %d.%d\n", slot, symb_offset, symbol, rot2.r, rot2.i);
-  c16_t *this_symbol = rxdataF;
-
-  if (nb_rb & 1) {
-    rotate_cpx_vector(this_symbol, rot2, this_symbol, (nb_rb + 1) * 6, 15);
-    rotate_cpx_vector(this_symbol + first_carrier_offset - 6, rot2, this_symbol + first_carrier_offset - 6, (nb_rb + 1) * 6, 15);
-    mult_cpx_vector(this_symbol, shift_rot, this_symbol, (nb_rb + 1) * 6, 15);
-    mult_cpx_vector(this_symbol + first_carrier_offset - 6,
-                    shift_rot + first_carrier_offset - 6,
-                    this_symbol + first_carrier_offset - 6,
-                    (nb_rb + 1) * 6,
-                    15);
-  } else {
-    rotate_cpx_vector(this_symbol, rot2, this_symbol, nb_rb * 6, 15);
-    rotate_cpx_vector(this_symbol + first_carrier_offset, rot2, this_symbol + first_carrier_offset, nb_rb * 6, 15);
-    mult_cpx_vector(this_symbol, shift_rot, this_symbol, nb_rb * 6, 15);
-    mult_cpx_vector(this_symbol + first_carrier_offset,
-                    shift_rot + first_carrier_offset,
-                    this_symbol + first_carrier_offset,
-                    nb_rb * 6,
-                    15);
-  }
+  rotate_cpx_vector(rxdataF, rot2, rxdataF, nb_rb * NR_NB_SC_PER_RB, 15);
+  mult_cpx_vector(rxdataF, shift_rot, rxdataF, nb_rb * NR_NB_SC_PER_RB, 15);
 }
 
 void nr_ofdm_demod_and_rx_rotation(c16_t **rxdata,
@@ -212,16 +195,21 @@ void nr_ofdm_demod_and_rx_rotation(c16_t **rxdata,
   for (int aa = 0; aa < nb_antennas; aa++) {
     for (uint8_t symbol = 0; symbol < fp->symbols_per_slot; symbol++) {
       if (was_symbol_used[symbol] == true) {
+        // OFDM Demod
         nr_symbol_fep_ul(fp, &rxdata[aa][0], &rxdataF[aa][slot_offsetF + symbol * fp->ofdm_symbol_size], symbol, slot, 0);
-        apply_nr_rotation_symbol_RX(fp->symbols_per_slot,
-                                    fp->slots_per_subframe,
-                                    fp->timeshift_symbol_rotation,
-                                    fp->first_carrier_offset,
-                                    &rxdataF[aa][slot_offsetF + symbol * fp->ofdm_symbol_size],
-                                    fp->symbol_rotation[linktype],
-                                    fp->N_RB_UL,
-                                    slot,
-                                    symbol);
+        // FFT-shift
+        fftshift_inplace(&rxdataF[aa][slot_offsetF + symbol * fp->ofdm_symbol_size],
+                         fp->N_RB_UL * NR_NB_SC_PER_RB,
+                         fp->ofdm_symbol_size);
+        // Phase compensation
+        apply_nr_rotation_symbol_fftshifted_RX(fp->symbols_per_slot,
+                                               fp->slots_per_subframe,
+                                               fp->timeshift_symbol_rotation,
+                                               &rxdataF[aa][slot_offsetF + symbol * fp->ofdm_symbol_size],
+                                               fp->symbol_rotation[linktype],
+                                               fp->N_RB_UL,
+                                               slot,
+                                               symbol);
       }
     }
   }

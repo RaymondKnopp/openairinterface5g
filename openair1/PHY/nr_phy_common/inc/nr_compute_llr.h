@@ -5,7 +5,17 @@
 #ifndef __NR_COMPUTE_LLR__H__
 #define __NR_COMPUTE_LLR__H__
 
-#include "PHY/impl_defs_top.h"
+#include "platform_types.h"
+
+void nr_qpsk_llr(const c16_t *rxdataF_comp, int16_t *llr, uint32_t nb_re);
+void nr_16qam_llr(const c16_t *rxdataF_comp, const c16_t *ch_mag_in, int16_t *llr, uint32_t nb_re);
+void nr_64qam_llr(const c16_t *rxdataF_comp, const c16_t *ch_mag, const c16_t *ch_mag2, int16_t *llr, uint32_t nb_re);
+void nr_256qam_llr(const c16_t *rxdataF_comp,
+                   const c16_t *ch_mag,
+                   const c16_t *ch_mag2,
+                   const c16_t *ch_mag3,
+                   int16_t *llr,
+                   uint32_t nb_re);
 
 /**
  * @brief Mod-order-dependent LLR-hotness offset for the 2-layer near-ML/L-best log2_maxh.
@@ -168,6 +178,7 @@ void nr_compute_ML_llr(c16_t *rxdataF_comp0,
 // Fused 2-layer linear MMSE + scalar LLR (L=1). = nr_mmse_2layers (Gram-fed equalize, now a
 // file-local static in nr_compute_llr.c — this is its sole public entry point) + per-layer
 // nr_compute_llr. UE: symbol=0 + pre-offset rxdataF_comp; gNB: symbol offset applied internally.
+#ifndef __cplusplus
 uint8_t nr_compute_MMSE_llr(c16_t **rxdataF_comp,
                             uint32_t buffer_length,
                             uint32_t pdsch_buf_size_max,
@@ -188,5 +199,27 @@ uint8_t nr_compute_MMSE_llr(c16_t **rxdataF_comp,
                             c16_t *rho10,
                             c16_t *rho11,
                             int16_t **llr);
+#else
+uint8_t nr_compute_MMSE_llr(c16_t **rxdataF_comp,
+                            uint32_t buffer_length,
+                            uint32_t pdsch_buf_size_max,
+                            int nb_rx_ant,
+                            int nb_layers,
+                            c16_t **ch_mag,
+                            c16_t **ch_magb,
+                            c16_t **ch_magc,
+                            c16_t ***ch_estimates_ext,
+                            unsigned short nb_rb,
+                            unsigned char mod_order,
+                            int shift,
+                            unsigned char symbol,
+                            int length,
+                            uint32_t noise_var,
+                            c16_t *rho00,
+                            c16_t *rho01,
+                            c16_t *rho10,
+                            c16_t *rho11,
+                            int16_t **llr);
+#endif
 
 #endif /* __NR_COMPUTE_LLR__H__ */

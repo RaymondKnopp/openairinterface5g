@@ -55,10 +55,24 @@ void nr_generate_dci(PHY_VARS_gNB *gNB,
                      const nfapi_nr_dl_tti_pdcch_pdu_rel15_t *pdcch_pdu_rel15,
                      NR_DL_FRAME_PARMS *frame_parms,
                      int slot,
-                     uint64_t *phase_comp_prb_mask,
                      int prb_mask_words)
 {
-  uint64_t local_phase_comp_prb_mask[frame_parms->symbols_per_slot][prb_mask_words];
+  /* DCIs in one PDU can go to different antenna ports (dci_spatial_stream_index below), so
+     the mask is per port: rotating them all on port 0 would leave the others unrotated and
+     rotate port 0 over PRBs that are not its own. Sized by the highest index actually used,
+     which is 1 entry in the common single-port case. */
+  uint16_t max_ant_idx = 0;
+  for (int d = 0; d < pdcch_pdu_rel15->numDlDci; d++) {
+    const nfapi_nr_dl_dci_pdu_t *dp = &pdcch_pdu_rel15->dci_pdu[d];
+    const uint16_t idx = get_first_ant_idx(gNB->enable_analog_das,
+                                           frame_parms->nb_antennas_tx / gNB->common_vars.num_beams_period,
+                                           dp->precodingAndBeamforming.prgs_list[0].dig_bf_interface_list[0].beam_idx,
+                                           get_dci_ant_port_index(&pdcch_pdu_rel15->param_v4, d));
+    if (idx > max_ant_idx)
+      max_ant_idx = idx;
+  }
+  const int n_ant_mask = max_ant_idx + 1;
+  uint64_t local_phase_comp_prb_mask[n_ant_mask][frame_parms->symbols_per_slot][prb_mask_words];
   memset(local_phase_comp_prb_mask, 0, sizeof(local_phase_comp_prb_mask));
   // fill reg list per symbol
   int reg_list[MAX_DCI_CORESET][NR_MAX_PDCCH_AGG_LEVEL * NR_NB_REG_PER_CCE];
@@ -237,7 +251,7 @@ void nr_generate_dci(PHY_VARS_gNB *gNB,
           k++;
         } // m
         if (gNB->phase_comp)
-          mark_prb(&local_phase_comp_prb_mask[0][0], prb_mask_words, l, reg_prb);
+          mark_prb(&local_phase_comp_prb_mask[dci_spatial_stream_index][0][0], prb_mask_words, l, reg_prb);
       } // reg_count
     } // symbol_idx
 
@@ -251,25 +265,24 @@ void nr_generate_dci(PHY_VARS_gNB *gNB,
     return;
 
   const int symb_offset = (slot % frame_parms->slots_per_subframe) * frame_parms->symbols_per_slot;
-  c16_t *txdataF = gNB->common_vars.txdataF[0];
-  for (int symbol = pdcch_pdu_rel15->StartSymbolIndex;
-       symbol < pdcch_pdu_rel15->StartSymbolIndex + pdcch_pdu_rel15->DurationSymbols;
-       symbol++) {
-    uint64_t *local_symbol_mask = &local_phase_comp_prb_mask[symbol][0];
-    int prb = 0;
-    while (prb < frame_parms->N_RB_DL) {
-      while (prb < frame_parms->N_RB_DL && !prb_marked(local_symbol_mask, prb))
-        prb++;
-      const int start_prb = prb;
-      while (prb < frame_parms->N_RB_DL && prb_marked(local_symbol_mask, prb))
-        prb++;
-      if (prb > start_prb) {
-        c16_t *this_symbol = txdataF + symbol * frame_parms->ofdm_symbol_size + start_prb * NR_NB_SC_PER_RB;
-        const c16_t rot = frame_parms->symbol_rotation[0][symb_offset + symbol];
-        rotate_cpx_vector(this_symbol, rot, this_symbol, (prb - start_prb) * NR_NB_SC_PER_RB, 15);
-        uint64_t *global_symbol_mask = phase_comp_prb_mask;
-        for (int rr = start_prb; rr < prb; rr++)
-          global_symbol_mask[rr >> 6] |= UINT64_C(1) << (rr & 63);
+  for (int ant = 0; ant < n_ant_mask; ant++) {
+    c16_t *txdataF = gNB->common_vars.txdataF[ant];
+    for (int symbol = pdcch_pdu_rel15->StartSymbolIndex;
+         symbol < pdcch_pdu_rel15->StartSymbolIndex + pdcch_pdu_rel15->DurationSymbols;
+         symbol++) {
+      uint64_t *local_symbol_mask = &local_phase_comp_prb_mask[ant][symbol][0];
+      int prb = 0;
+      while (prb < frame_parms->N_RB_DL) {
+        while (prb < frame_parms->N_RB_DL && !prb_marked(local_symbol_mask, prb))
+          prb++;
+        const int start_prb = prb;
+        while (prb < frame_parms->N_RB_DL && prb_marked(local_symbol_mask, prb))
+          prb++;
+        if (prb > start_prb) {
+          c16_t *this_symbol = txdataF + symbol * frame_parms->ofdm_symbol_size + start_prb * NR_NB_SC_PER_RB;
+          const c16_t rot = frame_parms->symbol_rotation[0][symb_offset + symbol];
+          rotate_cpx_vector(this_symbol, rot, this_symbol, (prb - start_prb) * NR_NB_SC_PER_RB, 15);
+        }
       }
     }
   }

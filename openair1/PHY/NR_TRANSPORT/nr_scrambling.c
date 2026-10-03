@@ -18,9 +18,9 @@ void nr_codeword_scrambling(uint8_t *in,
   unsigned int i_32 = 0;
 #ifdef __AVX2__
   for (; i_32 < ((roundedSz >> 3) << 3); i_32 += 8) {
-    __m256i in_256 = _mm256_loadu_si256((void*)&((uint32_t *)in)[i_32]);
-    __m256i seq_256 = _mm256_loadu_si256((void*)&seq[i_32]);
-    _mm256_storeu_si256((void*)&out[i_32], _mm256_xor_si256(in_256, seq_256));
+    __m256i in_256 = _mm256_loadu_si256((void *)&((uint32_t *)in)[i_32]);
+    __m256i seq_256 = _mm256_loadu_si256((void *)&seq[i_32]);
+    _mm256_storeu_si256((void *)&out[i_32], _mm256_xor_si256(in_256, seq_256));
   }
 #endif
 #if defined(__aarch64__)

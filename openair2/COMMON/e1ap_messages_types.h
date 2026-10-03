@@ -34,6 +34,8 @@
 #define E1AP_BEARER_CONTEXT_MODIFICATION_REQ(mSGpTR)      (mSGpTR)->ittiMsg.e1ap_bearer_mod_req
 #define E1AP_BEARER_CONTEXT_MODIFICATION_RESP(mSGpTR)     (mSGpTR)->ittiMsg.e1ap_bearer_modif_resp
 #define E1AP_BEARER_CONTEXT_MODIFICATION_FAIL(mSGpTR)     (mSGpTR)->ittiMsg.e1ap_bearer_modif_fail
+#define E1AP_BEARER_CONTEXT_MODIFICATION_REQUIRED(mSGpTR) (mSGpTR)->ittiMsg.e1ap_bearer_mod_required
+#define E1AP_BEARER_CONTEXT_MODIFICATION_CONFIRM(mSGpTR)  (mSGpTR)->ittiMsg.e1ap_bearer_mod_confirm
 #define E1AP_BEARER_CONTEXT_RELEASE_CMD(mSGpTR)           (mSGpTR)->ittiMsg.e1ap_bearer_release_cmd
 #define E1AP_BEARER_CONTEXT_RELEASE_CPLT(mSGpTR)          (mSGpTR)->ittiMsg.e1ap_bearer_release_cplt
 #define E1AP_LOST_CONNECTION(mSGpTR)                      (mSGpTR)->ittiMsg.e1ap_lost_connection
@@ -478,6 +480,23 @@ typedef struct {
   e1ap_cause_t cause;
 } pdu_session_to_remove_t;
 
+/** DRB Required To Modify Item (NG-RAN) */
+typedef struct {
+  // DRB ID (M)
+  long id;
+  // Cause (O)
+  e1ap_cause_t cause;
+} DRB_nGRAN_required_to_mod_t;
+
+/** PDU Session Resource Required To Modify List */
+typedef struct {
+  // PDU Session ID (M)
+  long sessionId;
+  // DRB Required To Modify List (O)
+  int numDRB2Modify;
+  DRB_nGRAN_required_to_mod_t DRBnGRanModList[E1AP_MAX_NUM_DRBS];
+} pdu_session_required_to_mod_t;
+
 /**
  * Bearer Context Setup Request message, clause 9.2.2.1 of 3GPP TS 38.463
  */
@@ -660,5 +679,26 @@ typedef struct e1ap_bearer_context_mod_failure_s {
   // NG-RAN PDU Session Resource Modified List (O)
   e1ap_cause_t cause;
 } e1ap_bearer_context_mod_failure_t;
+
+/**
+ * Bearer Context Modification Required (9.2.2.7 3GPP TS 38.463)
+ * (gNB-CU-UP -> gNB-CU-CP)
+ */
+typedef struct e1ap_bearer_mod_required_s {
+  uint32_t gNB_cu_cp_ue_id;
+  uint32_t gNB_cu_up_ue_id;
+  // PDU Session Resource Required To Modify List (O)
+  int numPDUSessionsMod;
+  pdu_session_required_to_mod_t *pduSessionMod;
+  // PDU Session Resource To Remove List (O)
+  int numPDUSessionsRem;
+  pdu_session_to_remove_t *pduSessionRem;
+} e1ap_bearer_mod_required_t;
+
+/** Bearer Context Modification Confirm (9.2.2.8 3GPP TS 38.463) */
+typedef struct e1ap_bearer_mod_confirm_s {
+  uint32_t gNB_cu_cp_ue_id;
+  uint32_t gNB_cu_up_ue_id;
+} e1ap_bearer_mod_confirm_t;
 
 #endif /* E1AP_MESSAGES_TYPES_H */

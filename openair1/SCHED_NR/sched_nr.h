@@ -42,7 +42,6 @@ void nr_common_signal_procedures(PHY_VARS_gNB *gNB,
                                  int frame,
                                  int slot,
                                  const nfapi_nr_dl_tti_ssb_pdu *ssb_pdu,
-                                 uint64_t *phase_comp_prb_mask,
                                  int prb_mask_words);
 void nr_feptx_ofdm(RU_t *ru,int frame_tx,int tti_tx);
 void nr_feptx0(RU_t *ru,int tti_tx,int first_symbol, int num_symbols, int aa);

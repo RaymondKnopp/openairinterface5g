@@ -18,6 +18,7 @@
 #include "SCHED_NR_UE/harq_nr.h"
 #include "nr-uesoftmodem.h"
 #include "common/config/config_userapi.h"
+#include "nr_phy_common.h"
 #ifdef LDPC_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -258,7 +259,11 @@ int init_nr_ue_signal(PHY_VARS_NR_UE *ue, int nb_connected_gNB)
 
   ue->init_averaging = 1;
   init_symbol_rotation(fp);
-  init_timeshift_rotation(fp->ofdm_symbol_size, fp->nb_prefix_samples, fp->ofdm_offset_divisor, fp->timeshift_symbol_rotation);
+  init_timeshift_rotation(fp->ofdm_symbol_size,
+                          fp->N_RB_DL * NR_NB_SC_PER_RB,
+                          fp->nb_prefix_samples,
+                          fp->ofdm_offset_divisor,
+                          fp->timeshift_symbol_rotation);
 
   // initialize to false only for SA since in do-ra and phy-test it is already set to true before getting here
   if (IS_SA_MODE(get_softmodem_params()))
@@ -489,7 +494,7 @@ void nr_init_ul_harq_processes(NR_UL_UE_HARQ_t harq_list[NR_MAX_HARQ_PROCESSES],
   }
 }
 
-void nr_init_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors, const NR_DL_FRAME_PARMS *fp)
+void nr_init_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors, const NR_DL_FRAME_PARMS *fp, bool do_ml)
 {
   const uint32_t pdsch_buf_size_max = (fp->N_RB_DL * NR_NB_SC_PER_RB + 15) & ~15;
   const uint32_t pdsch_est_size = fp->symbols_per_slot * fp->ofdm_symbol_size;
@@ -512,7 +517,9 @@ void nr_init_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors, const NR_DL
     buffers[i].dl_ch_magr            = malloc16_clear(comp_elems_sym * sizeof(c16_t));
     buffers[i].rho_dl                = malloc16_clear(rho_elems      * sizeof(c16_t));
     buffers[i].pdsch_dl_ch_estimates = malloc16_clear(ch_est_elems * sizeof(int32_t));
-    for (int c = 0; c < 2; c++) {
+    /* Per TS 38.211 Table 7.3.1.3-1, 1 codeword is used for 1-4 layers.
+     * NR_MAX_NB_LAYERS == 4, so llr[1] is never needed. */
+    for (int c = 0; c < 1; c++) {
 #ifdef LDPC_CUDA
       cudaError_t err = cudaHostAlloc((void **)&buffers[i].llr[c], (66 * 3 * 8448) * sizeof(int16_t), cudaHostAllocMapped);
       AssertFatal(err == cudaSuccess, "CUDA Error (pusch_llr): %s\n", cudaGetErrorString(err));
@@ -523,6 +530,7 @@ void nr_init_pdsch_buffers(pdsch_scratch_t *buffers, int num_actors, const NR_DL
 #endif
     }
     buffers[i].scramble              = malloc16(llr_buf_max * sizeof(int16_t));
+    buffers[i].llr[1] = NULL;
   }
 }
 
@@ -533,7 +541,7 @@ void init_nr_ue_transport(PHY_VARS_NR_UE *ue)
   const int num_actors = get_nrUE_params()->num_dl_actors > 0 ? get_nrUE_params()->num_dl_actors : 1;
   ue->pdsch_num_actors = num_actors;
   ue->pdsch_scratch = calloc_or_fail(num_actors, sizeof(*ue->pdsch_scratch));
-  nr_init_pdsch_buffers(ue->pdsch_scratch, num_actors, &ue->frame_parms);
+  nr_init_pdsch_buffers(ue->pdsch_scratch, num_actors, &ue->frame_parms, ue->do_ml);
 }
 
 void init_phy_nr_measurements(PHY_VARS_NR_UE *ue)

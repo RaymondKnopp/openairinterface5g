@@ -166,49 +166,6 @@ static void select_preamble_group(NR_UE_MAC_INST_t *mac)
   // else if Msg3 is being retransmitted, we keep what used in first transmission of Msg3
 }
 
-ssb_ro_preambles_t get_ssb_ro_preambles_4step(struct NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB *config)
-{
-  ssb_ro_preambles_t ret = {0};
-  switch (config->present) {
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_oneEighth:
-      ret.ssb_per_ro = 0.125;
-      ret.preambles_per_ssb = (config->choice.oneEighth + 1) << 2;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_oneFourth:
-      ret.ssb_per_ro = 0.25;
-      ret.preambles_per_ssb = (config->choice.oneFourth + 1) << 2;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_oneHalf:
-      ret.ssb_per_ro = 0.5;
-      ret.preambles_per_ssb = (config->choice.oneHalf + 1) << 2;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_one:
-      ret.ssb_per_ro = 1;
-      ret.preambles_per_ssb = (config->choice.one + 1) << 2;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_two:
-      ret.ssb_per_ro = 2;
-      ret.preambles_per_ssb = (config->choice.two + 1) << 2;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_four:
-      ret.ssb_per_ro = 4;
-      ret.preambles_per_ssb = config->choice.four;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_eight:
-      ret.ssb_per_ro = 8;
-      ret.preambles_per_ssb = config->choice.eight;
-      break;
-    case NR_RACH_ConfigCommon__ssb_perRACH_OccasionAndCB_PreamblesPerSSB_PR_sixteen:
-      ret.ssb_per_ro = 16;
-      ret.preambles_per_ssb = config->choice.sixteen;
-      break;
-    default:
-      AssertFatal(false, "Invalid ssb_perRACH_OccasionAndCB_PreamblesPerSSB\n");
-  }
-  LOG_D(NR_MAC, "SSB per RO %f preambles per SSB %d\n", ret.ssb_per_ro, ret.preambles_per_ssb);
-  return ret;
-}
-
 static ssb_ro_preambles_t get_ssb_ro_preambles_2step(struct NR_RACH_ConfigCommonTwoStepRA_r16__msgA_SSB_PerRACH_OccasionAndCB_PreamblesPerSSB_r16 *config)
 {
   ssb_ro_preambles_t ret = {0};
@@ -1206,8 +1163,10 @@ void prepare_msg4_msgb_feedback(NR_UE_MAC_INST_t *mac, int pid, int ack_nack)
                          .n_harq = 1};
   current_harq->active = false;
   current_harq->ack_received = false;
-  const NR_UE_UL_BWP_t *current_UL_BWP = mac->current_UL_BWP;
-  configure_initial_pucch(&pucch, current_harq->pucch_resource_indicator, current_UL_BWP->pucch_ConfigCommon->pucch_ResourceCommon);
+  // Msg4/MsgB HARQ set on TC-RNTI DCI:
+  // reuse Table 9.2.1-1 row frozen there, do not re-read active BWP ConfigCommon
+  DevAssert(current_harq->pucch_ResourceCommon >= 0);
+  configure_initial_pucch(&pucch, current_harq->pucch_resource_indicator, current_harq->pucch_ResourceCommon);
 
   RA_config_t *ra = &mac->ra;
   ra->ra_pucch = calloc_or_fail(1, sizeof(*ra->ra_pucch));

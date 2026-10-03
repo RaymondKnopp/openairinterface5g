@@ -15,6 +15,9 @@
 #include "common/utils/LOG/log.h"
 #include "PHY/INIT/nr_phy_init.h"
 #include "PHY/MODULATION/nr_modulation.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common_csi_rs.h"
+#include "PHY/nr_phy_common/inc/nr_phy_common_srs.h"
 #include "PHY/NR_REFSIG/ss_pbch_nr.h"
 #include "T.h"
 #include "T_messages_creator.h"
@@ -26,6 +29,11 @@
 #include <sys/time.h>
 #include <stdint.h>
 #include <openair1/PHY/TOOLS/phy_scope_interface.h>
+
+#ifdef E3_AGENT
+#include "openair2/E3AP/service_models/l1_kpm_sm/e3_ran_buffers.h"
+#include "openair2/E3AP/service_models/l1_kpm_sm/l1_kpm_sm.h"
+#endif // E3_AGENT
 
 //#define DEBUG_RXDATA
 //#define SRS_IND_DEBUG
@@ -79,36 +87,12 @@ static inline void apply_nr_rotation_TX_segment(const NR_DL_FRAME_PARMS *fp,
   rotate_cpx_vector(this_symbol, rot, this_symbol, nb_prb * NR_NB_SC_PER_RB, 15);
 }
 
-static void merge_prb_mask(const NR_DL_FRAME_PARMS *fp,
-                           const uint64_t *local_prb_mask,
-                           uint64_t *global_prb_mask,
-                           int prb_mask_words)
-{
-  for (int symbol = 0; symbol < fp->symbols_per_slot; symbol++) {
-    const uint64_t *local_symbol_mask = local_prb_mask + symbol * prb_mask_words;
-    uint64_t *global_symbol_mask = global_prb_mask + symbol * prb_mask_words;
-    int prb = 0;
-    while (prb < fp->N_RB_DL) {
-      while (prb < fp->N_RB_DL && !prb_is_rotated(local_symbol_mask, prb))
-        prb++;
-      const int start_prb = prb;
-      while (prb < fp->N_RB_DL && prb_is_rotated(local_symbol_mask, prb))
-        prb++;
-      if (prb > start_prb) {
-        for (int rr = start_prb; rr < prb; rr++)
-          global_symbol_mask[rr >> 6] |= UINT64_C(1) << (rr & 63);
-      }
-    }
-  }
-}
-
 static void apply_nr_rotation_TX_masked(const NR_DL_FRAME_PARMS *fp,
                                         c16_t **txdataF,
                                         int num_tx_buffers,
                                         const c16_t *symbol_rotation,
                                         int slot,
                                         const uint64_t *local_prb_mask,
-                                        uint64_t *global_prb_mask,
                                         int prb_mask_words)
 {
   for (int aa = 0; aa < num_tx_buffers; aa++) {
@@ -125,12 +109,10 @@ static void apply_nr_rotation_TX_masked(const NR_DL_FRAME_PARMS *fp,
           prb++;
         if (prb > start_prb) {
           apply_nr_rotation_TX_segment(fp, txdataF[aa], symbol_rotation, slot, symbol, start_prb, prb - start_prb);
-	}
+        }
       }
     }
   }
-
-  merge_prb_mask(fp, local_prb_mask, global_prb_mask, prb_mask_words);
 }
 
 void beam_index_allocation(uint16_t fapi_beam_index,
@@ -164,12 +146,7 @@ uint16_t get_first_ant_idx(bool das, uint16_t num_ports_beams, uint16_t beam_id,
   return ((das) ? (beam_id & 0x7fff) * num_ports_beams : fapi_start_port);
 }
 
-void nr_common_signal_procedures(PHY_VARS_gNB *gNB,
-                                 int frame,
-                                 int slot,
-                                 const nfapi_nr_dl_tti_ssb_pdu *ssb_pdu,
-                                 uint64_t *phase_comp_prb_mask,
-                                 int prb_mask_words)
+void nr_common_signal_procedures(PHY_VARS_gNB *gNB, int frame, int slot, const nfapi_nr_dl_tti_ssb_pdu *ssb_pdu, int prb_mask_words)
 {
   NR_DL_FRAME_PARMS *fp = &gNB->frame_parms;
   const nfapi_nr_dl_tti_ssb_pdu_rel15_t *pdu = &ssb_pdu->ssb_pdu_rel15;
@@ -259,15 +236,9 @@ void nr_common_signal_procedures(PHY_VARS_gNB *gNB,
   for (int symbol = ssb_start_symbol; symbol < ssb_start_symbol + NR_N_SYMBOLS_SSB; symbol++)
     mark_prb_range(&local_phase_comp_prb_mask[0][0], prb_mask_words, symbol, ssb_start_prb, ssb_nb_prb);
 
-  c16_t *ssb_txdataF[] = {txdataF[0]};
-  apply_nr_rotation_TX_masked(fp,
-                              ssb_txdataF,
-                              1,
-                              fp->symbol_rotation[0],
-                              slot,
-                              &local_phase_comp_prb_mask[0][0],
-                              phase_comp_prb_mask,
-                              prb_mask_words);
+  /* the SSB was written to txdataF[ant_port] above, so rotate that port -- not port 0 */
+  c16_t *ssb_txdataF[] = {txdataF[ant_port]};
+  apply_nr_rotation_TX_masked(fp, ssb_txdataF, 1, fp->symbol_rotation[0], slot, &local_phase_comp_prb_mask[0][0], prb_mask_words);
 }
 
 // clearing beam information to be provided to RU for all slots (DL and UL)
@@ -282,11 +253,7 @@ void clear_slot_beamid(PHY_VARS_gNB *gNB, int slot)
     }
 }
 
-static void nr_generate_csi_rs_gNB(PHY_VARS_gNB *gNB,
-                                   int slot,
-                                   const nfapi_nr_dl_tti_csi_rs_pdu *csi_rs_pdu,
-                                   uint64_t *phase_comp_prb_mask,
-                                   int prb_mask_words)
+static void nr_generate_csi_rs_gNB(PHY_VARS_gNB *gNB, int slot, const nfapi_nr_dl_tti_csi_rs_pdu *csi_rs_pdu, int prb_mask_words)
 {
   const nfapi_nr_dl_tti_csi_rs_pdu_rel15_t *csi_params = &csi_rs_pdu->csi_rs_pdu_rel15;
   if (csi_params->csi_type == 2) // ZP-CSI
@@ -359,16 +326,10 @@ static void nr_generate_csi_rs_gNB(PHY_VARS_gNB *gNB,
                               gNB->frame_parms.symbol_rotation[0],
                               slot,
                               &local_phase_comp_prb_mask[0][0],
-                              phase_comp_prb_mask,
                               prb_mask_words);
 }
 
-static void nr_generate_prs_gNB(PHY_VARS_gNB *gNB,
-                                int slot,
-                                int slot_prs,
-                                prs_config_t *prs_config,
-                                uint64_t *phase_comp_prb_mask,
-                                int prb_mask_words)
+static void nr_generate_prs_gNB(PHY_VARS_gNB *gNB, int slot, int slot_prs, prs_config_t *prs_config, int prb_mask_words)
 {
   const NR_DL_FRAME_PARMS *fp = &gNB->frame_parms;
   nr_generate_prs(slot_prs, gNB->common_vars.txdataF[0], AMP, prs_config, fp);
@@ -382,15 +343,9 @@ static void nr_generate_prs_gNB(PHY_VARS_gNB *gNB,
     mark_prb_range(&local_phase_comp_prb_mask[0][0], prb_mask_words, symbol, prs_config->RBOffset, prs_config->NumRB);
 
   c16_t *prs_txdataF[] = {gNB->common_vars.txdataF[0]};
-  apply_nr_rotation_TX_masked(fp,
-                              prs_txdataF,
-                              1,
-                              fp->symbol_rotation[0],
-                              slot,
-                              &local_phase_comp_prb_mask[0][0],
-                              phase_comp_prb_mask,
-                              prb_mask_words);
+  apply_nr_rotation_TX_masked(fp, prs_txdataF, 1, fp->symbol_rotation[0], slot, &local_phase_comp_prb_mask[0][0], prb_mask_words);
 }
+
 
 /* Collect the slot's PDSCH PDUs and encode them, leaving the result in enc.
  *
@@ -461,8 +416,6 @@ void phy_procedures_gNB_TX_generate(PHY_VARS_gNB *gNB,
     return;
 
   const int prb_mask_words = (fp->N_RB_DL + 63) >> 6;
-  uint64_t phase_comp_prb_mask[gNB->common_vars.num_beams_period][fp->symbols_per_slot][prb_mask_words];
-  memset(phase_comp_prb_mask, 0, sizeof(phase_comp_prb_mask));
 
   // clear the transmit data array and beam index for the current slot
   for (int aa = 0; aa < fp->nb_antennas_tx; aa++) {
@@ -479,50 +432,37 @@ void phy_procedures_gNB_TX_generate(PHY_VARS_gNB *gNB,
       {
         int slot_prs = (slot - i * prs_config->PRSResourceTimeGap + fp->slots_per_frame) % fp->slots_per_frame;
         LOG_D(PHY,"gNB_TX: frame %d, slot %d, slot_prs %d, PRS Resource ID %d\n",frame, slot, slot_prs, rsc_id);
-        nr_generate_prs_gNB(gNB, slot, slot_prs, prs_config, &phase_comp_prb_mask[0][0][0], prb_mask_words);
+        nr_generate_prs_gNB(gNB, slot, slot_prs, prs_config, prb_mask_words);
       }
     }
   }
 
   for (int i = 0; i < UL_dci_req->numPdus; ++i)
-    nr_generate_dci(gNB,
-                    &UL_dci_req->ul_dci_pdu_list[i].pdcch_pdu.pdcch_pdu_rel15,
-                    &gNB->frame_parms,
-                    slot,
-                    &phase_comp_prb_mask[0][0][0],
-                    prb_mask_words);
+    nr_generate_dci(gNB, &UL_dci_req->ul_dci_pdu_list[i].pdcch_pdu.pdcch_pdu_rel15, &gNB->frame_parms, slot, prb_mask_words);
 
   for (int i = 0; i < DL_req->dl_tti_request_body.nPDUs; ++i) {
     const nfapi_nr_dl_tti_request_pdu_t *dl_tti_pdu = &DL_req->dl_tti_request_body.dl_tti_pdu_list[i];
     switch (dl_tti_pdu->PDUType) {
       case NFAPI_NR_DL_TTI_SSB_PDU_TYPE:
-        nr_common_signal_procedures(gNB,
-                                    frame,
-                                    slot,
-                                    &dl_tti_pdu->ssb_pdu,
-                                    &phase_comp_prb_mask[0][0][0],
-                                    prb_mask_words);
+        nr_common_signal_procedures(gNB, frame, slot, &dl_tti_pdu->ssb_pdu, prb_mask_words);
         break;
       case NFAPI_NR_DL_TTI_PDCCH_PDU_TYPE:
-        nr_generate_dci(gNB,
-                        &dl_tti_pdu->pdcch_pdu.pdcch_pdu_rel15,
-                        &gNB->frame_parms,
-                        slot,
-                        &phase_comp_prb_mask[0][0][0],
-                        prb_mask_words);
+        nr_generate_dci(gNB, &dl_tti_pdu->pdcch_pdu.pdcch_pdu_rel15, &gNB->frame_parms, slot, prb_mask_words);
         break;
       case NFAPI_NR_DL_TTI_CSI_RS_PDU_TYPE:
-        nr_generate_csi_rs_gNB(gNB, slot, &dl_tti_pdu->csi_rs_pdu, &phase_comp_prb_mask[0][0][0], prb_mask_words);
-        break;
-      case NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE:
-        /* handled by phy_procedures_gNB_TX_encode() */
+        nr_generate_csi_rs_gNB(gNB, slot, &dl_tti_pdu->csi_rs_pdu, prb_mask_words);
         break;
     }
   }
 
   if (enc->n_pdsch > 0) {
     LOG_D(PHY, "PDSCH generation started (%d) in frame %d.%d\n", enc->n_pdsch, frame, slot);
-    nr_dlsch_generate(gNB, slot, enc, &phase_comp_prb_mask[0][0][0], prb_mask_words);
+    /* PDSCH rotates its own PRBs inline inside nr_dlsch_generate; the mask it fills was
+       only ever consumed by the global merge, which develop removed in favour of each
+       generator rotating locally.  Keep it local so the record still exists for debug. */
+    uint64_t pdsch_phase_comp_prb_mask[fp->symbols_per_slot][prb_mask_words];
+    memset(pdsch_phase_comp_prb_mask, 0, sizeof(pdsch_phase_comp_prb_mask));
+    nr_dlsch_generate(gNB, slot, enc, &pdsch_phase_comp_prb_mask[0][0], prb_mask_words);
   }
 
   START_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
@@ -534,7 +474,6 @@ void phy_procedures_gNB_TX_generate(PHY_VARS_gNB *gNB,
         T_INT(aa),
         T_BUFFER(gNB->common_vars.txdataF[aa], fp->samples_per_slot_wCP * sizeof(int32_t)));
   }
-  STOP_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
 }
 
 /* Both halves on one slot, back to back: the original behaviour. */
@@ -946,7 +885,6 @@ nr_srs_info_t nr_srs_rx_procedures(PHY_VARS_gNB *gNB,
         nr_srs_ls_channel_estimation(ant_rx_ind,
                                      p_ind,
                                      ofdm_symbol_size,
-                                     frame_parms->first_carrier_offset,
                                      N_symb_SRS,
                                      srs_pdu,
                                      &nr_srs_info,
@@ -1018,7 +956,6 @@ nr_srs_info_t nr_srs_rx_procedures(PHY_VARS_gNB *gNB,
     for (int ant_rx_ind = 0; ant_rx_ind < nb_antennas_rx; ant_rx_ind++) {
       uint32_t noise_power_per_ant = 0;
       nr_srs_noise_power_estimation(ofdm_symbol_size,
-                                    frame_parms->first_carrier_offset,
                                     N_symb_SRS,
                                     srs_pdu,
                                     &nr_srs_info,
@@ -1104,7 +1041,9 @@ static void handle_srs(fsn_t now,
                                                 &timing_advance_offset,
                                                 timing_advance_offset_nsec);
 
-  if ((snr * 10) < gNB->srs_thres) {
+  // Measurement outputs are valid on raw success (including 0), before SNR thresholding.
+  const bool estimate_valid = srs_est >= 0;
+  if (estimate_valid && (snr * 10) < gNB->srs_thres) {
     srs_est = -1;
   }
 
@@ -1140,6 +1079,13 @@ static void handle_srs(fsn_t now,
   nfapi_srs_report_tlv_t *report_tlv = &srs_indication->report_tlv;
   report_tlv->tag = 0;
   report_tlv->length = 0;
+
+  if (!estimate_valid) {
+    srs_indication->report_type = 0;
+    if (srs_indication->srs_usage == NFAPI_NR_SRS_POSITIONING)
+      srs_toa_v_ext->num_ta = 0;
+    return;
+  }
 
   start_meas(&gNB->srs_report_tlv_stats);
   switch (srs_indication->srs_usage) {
@@ -1207,13 +1153,17 @@ static void handle_pucch(PHY_VARS_gNB *gNB, c16_t **rxdataF, const NR_gNB_PUCCH_
       uci->pdu_type = NFAPI_NR_UCI_FORMAT_0_1_PDU_TYPE;
       uci->pdu_size = sizeof(nfapi_nr_uci_pucch_pdu_format_0_1_t);
       nfapi_nr_uci_pucch_pdu_format_0_1_t *uci_pdu_format0 = &uci->pucch_pdu_format_0_1;
+      start_meas(&gNB->pucch01_proc_rx);
       nr_decode_pucch0(gNB, rxdataF, pucch->frame, pucch->slot, uci_pdu_format0, pucch_pdu);
+      stop_meas(&gNB->pucch01_proc_rx);
       break;
     case 2:
       uci->pdu_type = NFAPI_NR_UCI_FORMAT_2_3_4_PDU_TYPE;
       uci->pdu_size = sizeof(nfapi_nr_uci_pucch_pdu_format_2_3_4_t);
       nfapi_nr_uci_pucch_pdu_format_2_3_4_t *uci_pdu_format2 = &uci->pucch_pdu_format_2_3_4;
+      start_meas(&gNB->pucch23_proc_rx);
       nr_decode_pucch2(gNB, rxdataF, pucch->frame, pucch->slot, uci_pdu_format2, pucch_pdu);
+      stop_meas(&gNB->pucch23_proc_rx);
       break;
     default:
       AssertFatal(1 == 0, "Only PUCCH formats 0 and 2 are currently supported\n");
@@ -1602,6 +1552,15 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
       T_INT(slot_rx),
       T_BUFFER(&gNB->common_vars.rxdataF[0][0], frame_parms->symbols_per_slot * ofdm_symbol_size * 4));
   }
+
+#ifdef E3_AGENT
+  /* Hand this slot's IQ to the L1-KPM SM (RF=2) via /e3_ran_buffers. rx_func()
+   * only reaches here on UL and mixed slots, so the subscription is the only
+   * thing left to check. */
+  if (l1_kpm_sm_has_subscribers()) {
+    e3_ran_buffers_push_rxdataF(gNB, frame_rx, slot_rx);
+  }
+#endif // E3_AGENT
 
   return pusch_DTX;
 }

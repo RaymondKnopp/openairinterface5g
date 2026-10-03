@@ -88,6 +88,7 @@ https://github.com/duranta-project/openairinterface5g/labels/BUILD-ONLY
 https://github.com/duranta-project/openairinterface5g/labels/4G-LTE
 https://github.com/duranta-project/openairinterface5g/labels/5G-NR
 https://github.com/duranta-project/openairinterface5g/labels/nrUE
+https://github.com/duranta-project/openairinterface5g/labels/O-RU
 
 This pipeline has basically two main stages, as follows. For the image build,
 please also refer to the [dedicated documentation](../docker/README.md) for

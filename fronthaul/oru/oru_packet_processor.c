@@ -35,11 +35,14 @@
 #define NUM_CONCURRENT_DL_SYMBOL_WINDOWS MAX_CONCURRENT_DL_JOBS
 #define NUM_CONCURRENT_UL_SYMBOL_WINDOWS 128
 #define MAX_ANTENNAS 4
+#define NUM_RU_PORT_IDS 16 // The eAxC layout allocates four bits to the RU port.
 #define NR_NUMBER_OF_SUBFRAMES_PER_FRAME 10
 #define MAX_TDD_PATTERN_LENGTH_MS 10
 #define MAX_SLOTS_PER_MS 4
 #define SYMBOL_BITMASK_SIZE ((NR_SYMBOLS_PER_SLOT * MAX_TDD_PATTERN_LENGTH_MS * MAX_SLOTS_PER_MS + 7) / 8)
-#define MAX_RX_FRAGMENTS 4
+// O-RAN CUS, 5.5 allows application fragmentation; retain each fragment until symbol assembly.
+// A 273-PRB symbol needs ten uncompressed or six BFP9 fragments at MTU 1500.
+#define MAX_RX_FRAGMENTS 16
 #define MAX_MBUFS_PER_SYMBOL 64
 #define MAX_SLOTS_PER_FRAME 160
 #define XRAN_IQ_BITS_UNCOMPRESSED 16 /* xRAN table 7.7.1.1-1: udIqWidth=0 means 16-bit samples */
@@ -120,7 +123,8 @@ typedef struct {
   alloc_func_t alloc_func;
   send_func_t send_func;
   void *io_controller;
-  _Atomic(uint8_t) pusch_seq_id[MAX_ANTENNAS];
+  // O-RAN CUS, 5.1.3.2.8: sequence IDs advance per U-plane UL eAxC, not per channel type.
+  _Atomic(uint8_t) ul_seq_id[NUM_RU_PORT_IDS];
   size_t mtu;
   fh_comp_method_t dl_comp_method;
 } oru_packet_processor_context_t;
@@ -444,6 +448,7 @@ void handle_uplane_packet(void *context, void *pkt)
   } else {
     LOG_W(HW, "ORU: Dropping extra segment for Ant %d, sym %lu\n", Ant_ID, target_absolute_symbol);
     rte_pktmbuf_free(pkt);
+    return;
   }
   job->received_iq += num_prbu == 0 ? ctx->num_prb : num_prbu;
   job->comp_method = (fh_comp_method_t)compMeth;
@@ -1095,7 +1100,7 @@ void write_ul_iq(void *context, uint32_t *rxdataF, int symbol, const ul_job_t *j
 
     struct xran_ecpri_hdr *ecpri_header = (struct xran_ecpri_hdr *)buf;
     uint16_t ecpri_payload_size = (uint16_t)(header_length - 4 + data_len);
-    fill_ecpri_header(ecpri_header, &ctx->eaxcid_config, ECPRI_IQ_DATA, ecpri_payload_size, 0, aarx, ctx->pusch_seq_id[aarx]++, 0);
+    fill_ecpri_header(ecpri_header, &ctx->eaxcid_config, ECPRI_IQ_DATA, ecpri_payload_size, 0, aarx, ctx->ul_seq_id[aarx]++, 0);
 
     struct radio_app_common_hdr *radio_app_header = (struct radio_app_common_hdr *)(ecpri_header + 1);
     fill_radio_app_header(radio_app_header, 0, XRAN_DIR_UL, frame, slot_in_frame, symbol, mu);
@@ -1211,8 +1216,13 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
     if (prach_compressed)
       header_length += sizeof(struct data_section_compression_hdr);
     const uint prach_length = 139;
+    // O-RAN CUS, 8.3.2: uncompressed U-plane sections carry all 12 complex REs of each advertised PRB.
     size_t data_len = prach_compressed ? (size_t)FH_COMP_PRB_BYTES(job->iq_width) * FH_PRACH_NUM_PRBS
-                                       : (size_t)(prach_length + ctx->prach_kbar) * 2 * sizeof(uint16_t);
+                                       : (size_t)num_ul_rbs * NR_NB_SC_PER_RB * sizeof(c16_t);
+    if (!prach_compressed && data_len < (ctx->prach_kbar + prach_length * 2) * sizeof(uint16_t)) {
+      rte_pktmbuf_free(pkt);
+      continue;
+    }
 
     char *buf = rte_pktmbuf_append(pkt, (uint16_t)(header_length + data_len));
     if (buf == NULL) {
@@ -1234,7 +1244,7 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
                       ecpri_payload_size,
                       0,
                       aarx + ctx->prach_eaxc_offset,
-                      ctx->pusch_seq_id[aarx]++,
+                      ctx->ul_seq_id[(aarx + ctx->prach_eaxc_offset) & (NUM_RU_PORT_IDS - 1)]++,
                       0);
 
     struct radio_app_common_hdr *radio_app_header = (struct radio_app_common_hdr *)(ecpri_header + 1);
@@ -1262,7 +1272,7 @@ void write_prach_iq(void *context, uint32_t **txdataF, int nb_rx, int frame, int
       iq_data_start = (uint8_t *)(data_section_header + 1);
       const uint16_t *raw = (const uint16_t *)txdataF[aarx];
       uint16_t *dst = (uint16_t *)iq_data_start;
-      memset(dst, 0, (prach_length + ctx->prach_kbar) * 2 * sizeof(uint16_t));
+      memset(dst, 0, data_len);
       for (int i = 0; i < prach_length * 2; i++)
         dst[ctx->prach_kbar + i] = rte_cpu_to_be_16(raw[i]);
     }

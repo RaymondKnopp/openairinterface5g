@@ -226,10 +226,9 @@ typedef struct {
   /// - first index: tx antenna [0..16) where 16 is the total supported antenna ports.
   /// - second index: sample [0..ofdm_symbol_size*symbols_per_frame)
   c16_t **txdataF;
-  /// \brief Anaglogue beam ID for each OFDM symbol (used when beamforming not done in RU)
-  /// - first index: symbol index [0 .. symbols_per_frame)
-  /// - second index: beam ID for each antenna port [0 .. num_ports)
-  /// Array of beam id assigned to antenna ports in a frame
+  /// \brief Analogue beam ID for each [symbol, antenna] pair
+  /// - first index: symbol [slot * fp->symbols_per_slot + sym_idx]
+  /// - second index: logical antenna [0..nb_rx/nb_tx]
   uint16_t **beam_id;
   int num_beams_period;
   bool analog_bf;
@@ -340,11 +339,6 @@ typedef struct {
   /// PRACH background noise level
   int prach_I0;
 } PHY_MEASUREMENTS_gNB;
-
-// the current RRC resource allocation is that each UE gets its
-// "own" PUCCH resource (for F0) in a dedicated PRB in each slot
-// therefore, we can have up to "number of UE" UCI PDUs
-#define MAX_NUM_NR_UCI_PDUS MAX_MOBILES_PER_GNB
 
 /// Top-level PHY Data Structure for gNB
 /* Overrun alarm records, produced by the RT threads and drained by the 1 Hz stats thread.
@@ -565,6 +559,8 @@ typedef struct PHY_VARS_gNB_s {
   time_stats_t srs_report_tlv_stats;
   time_stats_t srs_beam_report_stats;
   time_stats_t srs_iq_matrix_stats;
+  time_stats_t pucch01_proc_rx;
+  time_stats_t pucch23_proc_rx;
 
   notifiedFIFO_t resp_L1;
   notifiedFIFO_t L1_tx_out;

@@ -12,6 +12,8 @@
 #include "PHY/NR_ESTIMATION/nr_ul_estimation.h"
 #include "PHY/defs_nr_common.h"
 #include "PHY/nr_phy_common/inc/nr_phy_common.h"
+#include "nr_channel_compensation.h"
+#include "nr_compute_llr.h"
 #include "nr_layer_demapping.h"
 #include "common/utils/nr/nr_common.h"
 #include "platform_types.h"
@@ -32,67 +34,6 @@ static void copy_c16_data_to_slot_memory(c16_t *src, c16_t *dst_slot, int nb_re_
 }
 #endif
 
-#if defined(__aarch64__)
-
-void nr_idft(int32_t *z, uint32_t Msc_PUSCH)
-{
-  simde__m128i idft_in128[1][3240];
-  simde__m128i idft_out128[1][3240];
-  simde__m128i norm128;
-
-  int16_t *idft_in0 = (int16_t *)idft_in128[0];
-  int16_t *idft_out0 = (int16_t *)idft_out128[0];
-
-  int i;
-  int ip;
-
-  LOG_T(PHY, "Doing nr_idft for Msc_PUSCH %d\n", Msc_PUSCH);
-
-  if ((Msc_PUSCH % 1536) > 0) {
-    /* Conjugate input. */
-    for (i = 0; i < (Msc_PUSCH >> 2); i++) {
-      ((simde__m128i *)z)[i] = oai_mm_conj(((simde__m128i *)z)[i]);
-    }
-
-    /* Pack input into lane zero of the legacy four-lane layout. */
-    for (i = 0, ip = 0; i < Msc_PUSCH; i++, ip += 4) {
-      ((uint32_t *)idft_in0)[ip] = z[i];
-    }
-  }
-
-  const dft_size_idx_t dftsize = get_dft(Msc_PUSCH);
-
-  switch (Msc_PUSCH) {
-    case 12:
-      dft(dftsize, idft_in0, idft_out0, 0);
-
-      norm128 = simde_mm_set1_epi16(9459);
-
-      for (i = 0; i < 12; i++) {
-        ((simde__m128i *)idft_out0)[i] = simde_mm_slli_epi16(simde_mm_mulhi_epi16(((simde__m128i *)idft_out0)[i], norm128), 1);
-      }
-      break;
-
-    default:
-      dft(dftsize, idft_in0, idft_out0, 1);
-      break;
-  }
-
-  if ((Msc_PUSCH % 1536) > 0) {
-    /* Extract lane zero. */
-    for (i = 0, ip = 0; i < Msc_PUSCH; i++, ip += 4) {
-      z[i] = ((uint32_t *)idft_out0)[ip];
-    }
-
-    /* Conjugate output. */
-    for (i = 0; i < (Msc_PUSCH >> 2); i++) {
-      ((simde__m128i *)z)[i] = oai_mm_conj(((simde__m128i *)z)[i]);
-    }
-  }
-}
-
-#else
-
 void nr_idft(int32_t *z, uint32_t Msc_PUSCH)
 {
   const dft_size_idx_t dftsize = get_dft(Msc_PUSCH);
@@ -109,8 +50,6 @@ void nr_idft(int32_t *z, uint32_t Msc_PUSCH)
 
   memcpy(z, idft_output, bytes);
 }
-
-#endif
 
 static void nr_ulsch_extract_rbs(c16_t *const rxF,
                                  c16_t *const chF,
@@ -133,116 +72,61 @@ static void nr_ulsch_extract_rbs(c16_t *const rxF,
     int first_port = get_dmrs_port(0, pusch_pdu->dmrs_ports);
     delta = get_delta(first_port, pusch_pdu->dmrs_config_type);
   }
-  int start_re = CIRCULAR_INC(frame_parms->first_carrier_offset,
-                              (pusch_pdu->rb_start + pusch_pdu->bwp_start) * NR_NB_SC_PER_RB,
-                              frame_parms->ofdm_symbol_size);
+  int start_re = (pusch_pdu->rb_start + pusch_pdu->bwp_start) * NR_NB_SC_PER_RB;
   int nb_re_pusch = NR_NB_SC_PER_RB * pusch_pdu->rb_size;
   c16_t *rxF_ext = &rxFext[0];
   c16_t *ul_ch0 = &chF[choffset];
   c16_t *ul_ch0_ext = &chFext[0];
 
   if (is_ptrs) {
-    const uint fft_size = frame_parms->ofdm_symbol_size;
     const uint k_ptrs = pusch_pdu->pusch_ptrs.ptrs_freq_density;
     const uint k_rb_ref = get_ptrs_k_RB(pusch_pdu->rb_size, k_ptrs, rnti);
     const uint k_re_ref = pusch_pdu->pusch_ptrs.ptrs_ports_list[0].ptrs_re_offset;
     uint k = start_re;
-    uint idx = 0;
+    uint ch_idx = 0;
     for (uint rb = 0; rb < pusch_pdu->rb_size; rb++) {
       // RB doesn't have PTRS.
       if ((rb - k_rb_ref) % k_ptrs) {
-        // RB crosses DC.
-        if (k + NR_NB_SC_PER_RB > fft_size) {
-          const uint neg = k + NR_NB_SC_PER_RB - fft_size;
-          memcpy(rxF_ext, rxF + k, sizeof(c16_t) * neg);
-          memcpy(rxF_ext + neg, rxF, sizeof(c16_t) * (NR_NB_SC_PER_RB - neg));
-          // RB doesn't cross DC.
-        } else {
-          memcpy(rxF_ext, rxF + k, sizeof(c16_t) * NR_NB_SC_PER_RB);
-        }
+        memcpy(rxF_ext, rxF + k, sizeof(c16_t) * NR_NB_SC_PER_RB);
         rxF_ext += NR_NB_SC_PER_RB;
-        memcpy(ul_ch0_ext, ul_ch0 + idx, sizeof(c16_t) * NR_NB_SC_PER_RB);
+        memcpy(ul_ch0_ext, ul_ch0 + ch_idx, sizeof(c16_t) * NR_NB_SC_PER_RB);
         ul_ch0_ext += NR_NB_SC_PER_RB;
-        idx += NR_NB_SC_PER_RB;
         // RB has PTRS.
       } else {
-        for (uint re = 0; re < NR_NB_SC_PER_RB; re++) {
-          // RE is not PTRS.
-          if (re != k_re_ref) {
-            *rxF_ext++ = rxF[((k + re) % fft_size)];
-            *ul_ch0_ext++ = ul_ch0[idx];
-          }
-          idx++;
-        }
+        // before PTRS RE
+        const uint num_pre_ptrs = k_re_ref;
+        const size_t pre_sz = sizeof(c16_t) * num_pre_ptrs;
+        memcpy(rxF_ext, rxF + k, pre_sz);
+        memcpy(ul_ch0_ext, ul_ch0 + ch_idx, pre_sz);
+        // after PTRS RE
+        const uint num_post_ptrs = NR_NB_SC_PER_RB - k_re_ref - 1;
+        const size_t post_sz = sizeof(c16_t) * num_post_ptrs;
+        memcpy(rxF_ext + num_pre_ptrs, rxF + k + k_re_ref + 1, post_sz);
+        memcpy(ul_ch0_ext + num_pre_ptrs, ul_ch0 + ch_idx + k_re_ref + 1, post_sz);
+        rxF_ext += NR_NB_SC_PER_RB - 1;
+        ul_ch0_ext += NR_NB_SC_PER_RB - 1;
       }
-      /* wrap: the DC-crossing branch above derives neg from (k + 12 - fft_size), so k must
-         stay inside the FFT. Without this it keeps growing past fft_size, neg exceeds 12 on
-         the next RB, and (NR_NB_SC_PER_RB - neg) underflows into a ~17 GB memcpy. */
-      k = (k + NR_NB_SC_PER_RB) % fft_size;
+      ch_idx += NR_NB_SC_PER_RB;
+      k += NR_NB_SC_PER_RB;
     }
   } else if (is_dmrs_symbol == 0) {
-    if (start_re + nb_re_pusch <= frame_parms->ofdm_symbol_size)
-      memcpy(rxF_ext, &rxF[start_re], nb_re_pusch * sizeof(c16_t));
-    else {
-      int neg_length = frame_parms->ofdm_symbol_size - start_re;
-      int pos_length = nb_re_pusch - neg_length;
-      memcpy(rxF_ext, &rxF[start_re], neg_length * sizeof(c16_t));
-      memcpy(&rxF_ext[neg_length], rxF, pos_length * sizeof(c16_t));
-    }
+    memcpy(rxF_ext, &rxF[start_re], nb_re_pusch * sizeof(c16_t));
     memcpy(ul_ch0_ext, ul_ch0, nb_re_pusch * sizeof(c16_t));
   } else if (pusch_pdu->dmrs_config_type == pusch_dmrs_type1) { // 6 REs / PRB
     AssertFatal(delta == 0 || delta == 1, "Illegal delta %d\n",delta);
     c16_t *rxF32 = &rxF[start_re];
-    if (start_re + nb_re_pusch < frame_parms->ofdm_symbol_size) {
-      for (int idx = 1 - delta; idx < nb_re_pusch; idx += 2) {
-        *rxF_ext++ = rxF32[idx];
-        *ul_ch0_ext++ = ul_ch0[idx];
-      }
-    }
-    else { // handle the two pieces around DC
-      int neg_length = frame_parms->ofdm_symbol_size - start_re;
-      int pos_length = nb_re_pusch - neg_length;
-      int idx, idx2;
-      for (idx = 1 - delta; idx < neg_length; idx += 2) {
-        *rxF_ext++ = rxF32[idx];
-        *ul_ch0_ext++= ul_ch0[idx];
-      }
-      rxF32 = rxF;
-      idx2 = idx;
-      for (idx = 1 - delta; idx < pos_length; idx += 2, idx2 += 2) {
-        *rxF_ext++ = rxF32[idx];
-        *ul_ch0_ext++ = ul_ch0[idx2];
-      }
+    for (int idx = 1 - delta; idx < nb_re_pusch; idx += 2) {
+      *rxF_ext++ = rxF32[idx];
+      *ul_ch0_ext++ = ul_ch0[idx];
     }
   } else if (pusch_pdu->dmrs_config_type == pusch_dmrs_type2) { // 8 REs / PRB
     AssertFatal(delta==0||delta==2||delta==4,"Illegal delta %d\n",delta);
-    if (start_re + nb_re_pusch < frame_parms->ofdm_symbol_size) {
-      for (int idx = 0; idx < nb_re_pusch; idx ++) {
-        if (idx % 6 == 2 * delta || idx % 6 == 2 * delta + 1)
-          continue;
-        *rxF_ext++ = rxF[idx];
-        *ul_ch0_ext++ = ul_ch0[idx];
-      }
-    }
-    else {
-      int neg_length = frame_parms->ofdm_symbol_size - start_re;
-      int pos_length = nb_re_pusch - neg_length;
-      c16_t *rxF64 = &rxF[start_re];
-      int idx, idx2;
-      for (idx = 0; idx < neg_length; idx ++) {
-        if (idx % 6 == 2 * delta || idx % 6 == 2 * delta + 1)
-          continue;
-        *rxF_ext++ = rxF64[idx];
-        *ul_ch0_ext++ = ul_ch0[idx];
-      }
-      rxF64 = rxF;
-      idx2 = idx;
-      for (idx = 0; idx < pos_length; idx++, idx2++) {
-        if (idx % 6 == 2 * delta || idx % 6 == 2 * delta + 1)
-          continue;
-        *rxF_ext++ = rxF64[idx];
-        *ul_ch0_ext++ = ul_ch0[idx2];
-      }
+    c16_t *rxF32 = &rxF[start_re];
+    for (int idx = 0; idx < nb_re_pusch; idx++) {
+      if (idx % 6 == 2 * delta || idx % 6 == 2 * delta + 1)
+        continue;
+      *rxF_ext++ = rxF32[idx];
+      *ul_ch0_ext++ = ul_ch0[idx];
     }
   }
 }
@@ -693,16 +577,13 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                                               rel15_ul_ref->beamforming.prgs_list[0].dig_bf_interface_list[0].beam_idx,
                                               p->numSpatialStreamIndices > 0 ? p->spatialStreamIndices[0] : 0);
 
-  uint32_t bwp_start_subcarrier = CIRCULAR_INC(frame_parms->first_carrier_offset,
-                                               (rel15_ul_ref->rb_start + rel15_ul_ref->bwp_start) * NR_NB_SC_PER_RB,
-                                               frame_parms->ofdm_symbol_size);
+  uint32_t bwp_start_subcarrier = (rel15_ul_ref->rb_start + rel15_ul_ref->bwp_start) * NR_NB_SC_PER_RB;
   LOG_D(PHY,
-        "pusch %d.%d : bwp_start_subcarrier %d, rb_start %d, first_carrier_offset %d\n",
+        "pusch %d.%d : bwp_start_subcarrier %d, rb_start %d\n",
         frame,
         slot,
         bwp_start_subcarrier,
-        rel15_ul_ref->rb_start,
-        frame_parms->first_carrier_offset);
+        rel15_ul_ref->rb_start);
   LOG_D(PHY, "pusch %d.%d : ul_dmrs_symb_pos %x\n", frame, slot, rel15_ul_ref->ul_dmrs_symb_pos);
 
   // Softscope dumps the whole slot grid; clear unused symbols so they do not keep
@@ -843,7 +724,6 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                        .dmrs_symb_pos = rel15_ul_ref->ul_dmrs_symb_pos,
                        .nid = fp->Nid_cell,
                        .nscid = rel15_ul_ref->scid,
-                       .first_carrier_offset = fp->first_carrier_offset,
                        .ofdm_symbol_size = fp->ofdm_symbol_size,
                        .slot = slot,
                        .rnti = rel15_ul_ref->rnti};
@@ -883,8 +763,6 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
               false);
 
   int start_sc = (rel15_ul_ref->bwp_start + rel15_ul_ref->rb_start) * NR_NB_SC_PER_RB;
-  int middle_sc = frame_parms->ofdm_symbol_size - frame_parms->first_carrier_offset;
-  int end_sc = (start_sc + rel15_ul_ref->rb_size * NR_NB_SC_PER_RB - 1) % frame_parms->ofdm_symbol_size;
   for (int aa_pusch = 0; aa_pusch < num_sp_streams; aa_pusch++) {
     const int aarx = ant_port_start + aa_pusch;
     DevAssert(aarx < sizeofArray(joint_pv->ulsch_power));
@@ -894,16 +772,9 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
 
     for (uint8_t symbol = rel15_ul_ref->start_symbol_index; symbol < end_symbol; symbol++) {
       int offset0 = ((slot % RU_RX_SLOT_DEPTH) * frame_parms->symbols_per_slot + symbol) * frame_parms->ofdm_symbol_size;
-      int offset = offset0 + (frame_parms->first_carrier_offset + start_sc) % frame_parms->ofdm_symbol_size;
+      int offset = offset0 + start_sc;
       c16_t *ul_ch = &gNB->common_vars.rxdataF[aarx][offset];
-      if (end_sc < start_sc) {
-        int64_t symb_energy_aux = signal_energy_nodc(ul_ch, middle_sc - start_sc) * (middle_sc - start_sc);
-        ul_ch = &gNB->common_vars.rxdataF[aarx][offset0];
-        symb_energy_aux += (signal_energy_nodc(ul_ch, end_sc + 1) * (end_sc + 1));
-        symb_energy += symb_energy_aux / (rel15_ul_ref->rb_size * NR_NB_SC_PER_RB);
-      } else {
-        symb_energy += signal_energy_nodc(ul_ch, rel15_ul_ref->rb_size * NR_NB_SC_PER_RB);
-      }
+      symb_energy += signal_energy_nodc(ul_ch, rel15_ul_ref->rb_size * NR_NB_SC_PER_RB);
     }
     joint_pv->ulsch_power[aa_pusch] += (symb_energy / rel15_ul_ref->nr_of_symbols);
 

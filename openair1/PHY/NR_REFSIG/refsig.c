@@ -5,6 +5,7 @@
 #include "nr_refsig.h"
 #include "openair1/PHY/gold.h"
 #include "ds/hashtable.h"
+#include "log.h"
 
 #define GOLD_HT_SIZE 1024
 static const int grain = 64 / sizeof(uint32_t); // align to 64 bytes for AVX-512
@@ -24,6 +25,7 @@ static void gold_entry_free(void *ptr)
 static uint32_t *gold_generate(uint32_t key, int length)
 {
   uint32_t *seq;
+  AssertFatal(length > 0, "gold_cache: invalid length=%d\n", length);
   int ret = posix_memalign((void **)&seq, 64, length * sizeof(uint32_t));
   AssertFatal(ret == 0, "gold_generate: out of memory\n");
   unsigned int x1 = 0, x2 = key;
