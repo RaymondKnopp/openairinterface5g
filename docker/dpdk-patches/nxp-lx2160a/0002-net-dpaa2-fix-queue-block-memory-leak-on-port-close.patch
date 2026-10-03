@@ -1,0 +1,50 @@
+From 775af48a2adefd0d939a5a95613ab090528b242e Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 07:26:30 +0100
+Subject: [PATCH 01/22] net/dpaa2: fix queue block memory leak on port close
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Commit ae2661c3ea2d ("net/dpaa2: fix queue free cleanup") added
+priv->rx_vq[i] = NULL inside the cleanup loop. This NULLs rx_vq[0]
+on the first iteration, so the subsequent rte_free(priv->rx_vq[0])
+becomes rte_free(NULL) — a no-op — leaking the entire mc_q block
+(all RX + TX + TX conf queue structs) on every port close.
+
+Save the base pointer before the loop and free that instead.
+
+Fixes: 46d02eeaaeb8 ("net/dpaa2: fix queue freeing")
+Cc: stable@dpdk.org
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index fdf3e0f220..9f8aca19f2 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -663,6 +663,9 @@ dpaa2_free_rx_tx_queues(struct rte_eth_dev *dev)
+ 
+ 	/* Queue allocation base */
+ 	if (priv->rx_vq[0]) {
++		/* Save base pointer before the loop NULLs rx_vq[] entries */
++		void *mc_q = priv->rx_vq[0];
++
+ 		/* cleaning up queue storage */
+ 		for (i = 0; i < priv->nb_rx_queues; i++) {
+ 			dpaa2_q = priv->rx_vq[i];
+@@ -693,8 +696,7 @@ dpaa2_free_rx_tx_queues(struct rte_eth_dev *dev)
+ 		}
+ 
+ 		/*free memory for all queues (RX+TX) */
+-		rte_free(priv->rx_vq[0]);
+-		priv->rx_vq[0] = NULL;
++		rte_free(mc_q);
+ 	}
+ }
+ 
+-- 
+2.43.0
+

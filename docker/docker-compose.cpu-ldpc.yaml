@@ -1,0 +1,20 @@
+# A/B test: identical to docker-compose.yaml but with the CPU LDPC backend.
+#
+#   docker compose -f docker-compose.yaml -f docker-compose.cpu-ldpc.yaml up -d
+#
+# Drops --loader.ldpc.shlibversion _aal, so nr-softmodem dlopen()s libldpc.so
+# (CPU) instead of libldpc_aal.so (LA1200 FECA). Everything else is unchanged:
+# same image, same conf, same cores, same fronthaul.
+#
+# The nrLDPC_coding_aal.* options are left in deliberately - they are ignored
+# when the backend is not _aal, and keeping them means the ONLY difference
+# between the two runs is which LDPC library encodes the DL-SCH.
+#
+#   UE attaches on CPU but not on _aal  -> the offload's encode output is wrong
+#   UE attaches on neither              -> LDPC is not the problem, look at RF/O-RU
+services:
+    oai-du:
+        environment:
+            USE_ADDITIONAL_OPTIONS: >-
+                --thread-pool 10,11,12
+                --log_config.global_log_options level,nocolor,utc_time

@@ -1,0 +1,67 @@
+From 5d6fcc6bd0ea740f3c8cab60a26f4221c80a922f Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Mon, 23 Feb 2026 09:19:11 +0100
+Subject: [PATCH 11/22] net/dpaa2: fix L3/L4 checksum offload flags
+
+The WRIOP FAS (Frame Annotation Status) field provides independent
+bits for L3/L4 checksum validation (L3CV/L4CV) and error (L3CE/L4CE).
+
+Two problems:
+
+1. The driver used 'else if' between the L3 and L4 error checks, so
+   when both checksums were bad only the L3 error was reported and
+   the L4 error was silently lost. Use two independent 'if' statements
+   instead, matching how other drivers (i40e, ixgbe, bnxt) handle this.
+
+2. The driver never reported GOOD checksums. When validation was
+   performed (L3CV/L4CV set) but no error was flagged (L3CE/L4CE
+   clear), report RTE_MBUF_F_RX_IP_CKSUM_GOOD / RTE_MBUF_F_RX_L4_CKSUM_GOOD.
+
+Fix both issues in dpaa2_dev_rx_parse_slow() and dpaa2_dev_rx_parse().
+
+Not tested, found by code review.
+
+Cc: stable@dpdk.org
+Fixes: 870354264644 ("net/dpaa2: fix L3/L4 checksum results")
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_rxtx.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_rxtx.c b/drivers/net/dpaa2/dpaa2_rxtx.c
+index d384570a03..864837efe3 100644
+--- a/drivers/net/dpaa2/dpaa2_rxtx.c
++++ b/drivers/net/dpaa2/dpaa2_rxtx.c
+@@ -203,8 +203,13 @@ dpaa2_dev_rx_parse_slow(struct rte_mbuf *mbuf,
+ 
+ 	if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L3CE))
+ 		mbuf->ol_flags |= RTE_MBUF_F_RX_IP_CKSUM_BAD;
+-	else if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L4CE))
++	else if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L3CV))
++		mbuf->ol_flags |= RTE_MBUF_F_RX_IP_CKSUM_GOOD;
++
++	if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L4CE))
+ 		mbuf->ol_flags |= RTE_MBUF_F_RX_L4_CKSUM_BAD;
++	else if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L4CV))
++		mbuf->ol_flags |= RTE_MBUF_F_RX_L4_CKSUM_GOOD;
+ 
+ 	if (BIT_ISSET_AT_POS(annotation->word4, L3_IP_1_FIRST_FRAGMENT |
+ 	    L3_IP_1_MORE_FRAGMENT |
+@@ -240,8 +245,13 @@ dpaa2_dev_rx_parse(struct rte_mbuf *mbuf, void *hw_annot_addr)
+ 
+ 	if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L3CE))
+ 		mbuf->ol_flags |= RTE_MBUF_F_RX_IP_CKSUM_BAD;
+-	else if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L4CE))
++	else if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L3CV))
++		mbuf->ol_flags |= RTE_MBUF_F_RX_IP_CKSUM_GOOD;
++
++	if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L4CE))
+ 		mbuf->ol_flags |= RTE_MBUF_F_RX_L4_CKSUM_BAD;
++	else if (BIT_ISSET_AT_POS(annotation->word1, DPAA2_ETH_FAS_L4CV))
++		mbuf->ol_flags |= RTE_MBUF_F_RX_L4_CKSUM_GOOD;
+ 
+ 	if (unlikely(dpaa2_print_parser_result))
+ 		dpaa2_print_parse_result(annotation);
+-- 
+2.43.0
+

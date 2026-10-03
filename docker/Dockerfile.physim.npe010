@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: LicenseRef-CSSL-1.0
+#
+# Minimal toolchain image for building ONLY the physical-layer simulators
+# (nr_dlsim, nr_ulsim) natively on an aarch64 GeneVisio NPE-010 / LX2160A board.
+#
+# Why a container at all: the board runs Ubuntu 18.04 (bionic) with gcc 7.5 and
+# no cmake, while OAI needs C++17 and cmake >= 3.19 and only supports Ubuntu
+# 22.04/24.04. Rather than backporting a toolchain onto an EOL rootfs, build in
+# a container. The board is aarch64 and this is an arm64 image, so the build is
+# native -- no QEMU emulation.
+#
+# IMPORTANT: binaries built here link against the container's glibc (2.35),
+# not the board's (2.27), so they must be RUN inside this same image. See
+# scripts/physim-npe010.sh.
+#
+# This image contains the toolchain only. Source, build tree and DPDK are
+# bind-mounted at run time so nothing large is baked into a layer and the build
+# tree can live on a partition with room (the board's / has ~3.6 GB free).
+#
+# Build:  docker build -f docker/Dockerfile.physim.npe010 -t oai-physim:npe010 .
+#
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# The mandatory set from cmake_targets/tools/build_helper (check_install_oai_software,
+# ubuntu22.04 branch), plus:
+#   autoconf/libtool + bison/flex -> building asn1c (install_asn1c_from_source)
+#   ca-certificates               -> git clone over https
+#   libcap-dev                    -> optional pkg_check_modules(cap libcap) in CMakeLists
+# Deliberately omitted: UHD/USRP, boost, ccache, flatbuffers, nanomsg, zmq and
+# the python tooling -- none are needed for the physim targets.
+RUN apt-get update && apt-get install --yes --no-install-recommends \
+      automake \
+      autoconf \
+      libtool \
+      build-essential \
+      cmake \
+      ninja-build \
+      pkg-config \
+      git \
+      ca-certificates \
+      bison \
+      flex \
+      libreadline-dev \
+      libconfig-dev \
+      libsctp-dev \
+      libssl-dev \
+      libcap-dev \
+      patch \
+      openssl \
+      zlib1g-dev \
+      xxd \
+      libyaml-cpp-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# SIMDE (header-only): openair1/PHY/sse_intrin.h does #include <simde/simde-common.h>.
+# No distro package matches what OAI pins, so mirror install_simde_from_source()
+# from build_helper -- clone simde-no-tests at OAI's pinned commit and drop the
+# headers into /usr/include/simde. That repo keeps its headers at the repo root,
+# so the root becomes /usr/include/simde (9.7 MB, .git discarded).
+ARG SIMDE_COMMIT=1c68d9ad60bf63f3fb527c4ee3b2319d828ffcc6
+RUN git clone https://github.com/simd-everywhere/simde-no-tests.git /tmp/simde \
+    && git -C /tmp/simde checkout -f ${SIMDE_COMMIT} \
+    && rm -rf /tmp/simde/.git \
+    && cp -r /tmp/simde /usr/include/simde \
+    && rm -rf /tmp/simde \
+    && test -f /usr/include/simde/simde-common.h \
+    && test -f /usr/include/simde/x86/avx2.h
+
+# The source tree is bind-mounted and owned by the host user, not root, so git
+# refuses to read it ("detected dubious ownership"). OAI shells out to git during
+# configure for version stamping, so mark the mount points safe.
+RUN git config --global --add safe.directory /oai \
+    && git config --global --add safe.directory /build
+
+WORKDIR /oai

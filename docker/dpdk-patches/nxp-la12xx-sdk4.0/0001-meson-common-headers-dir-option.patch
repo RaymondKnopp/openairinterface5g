@@ -1,0 +1,61 @@
+Add meson option for Geul common headers directory
+
+The NXP meson.build files read COMMON_HEADERS_DIR from the environment via
+run_command('sh', '-c', 'echo $VAR'). Meson does not reliably propagate the
+environment to run_command() during cross configuration, which silently
+disables the geul_ipc and baseband/la12xx drivers.
+
+Add a proper meson option, falling back to the environment variable to keep
+compatibility with the original NXP build flow.
+
+Signed-off-by: <Julien Moucadel>
+
+diff --git a/drivers/baseband/la12xx/meson.build b/drivers/baseband/la12xx/meson.build
+index 9884edf..1dc324c 100644
+--- a/drivers/baseband/la12xx/meson.build
++++ b/drivers/baseband/la12xx/meson.build
+@@ -9,8 +9,11 @@ sources = files('bbdev_la12xx.c', 'bbdev_la12xx_feca_param.c', 'bbdev_la12xx_wdo
+ cflags += ['-DHOST=1',
+            '-DMODEM=0']
+ 
+-cmd = run_command('sh', '-c', 'echo $COMMON_HEADERS_DIR')
+-COMMON_HEADERS_DIR = cmd.stdout().strip()
++COMMON_HEADERS_DIR = get_option('common_headers_dir')
++if COMMON_HEADERS_DIR == ''
++	cmd = run_command('sh', '-c', 'echo $COMMON_HEADERS_DIR', check: false)
++	COMMON_HEADERS_DIR = cmd.stdout().strip()
++endif
+ message('COMMON_HEADERS_DIR=' + COMMON_HEADERS_DIR)
+ includes += [include_directories(COMMON_HEADERS_DIR)]
+ 
+diff --git a/drivers/raw/geul_ipc/meson.build b/drivers/raw/geul_ipc/meson.build
+index ce01e30..1f268d9 100755
+--- a/drivers/raw/geul_ipc/meson.build
++++ b/drivers/raw/geul_ipc/meson.build
+@@ -9,8 +9,11 @@ sources = files('geul_ipc_api.c', 'geul_ipc_dev.c')
+ cflags += ['-DHOST=1',
+            '-DMODEM=0']
+ 
+-cmd = run_command('sh', '-c', 'echo $COMMON_HEADERS_DIR')
+-COMMON_HEADERS_DIR = cmd.stdout().strip()
++COMMON_HEADERS_DIR = get_option('common_headers_dir')
++if COMMON_HEADERS_DIR == ''
++	cmd = run_command('sh', '-c', 'echo $COMMON_HEADERS_DIR', check: false)
++	COMMON_HEADERS_DIR = cmd.stdout().strip()
++endif
+ message('COMMON_HEADERS_DIR=' + COMMON_HEADERS_DIR)
+ includes += [include_directories(COMMON_HEADERS_DIR)]
+ 
+diff --git a/meson_options.txt b/meson_options.txt
+index 5e53a95..a84c8f8 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -2,6 +2,8 @@
+ 
+ option('check_includes', type: 'boolean', value: false, description:
+        'build "chkincs" to verify each header file can compile alone')
++option('common_headers_dir', type: 'string', value: '', description:
++       'Path to Geul/LA12xx common headers directory')
+ option('cpu_instruction_set', type: 'string', value: 'auto',
+ 	description: 'Set the target machine ISA (instruction set architecture). Will be set according to the platform option by default.')
+ option('developer_mode', type: 'feature', description:

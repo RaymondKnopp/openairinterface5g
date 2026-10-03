@@ -1,0 +1,80 @@
+From 109c034d6258a28794918b5db75ad2bf8e0bac8a Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 07:39:44 +0100
+Subject: [PATCH 03/22] net/dpaa2: warn on Rx descriptor limit in high perf
+ mode
+
+The Rx descriptor count warning fires unconditionally when the total
+exceeds 11264, but this limit only applies when the DPNI is created
+with the high performance buffer option (0x80000000). When using normal
+buffers, there is no such limit and the warning is
+misleading noise.
+
+Check the DPNI options to only warn when the high performance buffer
+mode is active.
+
+Fixes: 35dc25d12792 ("net/dpaa2: warn on high Rx descriptor number")
+Cc: stable@dpdk.org
+
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+Acked-by: Hemant Agrawal <hemant.agrawal@nxp.com>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 17 +++++++++++------
+ drivers/net/dpaa2/mc/fsl_dpni.h  |  6 ++++++
+ 2 files changed, 17 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index 23049c7fe7..1b5a90c4ce 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -76,8 +76,9 @@ int dpaa2_timestamp_dynfield_offset = -1;
+ 
+ bool dpaa2_print_parser_result;
+ 
+-#define MAX_NB_RX_DESC		11264
+-int total_nb_rx_desc;
++/* Rx descriptor limit when DPNI loads PFDRs in PEB */
++#define MAX_NB_RX_DESC_IN_PEB	11264
++static int total_nb_rx_desc;
+ 
+ int dpaa2_valid_dev;
+ struct rte_mempool *dpaa2_tx_sg_pool;
+@@ -907,10 +908,14 @@ dpaa2_dev_rx_queue_setup(struct rte_eth_dev *dev,
+ 			dev, rx_queue_id, mb_pool, rx_conf);
+ 
+ 	total_nb_rx_desc += nb_rx_desc;
+-	if (total_nb_rx_desc > MAX_NB_RX_DESC) {
+-		DPAA2_PMD_WARN("Total nb_rx_desc exceeds %d limit. Please use Normal buffers",
+-			       MAX_NB_RX_DESC);
+-		DPAA2_PMD_WARN("To use Normal buffers, run 'export DPNI_NORMAL_BUF=1' before running dynamic_dpl.sh script");
++	if (total_nb_rx_desc > MAX_NB_RX_DESC_IN_PEB &&
++	    (priv->options & DPNI_OPT_V1_PFDR_IN_PEB)) {
++		DPAA2_PMD_WARN("RX descriptor exceeds limit(%d) to load PFDR in PEB",
++			       MAX_NB_RX_DESC_IN_PEB);
++		DPAA2_PMD_WARN("Suggest removing 0x%08x from DPNI creating options(0x%08x)",
++			       DPNI_OPT_V1_PFDR_IN_PEB, priv->options);
++		DPAA2_PMD_WARN("Or reduce RX descriptor number(%d) per queue",
++			       nb_rx_desc);
+ 	}
+ 
+ 	if (!priv->bp_list || priv->bp_list->mp != mb_pool) {
+diff --git a/drivers/net/dpaa2/mc/fsl_dpni.h b/drivers/net/dpaa2/mc/fsl_dpni.h
+index 5a0482129f..dcca71b0f9 100644
+--- a/drivers/net/dpaa2/mc/fsl_dpni.h
++++ b/drivers/net/dpaa2/mc/fsl_dpni.h
+@@ -121,6 +121,12 @@ struct fsl_mc_io;
+  * The stashing is enabled by default.
+  */
+ #define DPNI_OPT_STASHING_DIS			0x002000
++/*
++ * PFDR in PEB mode (v1 layout).
++ * The total number of Rx descriptors is limited to 11264 in this mode.
++ * When not set, PFDRs are stored in DDR and there is no such limit.
++ */
++#define DPNI_OPT_V1_PFDR_IN_PEB		0x80000000
+ /**
+  * Software sequence maximum layout size
+  */
+-- 
+2.43.0
+

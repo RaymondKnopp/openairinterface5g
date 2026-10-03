@@ -1,0 +1,40 @@
+diff --git a/radio/fhi_72/oran-config.c b/radio/fhi_72/oran-config.c
+index 4c5e0b9b0f..117eee1fb2 100644
+--- a/radio/fhi_72/oran-config.c
++++ b/radio/fhi_72/oran-config.c
+@@ -1038,6 +1038,23 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
+   fh_config->puschMaskEnable = 0; // enable PUSCH mask; only used if id = O_RU
+   fh_config->puschMaskSlot = 0; // specific which slot PUSCH channel masked; only used if id = O_RU
+   fh_config->csirsEnable = 0; // enable CSI-RS (Cat B specific)
++  {
++    /* DPAA2 software VLAN: the o-du-phy fork inserts the 802.1Q tag in software
++     * from these fields (the DPAA2 PMD does not offload VLAN insert/strip).
++     * Upstream only uses vlan_tag for M-plane, so without setting these the
++     * C-/U-plane leave untagged, the RU drops them, and RX stays at zero. */
++    paramdef_t vp[] = {{ORAN_CONFIG_VLAN_TAG, "VLAN tag\n", 0, .iptr = NULL, .defintarrayval = 0, TYPE_INTARRAY, 0}};
++    config_get(config_get_if(), vp, 1, CONFIG_STRING_ORAN);
++    uint16_t vlan = (vp[0].numelt > 0 && vp[0].iptr != NULL) ? (uint16_t)vp[0].iptr[0] : 0;
++    /* Optional 802.1Q PCP for C-/U-plane TX; default 7 (O-RAN class). cp/up_vlan_tag
++     * map directly to the 802.1Q TCI, so compose PCP|VID here (no libxran change). */
++    int pcp = 7;
++    paramdef_t pp[] = {{ORAN_CONFIG_VLAN_PCP, "VLAN PCP\n", 0, .iptr = &pcp, .defintval = 7, TYPE_INT, 0}};
++    config_get(config_get_if(), pp, 1, CONFIG_STRING_ORAN);
++    uint16_t tci = vlan ? (uint16_t)(((pcp & 0x7) << 13) | (vlan & 0x0FFF)) : 0;
++    fh_config->cp_vlan_tag = tci;
++    fh_config->up_vlan_tag = tci;
++  }
+   fh_config->debugStop = 0; // enable auto stop; only used if id = O_RU
+   fh_config->debugStopCount = 0; // enable auto stop after number of Tx packets; not used in xran
+   fh_config->DynamicSectionEna = 0; // enable dynamic C-Plane section allocation
+diff --git a/radio/fhi_72/oran-params.h b/radio/fhi_72/oran-params.h
+index 76bf4ff05d..0f645e7376 100644
+--- a/radio/fhi_72/oran-params.h
++++ b/radio/fhi_72/oran-params.h
+@@ -18,6 +18,7 @@
+ #define ORAN_CONFIG_DU_KEYPAIR "du_key_pair" // only needed for M-plane
+ #define ORAN_CONFIG_DU_ADDR "du_addr" // needed for M-plane or O-RU
+ #define ORAN_CONFIG_VLAN_TAG "vlan_tag" // only needed for M-plane
++#define ORAN_CONFIG_VLAN_PCP "vlan_pcp" // 802.1Q priority for C-/U-plane TX (default 7)
+ #define ORAN_CONFIG_RU_ADDR "ru_addr" // not needed if M-plane used
+ #define ORAN_CONFIG_RU_USERNAME "ru_username" // only needed for M-plane
+ #define ORAN_CONFIG_RU_IP_ADDR "ru_ip_addr" // only needed for M-plane

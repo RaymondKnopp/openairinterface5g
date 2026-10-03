@@ -1,0 +1,45 @@
+---
+project: 'O-DU Low'
+project_creation_date: '2019-08-07'
+project_category: ''
+lifecycle_state: 'Incubation'
+project_lead: &odu_low_ptl
+    name: 'Peng Lu'
+    email: 'peng.lu@intel.com'
+    company: 'Intel'
+    id: 'penglu'
+    timezone: 'US/CA'
+primary_contact: *odu_low_ptl
+issue_tracking:
+    type: 'jira'
+    url: 'https://jira.o-ran-sc.org/projects/ODULOW/issues'
+    key: 'O-DU Low'
+mailing_list:
+    type: 'groups.io'
+    url: 'https://lists.o-ran-sc.org/g/main'
+    tag: '<[phy]>'
+realtime_discussion: ''
+meetings:
+    - type: 'TBD'
+      agenda: 'TBD'
+      url: 'TBD'
+      server: 'n/a'
+      channel: 'n/a'
+      repeats: 'TBD'
+      time: 'TBD'
+repositories:
+    - 'o-du/phy'
+committers:
+    - <<: *odu_low_ptl
+    - name: 'Ashwini Bhagat'
+      email: 'ashwini.bhagat@intel.com'
+      company: 'Intel'
+      id: 'ashwinibintel'
+      timezone: 'US/CA'
+    - name: 'Peng Lu'
+      email: 'peng.lu@intel.com'
+      company: 'Intel'
+      id: 'penglu'
+      timezone: 'US/CA'
+tsc:
+    approval: 'https://lists.o-ran-sc.org/g/toc'

@@ -1,0 +1,123 @@
+From dba37d5cacd2f32859f77bc72c27ea1cb4ac1776 Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Mon, 23 Feb 2026 10:55:25 +0100
+Subject: [PATCH 13/22] net/dpaa2: fix burst mode info to report active burst
+ function
+
+The burst_mode_get functions were incorrectly listing configured
+offload flags instead of reporting the active burst function, unlike
+every other PMD (i40e, mlx5, ixgbe, hns3) which match on the burst
+function pointer. On top of that, snprintf + break meant only the
+first matching offload was ever shown.
+
+Rewrite both functions to match on the actual rx_pkt_burst/tx_pkt_burst
+function pointer, consistent with the rest of the codebase.
+
+Not tested, found by code review.
+
+Fixes: ddbc2b6658d0 ("net/dpaa2: add Tx/Rx burst mode info")
+Cc: stable@dpdk.org
+Reported-by: Stephen Hemminger <stephen@networkplumber.org>
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 75 ++++++++++----------------------
+ 1 file changed, 22 insertions(+), 53 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index b2441c6f63..5894f381dc 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -444,34 +444,18 @@ dpaa2_dev_rx_burst_mode_get(struct rte_eth_dev *dev,
+ 	__rte_unused uint16_t queue_id,
+ 	struct rte_eth_burst_mode *mode)
+ {
+-	struct rte_eth_conf *eth_conf = &dev->data->dev_conf;
+-	int ret = -EINVAL;
+-	unsigned int i;
+-	const struct burst_info {
+-		uint64_t flags;
+-		const char *output;
+-	} rx_offload_map[] = {
+-			{RTE_ETH_RX_OFFLOAD_CHECKSUM, " Checksum,"},
+-			{RTE_ETH_RX_OFFLOAD_SCTP_CKSUM, " SCTP csum,"},
+-			{RTE_ETH_RX_OFFLOAD_OUTER_IPV4_CKSUM, " Outer IPV4 csum,"},
+-			{RTE_ETH_RX_OFFLOAD_OUTER_UDP_CKSUM, " Outer UDP csum,"},
+-			{RTE_ETH_RX_OFFLOAD_VLAN_STRIP, " VLAN strip,"},
+-			{RTE_ETH_RX_OFFLOAD_VLAN_FILTER, " VLAN filter,"},
+-			{RTE_ETH_RX_OFFLOAD_TIMESTAMP, " Timestamp,"},
+-			{RTE_ETH_RX_OFFLOAD_RSS_HASH, " RSS,"},
+-			{RTE_ETH_RX_OFFLOAD_SCATTER, " Scattered,"}
+-	};
++	eth_rx_burst_t pkt_burst = dev->rx_pkt_burst;
++
++	if (pkt_burst == dpaa2_dev_prefetch_rx)
++		snprintf(mode->info, sizeof(mode->info), "%s", "Scalar Prefetch");
++	else if (pkt_burst == dpaa2_dev_rx)
++		snprintf(mode->info, sizeof(mode->info), "%s", "Scalar");
++	else if (pkt_burst == dpaa2_dev_loopback_rx)
++		snprintf(mode->info, sizeof(mode->info), "%s", "Loopback");
++	else
++		return -EINVAL;
+ 
+-	/* Update Rx offload info */
+-	for (i = 0; i < RTE_DIM(rx_offload_map); i++) {
+-		if (eth_conf->rxmode.offloads & rx_offload_map[i].flags) {
+-			snprintf(mode->info, sizeof(mode->info), "%s",
+-				rx_offload_map[i].output);
+-			ret = 0;
+-			break;
+-		}
+-	}
+-	return ret;
++	return 0;
+ }
+ 
+ static int
+@@ -479,33 +463,18 @@ dpaa2_dev_tx_burst_mode_get(struct rte_eth_dev *dev,
+ 			__rte_unused uint16_t queue_id,
+ 			struct rte_eth_burst_mode *mode)
+ {
+-	struct rte_eth_conf *eth_conf = &dev->data->dev_conf;
+-	int ret = -EINVAL;
+-	unsigned int i;
+-	const struct burst_info {
+-		uint64_t flags;
+-		const char *output;
+-	} tx_offload_map[] = {
+-			{RTE_ETH_TX_OFFLOAD_IPV4_CKSUM, " IPV4 csum,"},
+-			{RTE_ETH_TX_OFFLOAD_UDP_CKSUM, " UDP csum,"},
+-			{RTE_ETH_TX_OFFLOAD_TCP_CKSUM, " TCP csum,"},
+-			{RTE_ETH_TX_OFFLOAD_SCTP_CKSUM, " SCTP csum,"},
+-			{RTE_ETH_TX_OFFLOAD_OUTER_IPV4_CKSUM, " Outer IPV4 csum,"},
+-			{RTE_ETH_TX_OFFLOAD_MT_LOCKFREE, " MT lockfree,"},
+-			{RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE, " MBUF free disable,"},
+-			{RTE_ETH_TX_OFFLOAD_MULTI_SEGS, " Scattered,"}
+-	};
++	eth_tx_burst_t pkt_burst = dev->tx_pkt_burst;
++
++	if (pkt_burst == dpaa2_dev_tx)
++		snprintf(mode->info, sizeof(mode->info), "%s", "Scalar");
++	else if (pkt_burst == dpaa2_dev_tx_ordered)
++		snprintf(mode->info, sizeof(mode->info), "%s", "Ordered");
++	else if (pkt_burst == rte_eth_pkt_burst_dummy)
++		snprintf(mode->info, sizeof(mode->info), "%s", "Dummy");
++	else
++		return -EINVAL;
+ 
+-	/* Update Tx offload info */
+-	for (i = 0; i < RTE_DIM(tx_offload_map); i++) {
+-		if (eth_conf->txmode.offloads & tx_offload_map[i].flags) {
+-			snprintf(mode->info, sizeof(mode->info), "%s",
+-				tx_offload_map[i].output);
+-			ret = 0;
+-			break;
+-		}
+-	}
+-	return ret;
++	return 0;
+ }
+ 
+ static int
+-- 
+2.43.0
+

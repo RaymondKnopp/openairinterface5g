@@ -1,0 +1,68 @@
+From e7c73de3ca7926494bbff2e97481807368700170 Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 15:14:21 +0100
+Subject: [PATCH 05/22] net/dpaa2: fix link not up after port stop/start
+
+When LSC (Link State Change) interrupts are enabled, the link status
+is only updated by interrupt events -- rte_eth_link_get_nowait() reads
+the cached value without querying the hardware.
+
+During dev_start(), dpaa2_dev_set_link_up() was called immediately
+after dpni_enable(), before LSC interrupts were registered. The MAC
+needs ~30ms to renegotiate after being re-enabled, so the initial
+link query returned link down. By the time the link came up, the LSC
+interrupt handler was not yet installed, so the link-up event was
+missed and the cached link status remained down permanently.
+
+The issue does not occur on the first dev_start() after probe because
+dpni_reset() during probe does not bring the MAC down -- the kernel
+dpmac driver keeps the physical link up. Only dpni_disable() during
+dev_stop() causes the MAC to go down, requiring a full renegotiation
+on the next dpni_enable().
+
+The problem is more likely to occur with many queues: the queue setup
+loop (dpni_get_queue for each RX queue) between dpni_enable() and the
+LSC interrupt registration adds MC portal round-trips, giving the MAC
+more time to complete negotiation before interrupts are armed. This
+makes the link-up event more likely to be missed.
+
+Move dpaa2_dev_set_link_up() after the LSC interrupt setup so that
+any link-up event occurring during MAC negotiation is properly caught.
+
+Fixes: c5acbb5ea20e ("net/dpaa2: support link status event")
+Cc: stable@dpdk.org
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index abc467663d..5832b9fd5f 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -1394,9 +1394,6 @@ dpaa2_dev_start(struct rte_eth_dev *dev)
+ 		return ret;
+ 	}
+ 
+-	/* Power up the phy. Needed to make the link go UP */
+-	dpaa2_dev_set_link_up(dev);
+-
+ 	for (i = 0; i < data->nb_rx_queues; i++) {
+ 		dpaa2_q = data->rx_queues[i];
+ 		ret = dpni_get_queue(dpni, CMD_PRI_LOW, priv->token,
+@@ -1464,6 +1461,12 @@ dpaa2_dev_start(struct rte_eth_dev *dev)
+ 		dpaa2_eth_setup_irqs(dev, 1);
+ 	}
+ 
++	/* Power up the phy. Needed to make the link go UP.
++	 * Called after LSC interrupt setup so that the link-up
++	 * event is not missed if the MAC negotiates quickly.
++	 */
++	dpaa2_dev_set_link_up(dev);
++
+ 	/* Change the tx burst function if ordered queues are used */
+ 	if (priv->en_ordered)
+ 		dev->tx_pkt_burst = dpaa2_dev_tx_ordered;
+-- 
+2.43.0
+

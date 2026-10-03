@@ -1,0 +1,42 @@
+From c265c74dac7eb236c09a152cd9251acdb8880a42 Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 09:25:33 +0100
+Subject: [PATCH 04/22] net/dpaa2: fix resource leak on softparser failure
+
+When soft parser loading or enabling fails during probe, the error
+path returns directly instead of going through the init_err label.
+This skips dpaa2_dev_close() and leaks all resources allocated during
+probe (queues, MAC addresses, extract params).
+
+Fixes: 72ec7a678e70 ("net/dpaa2: add soft parser driver")
+Cc: stable@dpdk.org
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index 1b5a90c4ce..abc467663d 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -3167,7 +3167,7 @@ dpaa2_dev_init(struct rte_eth_dev *eth_dev)
+ 		if (ret < 0) {
+ 			DPAA2_PMD_ERR(" Error(%d) in loading softparser",
+ 				      ret);
+-			return ret;
++			goto init_err;
+ 		}
+ 
+ 		ret = dpaa2_eth_enable_wriop_soft_parser(priv,
+@@ -3175,7 +3175,7 @@ dpaa2_dev_init(struct rte_eth_dev *eth_dev)
+ 		if (ret < 0) {
+ 			DPAA2_PMD_ERR(" Error(%d) in enabling softparser",
+ 				      ret);
+-			return ret;
++			goto init_err;
+ 		}
+ 	}
+ 
+-- 
+2.43.0
+

@@ -1,0 +1,35 @@
+Subject: [PATCH] bus/fslmc: lower the MC version floor to 10.33
+
+The NPE-010 ships MC firmware 10.33.0 in FlexSPI flash, but DPDK refuses the
+fslmc bus below 10.39.0, so the DPAA2 fronthaul port cannot be used:
+
+    DPAA2_BUS: DPAA2 MC version not compatible! 10.33.0 < 10.39.0
+    DPAA2_BUS: Unable to map MC Portal
+
+The floor is conservative for this board. Every DPAA2 object API matches what
+DPDK 25.11 expects (DPBP 3.4, DPIO 4.3, DPCON 3.3, DPCI 3.4, DPDMAI 3.4,
+DPRTC 2.3); only DPNI differs (board 8.3 vs 8.6), and the sole 8.6 dependency
+is dpni_get_mac_speed_capability() for link-speed *reporting*, which is already
+guarded at runtime with an explicit fallback.
+
+Verified on the board with the floor lowered: the MC portal maps, MC commands
+succeed, the scan enumerates all 23 objects of dprc.2, and the net PMD reports
+"dpni.2: netdev created, connected to dpmac.6". The la12xx bbdev continues to
+probe in the same process.
+
+Validated to probe/initialise only, NOT under fronthaul traffic. Revert once
+the board's MC firmware is updated to 10.39.0 (qoriq-mc-binary,
+mc_lx2160a_10.39.0.itb, flash offset 0xa00000).
+---
+diff --git a/drivers/bus/fslmc/mc/fsl_dpmng.h b/drivers/bus/fslmc/mc/fsl_dpmng.h
+--- a/drivers/bus/fslmc/mc/fsl_dpmng.h
++++ b/drivers/bus/fslmc/mc/fsl_dpmng.h
+@@ -20,7 +20,7 @@ struct fsl_mc_io;
+  * Management Complex firmware version information
+  */
+ #define MC_VER_MAJOR 10
+-#define MC_VER_MINOR 39
++#define MC_VER_MINOR 33
+ 
+ /**
+  * struct mc_version

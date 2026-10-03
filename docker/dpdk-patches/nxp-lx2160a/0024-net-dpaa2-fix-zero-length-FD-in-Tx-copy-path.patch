@@ -1,0 +1,47 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Sagar Arora <sagar.arora@openairinterface.org>
+Date: Wed, 09 Jul 2026 15:00:00 +0200
+Subject: [PATCH] net/dpaa2: fix zero-length FD in Tx copy path
+
+eth_copy_mbuf_to_fd() is the Tx path taken for every mbuf that is NOT
+from the DPNI-attached dpaa2-ops pool (i.e. any SW-ring pool).  It
+allocates a fresh buffer from the DPNI pool, memcpy's the payload, and
+copies data_off / ol_flags / packet_type / tx_offload from the source
+mbuf -- but it never copies data_len / pkt_len.
+
+A freshly allocated mbuf has data_len == 0, and DPAA2_MBUF_TO_CONTIG_FD()
+derives the frame descriptor length from data_len:
+
+    DPAA2_SET_FD_LEN(_fd, _mbuf->data_len);
+
+So every packet sent via the copy path is emitted with FD length 0 and
+is dropped on the wire (rte_eth_tx_burst() still reports it as sent).
+
+In the OAI FHI 7.2 O-DU on LX2160A this is exactly the O-RAN C-plane
+path: C-plane mbufs come from a SW-ring pool (_eth_mbuf_pool) and take
+the copy path, so every C-plane packet was transmitted with length 0 and
+never reached the RU, while U-plane (HAS_EXTBUF path, real data_len)
+transmitted correctly.  With no valid C-plane the RU never scheduled and
+never sent uplink back.
+
+Copy data_len and pkt_len into the new mbuf so the FD carries the correct
+length.
+
+Signed-off-by: Sagar Arora <sagar.arora@openairinterface.org>
+---
+ drivers/net/dpaa2/dpaa2_rxtx.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/net/dpaa2/dpaa2_rxtx.c b/drivers/net/dpaa2/dpaa2_rxtx.c
+index d13aff5bee..XXXXXXXX 100644
+--- a/drivers/net/dpaa2/dpaa2_rxtx.c
++++ b/drivers/net/dpaa2/dpaa2_rxtx.c
+@@ -615,6 +615,8 @@ eth_copy_mbuf_to_fd(struct rte_mbuf *mbuf,
+
+ 	/* Copy required fields */
+ 	m->data_off = mbuf->data_off;
++	m->data_len = mbuf->data_len;
++	m->pkt_len = mbuf->pkt_len;
+ 	m->ol_flags = mbuf->ol_flags;
+ 	m->packet_type = mbuf->packet_type;
+ 	m->tx_offload = mbuf->tx_offload;

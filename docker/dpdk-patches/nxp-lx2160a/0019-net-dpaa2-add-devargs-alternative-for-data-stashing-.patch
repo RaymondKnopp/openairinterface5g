@@ -1,0 +1,81 @@
+From 2522b65f1f6a28c4ac7b048377981816c2d3de6f Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 09:34:34 +0100
+Subject: [PATCH 18/22] net/dpaa2: add devargs alternative for data stashing
+ getenv
+
+The DPAA2_DATA_STASHING_OFF environment variable is used by customers
+to dynamically disable data stashing without rebuilding their
+application. Add a devargs option "drv_no_data_stashing" as an
+alternative, consistent with the existing devargs pattern (drv_loopback,
+drv_no_prefetch, drv_no_taildrop), while keeping the getenv for
+backward compatibility.
+
+Move the check from dpaa2_dev_rx_queue_setup() to dpaa2_dev_init(),
+consistent with how other driver flags are handled.
+
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 12 ++++++++++--
+ drivers/net/dpaa2/dpaa2_ethdev.h |  3 +++
+ 2 files changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index a04ea583b6..d13aff5bee 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -37,6 +37,7 @@
+ #define DRIVER_RX_PARSE_ERR_DROP "drv_rx_parse_drop"
+ #define DRIVER_ERROR_QUEUE  "drv_err_queue"
+ #define DRIVER_NO_TAILDROP  "drv_no_taildrop"
++#define DRIVER_NO_DATA_STASHING "drv_no_data_stashing"
+ #define CHECK_INTERVAL         100  /* 100ms */
+ #define MAX_REPEAT_TIME        90   /* 9s (90 * 100ms) in total */
+ 
+@@ -932,7 +933,7 @@ dpaa2_dev_rx_queue_setup(struct rte_eth_dev *dev,
+ 		options |= DPNI_QUEUE_OPT_FLC;
+ 		cfg.flc.stash_control = true;
+ 		dpaa2_flc_stashing_clear_all(&cfg.flc.value);
+-		if (getenv("DPAA2_DATA_STASHING_OFF")) {
++		if (priv->flags & DPAA2_DATA_STASHING_OFF) {
+ 			dpaa2_flc_stashing_set(DPAA2_FLC_DATA_STASHING, 0,
+ 				&cfg.flc.value);
+ 			dpaa2_q->data_stashing_off = 1;
+@@ -2895,6 +2896,12 @@ dpaa2_dev_init(struct rte_eth_dev *eth_dev)
+ 		DPAA2_PMD_INFO("Rx taildrop disabled");
+ 	}
+ 
++	if (dpaa2_get_devargs(dev->devargs, DRIVER_NO_DATA_STASHING) ||
++	    getenv("DPAA2_DATA_STASHING_OFF")) {
++		priv->flags |= DPAA2_DATA_STASHING_OFF;
++		DPAA2_PMD_INFO("Data stashing disabled");
++	}
++
+ 	/* For secondary processes, the primary has done all the work */
+ 	if (rte_eal_process_type() != RTE_PROC_PRIMARY) {
+ 		/* In case of secondary, only burst and ops API need to be
+@@ -3393,5 +3400,6 @@ RTE_PMD_REGISTER_PARAM_STRING(NET_DPAA2_PMD_DRIVER_NAME,
+ 		DRIVER_TX_CONF "=<int>"
+ 		DRIVER_RX_PARSE_ERR_DROP "=<int>"
+ 		DRIVER_ERROR_QUEUE "=<int>"
+-		DRIVER_NO_TAILDROP "=<int>");
++		DRIVER_NO_TAILDROP "=<int>"
++		DRIVER_NO_DATA_STASHING "=<int>");
+ RTE_LOG_REGISTER_DEFAULT(dpaa2_logtype_pmd, NOTICE);
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.h b/drivers/net/dpaa2/dpaa2_ethdev.h
+index 86b3022ddb..4da47a543a 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.h
++++ b/drivers/net/dpaa2/dpaa2_ethdev.h
+@@ -97,6 +97,9 @@
+  */
+ #define DPAA2_TX_DYNAMIC_CONF_ENABLE	RTE_BIT32(9)
+ 
++/* Disable data stashing (prefetch of packet data into CPU cache) */
++#define DPAA2_DATA_STASHING_OFF		RTE_BIT32(10)
++
+ #define DPAAX_RX_ERROR_QUEUE_FLAG	RTE_BIT32(11)
+ 
+ /* DPDMUX index for DPMAC */
+-- 
+2.43.0
+

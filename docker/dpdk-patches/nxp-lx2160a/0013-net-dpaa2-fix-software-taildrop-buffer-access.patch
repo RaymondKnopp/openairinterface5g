@@ -1,0 +1,61 @@
+From 7a87e4325141a967da3ab9f1a4115c542d46f69d Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Mon, 23 Feb 2026 10:00:43 +0100
+Subject: [PATCH 12/22] net/dpaa2: fix software taildrop buffer access
+
+The sw_td path in dpaa2_dev_tx() reads from the wrong position in the
+bufs array. When the goto fires, bufs has already been advanced past
+the num_tx successfully sent packets. The first loop then reads num_tx
+more entries starting from bufs, going past the end of the input array.
+Additionally, the buf_to_free segments for already-enqueued packets
+are never freed, leaking memory.
+
+Replace the buggy sw_td code with the same pattern used in
+dpaa2_dev_tx_ordered(): free buf_to_free segments first, then use
+rte_pktmbuf_free_bulk() to drop remaining unsent packets.
+
+Not tested, found by code review.
+
+Cc: stable@dpdk.org
+Fixes: c3ffe74d85be ("net/dpaa2: support software taildrop")
+Reported-by: Stephen Hemminger <stephen@networkplumber.org>
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_rxtx.c | 18 ++++++------------
+ 1 file changed, 6 insertions(+), 12 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_rxtx.c b/drivers/net/dpaa2/dpaa2_rxtx.c
+index 864837efe3..730cf63769 100644
+--- a/drivers/net/dpaa2/dpaa2_rxtx.c
++++ b/drivers/net/dpaa2/dpaa2_rxtx.c
+@@ -1506,21 +1506,15 @@ dpaa2_dev_tx(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
+ 
+ 	return num_tx;
+ sw_td:
+-	loop = 0;
+-	while (loop < num_tx) {
+-		if (unlikely(RTE_MBUF_HAS_EXTBUF(*bufs)))
+-			rte_pktmbuf_free(*bufs);
+-		bufs++;
+-		loop++;
++	for (loop = 0; loop < free_count; loop++) {
++		if (buf_to_free[loop].pkt_id < num_tx)
++			rte_pktmbuf_free_seg(buf_to_free[loop].seg);
+ 	}
+ 
+ 	/* free the pending buffers */
+-	while (nb_pkts) {
+-		rte_pktmbuf_free(*bufs);
+-		bufs++;
+-		nb_pkts--;
+-		num_tx++;
+-	}
++	rte_pktmbuf_free_bulk(bufs, nb_pkts);
++
++	num_tx += nb_pkts;
+ 	dpaa2_q->tx_pkts += num_tx;
+ 
+ 	return num_tx;
+-- 
+2.43.0
+

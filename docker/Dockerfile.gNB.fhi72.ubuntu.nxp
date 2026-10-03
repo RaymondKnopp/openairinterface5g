@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: LicenseRef-CSSL-1.0
+
+#---------------------------------------------------------------------
+#
+# Slim target image for the GeneVisio NPE-010 (LX2160A / Cortex-A72)
+#   OAI gNB with FHI 7.2 fronthaul + LA1200 LDPC offload
+#   Valid for Ubuntu 24.04 (noble), linux/arm64
+#
+# Modelled on Dockerfile.gNB.fhi72.t2.ubuntu. Differences, all board-driven:
+#   - copies /usr/local/lib/aarch64-linux-gnu (not x86_64)
+#   - ships libldpc_aal.so: LDPC is offloaded to the LA1200 FECA over BBDEV
+#   - ships liboran_fhlib_5g.so: the fronthaul driver OAI dlopen()s at runtime
+#   - ships libforce_no_lse.so: LD_PRELOAD shim that clears
+#     __aarch64_have_lse_atomics so outline-atomic stubs never take the LSE
+#     path. The LX2160A is ARMv8.0-A and traps LSE atomics with SIGILL.
+#   - ships libarmral.so: ARM RAL, used by xran for BFP compression
+#
+# The board has ~2 GB free, so this must stay small: the build image is
+# ~8 GB and never goes near it. Build on an x86_64 host with
+# docker/build-nxp-arm64.sh, then push or `docker save | ssh ... docker load`.
+#---------------------------------------------------------------------
+
+FROM ran-base:latest AS gnb-base
+
+FROM ran-build-fhi72-nxp:latest AS gnb-build
+
+#start from scratch for target executable
+FROM ubuntu:noble AS oai-gnb
+ARG BUILD_OPTION
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe
+
+RUN apt-get update && \
+    apt-get upgrade --yes && \
+    apt-get install --yes \
+        software-properties-common \
+        procps \
+        libsctp1 \
+        tzdata \
+        libconfig9 \
+        openssl \
+        net-tools \
+        gdb \
+        pciutils \
+        libpcap0.8 \
+        libbsd0 \
+        libatomic1 \
+        libnuma1 \
+        libyaml-cpp0.8 \
+        libfdt1 \
+        iproute2 \
+        ethtool && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/oai-gnb/bin
+COPY --from=gnb-build /oai-ran/build/nr-softmodem ./
+COPY ./docker/scripts/gnb_entrypoint.sh ./entrypoint.sh
+COPY ./docker/scripts/check-prach-io.sh ./check-prach-io.sh
+
+## OAI runtime modules. liboran_fhlib_5g.so is the 7.2 fronthaul driver and
+## libldpc_aal.so the BBDEV LDPC backend; both are dlopen()ed by name at runtime,
+## so they must be on the loader path, not just linked.
+COPY --from=gnb-build \
+    /oai-ran/build/liboran_fhlib_5g.so \
+    /oai-ran/build/libcoding.so \
+    /oai-ran/build/libparams_libconfig.so \
+    /oai-ran/build/libdfts.so \
+    /oai-ran/build/libldpc*.so \
+    /oai-ran/build/libparams_yaml.so \
+    /usr/local/lib/
+
+## Libxran
+COPY --from=gnb-build \
+    /opt/phy/fhi_lib/lib/build/libxran.so \
+    /opt/phy/fhi_lib/lib/build/
+
+## ARM RAL (BFP compression used by xran)
+COPY --from=gnb-build /opt/ral/build/libarmral.so* /usr/local/lib/
+
+## All DPDK libraries - liboran_fhlib_5g.so pulls in most of them, and the
+## bbdev la12xx + net dpaa2 PMDs are loaded from here.
+COPY --from=gnb-build /usr/local/lib/aarch64-linux-gnu /usr/local/lib/aarch64-linux-gnu/
+
+## OAI dlopen()s the radio as liboai_transpro.so. With OAI_FHI72=ON the build
+## makes that a POST_BUILD symlink to liboran_fhlib_5g.so
+## (radio/fhi_72/CMakeLists.txt:91); recreate it here rather than copying a
+## symlink through COPY --from.
+## OAI dlopen()s the radio as liboai_transpro.so. With OAI_FHI72=ON the build
+## makes that a POST_BUILD symlink to liboran_fhlib_5g.so
+## (radio/fhi_72/CMakeLists.txt:91); recreate it here rather than copying a
+## symlink through COPY --from.
+RUN ln -sf liboran_fhlib_5g.so /usr/local/lib/liboai_transpro.so && \
+    ldconfig && \
+    echo "=== checking every runtime dependency resolves ===" && \
+    MISSING=$( { ldd /opt/oai-gnb/bin/nr-softmodem; \
+                 for f in /usr/local/lib/*.so /opt/phy/fhi_lib/lib/build/*.so \
+                          /usr/local/lib/aarch64-linux-gnu/*.so*; do \
+                   [ -f "$f" ] && ldd "$f" 2>/dev/null; \
+                 done; } 2>/dev/null | grep "not found" | awk '{print $1}' | sort -u ) && \
+    if [ -n "$MISSING" ]; then \
+      echo "ERROR: unresolved shared libraries in the runtime image:" >&2; \
+      echo "$MISSING" >&2; \
+      echo "add the providing package to the apt-get install list above" >&2; \
+      exit 1; \
+    fi && \
+    echo "OK: all runtime dependencies resolve" && \
+    ldd /opt/oai-gnb/bin/nr-softmodem | head -5
+
+WORKDIR /opt/oai-gnb/bin
+COPY --from=gnb-build /oai-ran/build/nr-softmodem ./
+COPY ./docker/scripts/gnb_entrypoint.sh ./entrypoint.sh
+COPY ./docker/scripts/check-prach-io.sh ./check-prach-io.sh
+
+## OAI runtime modules. liboran_fhlib_5g.so is the 7.2 fronthaul driver and
+## libldpc_aal.so the BBDEV LDPC backend; both are dlopen()ed by name at runtime,
+## so they must be on the loader path, not just linked.
+COPY --from=gnb-build \
+    /oai-ran/build/liboran_fhlib_5g.so \
+    /oai-ran/build/libcoding.so \
+    /oai-ran/build/libparams_libconfig.so \
+    /oai-ran/build/libdfts.so \
+    /oai-ran/build/libldpc*.so \
+    /oai-ran/build/libparams_yaml.so \
+    /usr/local/lib/
+
+## Libxran
+COPY --from=gnb-build \
+    /opt/phy/fhi_lib/lib/build/libxran.so \
+    /opt/phy/fhi_lib/lib/build/
+
+## ARM RAL (BFP compression used by xran)
+COPY --from=gnb-build /opt/ral/build/libarmral.so* /usr/local/lib/
+
+## All DPDK libraries - liboran_fhlib_5g.so pulls in most of them, and the
+## bbdev la12xx + net dpaa2 PMDs are loaded from here.
+COPY --from=gnb-build /usr/local/lib/aarch64-linux-gnu /usr/local/lib/aarch64-linux-gnu/
+
+## OAI dlopen()s the radio as liboai_transpro.so. With OAI_FHI72=ON the build
+## makes that a POST_BUILD symlink to liboran_fhlib_5g.so
+## (radio/fhi_72/CMakeLists.txt:91); recreate it here rather than copying a
+## symlink through COPY --from.
+RUN ln -sf liboran_fhlib_5g.so /usr/local/lib/liboai_transpro.so && \
+    ldconfig && \
+    echo "---- ldd on nr-softmodem ----" && \
+    ldd /opt/oai-gnb/bin/nr-softmodem && \
+    echo "---- ldd on shared libraries ----" && \
+    ldd /usr/local/lib/liboai_transpro.so \
+        /usr/local/lib/liboran_fhlib_5g.so \
+        /usr/local/lib/libcoding.so \
+        /usr/local/lib/libparams_libconfig.so \
+        /usr/local/lib/libdfts.so \
+        /usr/local/lib/libldpc*.so \
+        /opt/phy/fhi_lib/lib/build/libxran.so && \
+    echo "---- LSE atomics check (must be empty outside outline stubs) ----" && \
+    ( command -v objdump >/dev/null 2>&1 && \
+      objdump -d /opt/oai-gnb/bin/nr-softmodem 2>/dev/null | \
+        awk '/^[[:xdigit:]]+ <__aarch64_(cas|ldadd|swp)[^>]*>:/{s=1;next}/^[[:xdigit:]]+ <[^>]+>:/{s=0}!s&&/\b(casa|casal|casl|cas|ldadd|ldadda|ldaddal|swp|swpa|swpal)\b/{print}' \
+        | head -5 || echo "objdump not present in runtime image - checked in build stage" )
+
+WORKDIR /opt/oai-gnb
+COPY --from=gnb-base /tini /tini
+ENTRYPOINT ["/tini", "-v", "--", "/opt/oai-gnb/bin/entrypoint.sh"]
+CMD ["/opt/oai-gnb/bin/nr-softmodem"]

@@ -145,7 +145,17 @@ add_list_string_option(CMAKE_BUILD_TYPE "RelWithDebInfo" "Choose the type of bui
 # -so to avoid AVX512 instructions generation by gcc
 if(EXISTS "/proc/cpuinfo" AND NOT CROSS_COMPILE)
   file(STRINGS "/proc/cpuinfo" CPUFLAGS REGEX flags LIMIT_COUNT 1)
-  file(STRINGS "/proc/cpuinfo" CPUPART REGEX "CPU part" LIMIT_COUNT 1)
+  # CPUPART may be supplied on the command line (-DCPUPART=0xd08). Needed when
+  # building in an emulated aarch64 container: /proc/cpuinfo there has no
+  # "CPU part" line at all, so the detection below yields an empty CPUPART and
+  # the aarch64 branch falls through to -mcpu=native -march=native. Under QEMU
+  # "native" is a v8.9 core, so GCC emits SVE, FEAT_CSSC (smin/umax) and LSE -
+  # none of which exist on the Cortex-A72, giving SIGILL on the target.
+  if(NOT CPUPART)
+    file(STRINGS "/proc/cpuinfo" CPUPART REGEX "CPU part" LIMIT_COUNT 1)
+  else()
+    message(STATUS "CPUPART overridden from the command line: ${CPUPART}")
+  endif()
 else()
   message(WARNING "did not find /proc/cpuinfo -- not setting any x86-specific compilation variables")
 endif()

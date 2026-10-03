@@ -1,0 +1,105 @@
+From 0000000000000000000000000000000000000003 Mon Sep 17 00:00:00 2001
+From: FreePro BSP <bsp@freepro.local>
+Date: Tue, 2 Sep 2026 00:00:00 +0000
+Subject: [PATCH] baseband/la12xx: support CB mode for LDPC encode
+
+The LDPC encode path reads ldpc_enc->tb_params unconditionally and never
+looks at code_block_mode. rte_bbdev_op_ldpc_enc keeps cb_params and
+tb_params in a *union*, so when an application selects CB mode
+(code_block_mode == 1) and fills cb_params.e, the driver reinterprets
+that same memory as tb_params.ea, while tb_params.c and .cab read as 0.
+
+Two consequences:
+
+  prepare_ldpc_enc_op()
+    total_out_bits = (cab * ea) + (c - cab) * eb
+                   = (0 * e)   + (0 - 0) * eb = 0
+    so output.length becomes 0 and the encoder returns an empty buffer
+    with no error at all. dpdk-test-bbdev reports:
+      "Length of segment differ in original (2699) and filled (0) op"
+
+  fill_feca_desc_enc()
+    for (i = 0; i < cab; i++)  e[i] = ea;
+    for (;      i < c;   i++)  e[i] = eb;
+    neither loop executes, so e[] reaches
+    la12xx_sch_encode_param_convert() completely uninitialised. That is
+    worse than the length bug: the callee sums e[0..C-1] and branches on
+    the result, so an unpatched CB-mode encode either takes the "no
+    ULSCH" path (E_sum happens to be 0) or the normal path with garbage
+    lifting/offset values, depending on stack contents.
+
+    e[] is now zeroed before either branch, so entries no branch fills
+    read as 0 instead of garbage. This also hardens TB mode, which only
+    ever initialised the first tb_params.c entries while the callee may
+    read up to C.
+
+Reproduced on an LA12xx Rev A0 (LX2160A host, SDK v4.0, FreeRTOS
+V10.6.0) with the vectors NXP ships:
+
+  dpdk-test-bbdev --vdev=baseband_la12xx0 -c 0x1 -- \
+      -n 4 -v ldpc_enc_v2342.data -b 4 -s 270000 -c throughput   # fails
+  dpdk-test-bbdev --vdev=baseband_la12xx0 -c 0x1 -- \
+      -n 4 -v ldpc_enc_tb.data    -b 4 -s 270000 -c throughput   # passes
+
+ldpc_enc_v8568.data fails identically. Removing RTE_BBDEV_LDPC_RATE_MATCH
+from op_flags, or adding network_order, changes nothing -- the failure is
+purely the union misread.
+
+The decode path already handles this correctly: prepare/dequeue test
+ldpc_dec.code_block_mode when counting code blocks, which is why all five
+shipped CB-mode decode vectors (ldpc_dec_v2342_drop, v7813, v8480, v8568,
+v9503) pass. Only encode is affected.
+
+Branch on code_block_mode in both places: in CB mode there is exactly one
+code block, whose rate-matched length is cb_params.e.
+
+Signed-off-by: FreePro BSP <bsp@freepro.local>
+---
+ drivers/baseband/la12xx/bbdev_la12xx.c | 27 ++++++++++++++++++++-------
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+--- a/drivers/baseband/la12xx/bbdev_la12xx.c
++++ b/drivers/baseband/la12xx/bbdev_la12xx.c
+@@ -874,10 +874,22 @@
+ 	char *data_ptr;
+ 	uint32_t l1_pcie_addr;
+ 
+-	for (i = 0; i < ldpc_enc->tb_params.cab; i++)
+-		e[i] = ldpc_enc->tb_params.ea;
+-	for (; i < ldpc_enc->tb_params.c; i++)
+-		e[i] = ldpc_enc->tb_params.eb;
++	/* la12xx_sch_encode_param_convert() derives the code block count C
++	 * from the input length and then reads e[0..C-1]. Zero the array
++	 * first so any entry the branches below do not fill reads as 0
++	 * rather than stack garbage.
++	 */
++	memset(e, 0, sizeof(e));
++
++	if (ldpc_enc->code_block_mode) {
++		/* CB mode: one code block, length from cb_params.e */
++		e[0] = ldpc_enc->cb_params.e;
++	} else {
++		for (i = 0; i < ldpc_enc->tb_params.cab; i++)
++			e[i] = ldpc_enc->tb_params.ea;
++		for (; i < ldpc_enc->tb_params.c; i++)
++			e[i] = ldpc_enc->tb_params.eb;
++	}
+ 
+ 	memset(codeblock_mask, 0xFF, (8 * sizeof(uint32_t)));
+ 
+@@ -1332,9 +1344,12 @@
+ 	uint32_t total_out_bits;
+ 	int ret;
+ 
+-	total_out_bits = (ldpc_enc->tb_params.cab *
+-		ldpc_enc->tb_params.ea) + (ldpc_enc->tb_params.c -
+-		ldpc_enc->tb_params.cab) * ldpc_enc->tb_params.eb;
++	if (ldpc_enc->code_block_mode)
++		total_out_bits = ldpc_enc->cb_params.e;
++	else
++		total_out_bits = (ldpc_enc->tb_params.cab *
++			ldpc_enc->tb_params.ea) + (ldpc_enc->tb_params.c -
++			ldpc_enc->tb_params.cab) * ldpc_enc->tb_params.eb;
+ 
+ 	if (ldpc_enc->se_ce_mux)
+ 		ldpc_enc->output.length = ldpc_enc->se_ce_mux_output_size;

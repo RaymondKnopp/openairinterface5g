@@ -1,0 +1,87 @@
+From 29bc0b4f7595dd77f116cc1949a94dae57cad913 Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Mon, 23 Feb 2026 08:40:52 +0100
+Subject: [PATCH 09/22] net/dpaa2: fix error packet dump crash and memory leak
+
+Fix three bugs in dump_err_pkts():
+
+1. NULL pointer dereference: mbuf was checked for NULL but then
+   dereferenced unconditionally on the next line.
+
+2. Memory leak on multi-segment packets: the while loop walked
+   mbuf to NULL, so the subsequent rte_pktmbuf_free(mbuf) was a
+   no-op and the packet was never freed. Use a separate iterator
+   variable and free the original mbuf pointer.
+
+3. Segment index not reset between packets: variable i was
+   initialized once at function scope and never reset inside the
+   do/while loop, so hexdump titles had wrong segment numbers.
+   Make it local to the multi-segment block.
+
+Not tested, found by code review.
+
+Fixes: 8b49427e73 ("net/dpaa2: add Rx error queue support")
+Cc: stable@dpdk.org
+Reported-by: Stephen Hemminger <stephen@networkplumber.org>
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_rxtx.c | 31 +++++++++++++++++--------------
+ 1 file changed, 17 insertions(+), 14 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_rxtx.c b/drivers/net/dpaa2/dpaa2_rxtx.c
+index fcf5c48673..ef33078f3e 100644
+--- a/drivers/net/dpaa2/dpaa2_rxtx.c
++++ b/drivers/net/dpaa2/dpaa2_rxtx.c
+@@ -651,7 +651,7 @@ dump_err_pkts(struct dpaa2_queue *dpaa2_q)
+ 	const struct qbman_fd *fd;
+ 	struct qbman_pull_desc pulldesc;
+ 	struct rte_eth_dev_data *eth_data = dpaa2_q->eth_data;
+-	uint32_t lcore_id = rte_lcore_id(), i = 0;
++	uint32_t lcore_id = rte_lcore_id();
+ 	void *v_addr, *hw_annot_addr;
+ 	struct dpaa2_fas *fas;
+ 	struct rte_mbuf *mbuf;
+@@ -726,24 +726,27 @@ dump_err_pkts(struct dpaa2_queue *dpaa2_q)
+ 			DPAA2_GET_FD_OFFSET(fd), DPAA2_GET_FD_ERR(fd),
+ 			fas->status);
+ 
+-		if (mbuf)
++		if (mbuf) {
+ 			__rte_mbuf_sanity_check(mbuf, 1);
+-		if (mbuf->nb_segs > 1) {
+-			while (mbuf) {
+-				sprintf(title, "Payload seg[%d]", i);
+-				rte_hexdump(stderr, title,
++			if (mbuf->nb_segs > 1) {
++				struct rte_mbuf *seg = mbuf;
++				int i = 0;
++
++				while (seg) {
++					sprintf(title, "Payload seg[%d]", i);
++					rte_hexdump(stderr, title,
++						(char *)seg->buf_addr + seg->data_off,
++						seg->data_len);
++					seg = seg->next;
++					i++;
++				}
++			} else {
++				rte_hexdump(stderr, "Payload",
+ 					(char *)mbuf->buf_addr + mbuf->data_off,
+ 					mbuf->data_len);
+-				mbuf = mbuf->next;
+-				i++;
+ 			}
+-		} else {
+-			rte_hexdump(stderr, "Payload",
+-				(char *)mbuf->buf_addr + mbuf->data_off,
+-				mbuf->data_len);
++			rte_pktmbuf_free(mbuf);
+ 		}
+-
+-		rte_pktmbuf_free(mbuf);
+ 		dq_storage++;
+ 		num_rx++;
+ 	} while (pending);
+-- 
+2.43.0
+

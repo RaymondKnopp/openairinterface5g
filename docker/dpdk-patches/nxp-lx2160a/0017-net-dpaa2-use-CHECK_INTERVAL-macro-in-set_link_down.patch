@@ -1,0 +1,32 @@
+From 506d4c84dd130b239f03db18f0a1613d7c6c886a Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 15:16:13 +0100
+Subject: [PATCH 16/22] net/dpaa2: use CHECK_INTERVAL macro in set_link_down
+
+Replace hardcoded rte_delay_us(100 * 1000) with
+rte_delay_ms(CHECK_INTERVAL) for consistency with the rest of the
+driver.
+
+No functional change.
+
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index fa5c28842a..6f6103ed4a 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -2307,7 +2307,7 @@ dpaa2_dev_set_link_down(struct rte_eth_dev *dev)
+ 		}
+ 		if (dpni_enabled)
+ 			/* Allow the MC some slack */
+-			rte_delay_us(100 * 1000);
++			rte_delay_ms(CHECK_INTERVAL);
+ 	} while (dpni_enabled && --retries);
+ 
+ 	if (!retries) {
+-- 
+2.43.0
+

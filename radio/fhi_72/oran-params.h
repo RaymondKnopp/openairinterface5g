@@ -18,6 +18,7 @@
 #define ORAN_CONFIG_DU_KEYPAIR "du_key_pair" // only needed for M-plane
 #define ORAN_CONFIG_DU_ADDR "du_addr" // needed for M-plane or O-RU
 #define ORAN_CONFIG_VLAN_TAG "vlan_tag" // only needed for M-plane
+#define ORAN_CONFIG_VLAN_PCP "vlan_pcp" // 802.1Q priority for C-/U-plane TX (default 7)
 #define ORAN_CONFIG_RU_ADDR "ru_addr" // not needed if M-plane used
 #define ORAN_CONFIG_RU_USERNAME "ru_username" // only needed for M-plane
 #define ORAN_CONFIG_RU_IP_ADDR "ru_ip_addr" // only needed for M-plane

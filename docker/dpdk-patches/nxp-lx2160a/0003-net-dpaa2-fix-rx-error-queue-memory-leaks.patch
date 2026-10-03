@@ -1,0 +1,101 @@
+From c4d81e9790c8f02883db1e1fed58587a7f66137b Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 07:30:17 +0100
+Subject: [PATCH 02/22] net/dpaa2: fix rx error queue memory leaks
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The rx_err_vq is allocated separately with rte_zmalloc() in
+dpaa2_alloc_rx_tx_queues(), but is never properly freed in two paths:
+
+1. On port close: dpaa2_free_rx_tx_queues() only frees the q_storage
+contents via dpaa2_queue_storage_free() — the dpaa2_queue struct itself
+is never freed, leaking memory on every port close.
+
+2. On allocation error: the fail: path frees the error queue's
+   q_storage but never frees the rx_err_vq struct itself, which was
+   separately allocated with rte_zmalloc(). This has been missing
+   since the error queue was first introduced.
+
+Add the missing rte_free() calls and NULL assignments in both paths.
+
+Also replace the DPAAX_RX_ERROR_QUEUE_FLAG check with a direct
+priv->rx_err_vq NULL check, which is safe because rx_err_vq is
+zero-initialized and only set when the flag is active. This avoids a
+NULL dereference if rx_err_vq allocation itself fails and also
+simplifies the cleanup in dpaa2_free_rx_tx_queues() for consistency.
+
+As a defensive measure, also add a NULL guard to the
+dpaa2_queue_storage_free() macro to prevent NULL pointer dereference
+from callers in error paths.
+
+Fixes: 46d02eeaaeb8 ("net/dpaa2: fix queue freeing")
+Fixes: 4690a6114ff6 ("net/dpaa2: enable error queues optionally")
+Cc: stable@dpdk.org
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/bus/fslmc/portal/dpaa2_hw_pvt.h | 16 +++++++++-------
+ drivers/net/dpaa2/dpaa2_ethdev.c        |  8 ++++++--
+ 2 files changed, 15 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/bus/fslmc/portal/dpaa2_hw_pvt.h b/drivers/bus/fslmc/portal/dpaa2_hw_pvt.h
+index 10bc191645..e625a5c035 100644
+--- a/drivers/bus/fslmc/portal/dpaa2_hw_pvt.h
++++ b/drivers/bus/fslmc/portal/dpaa2_hw_pvt.h
+@@ -223,13 +223,15 @@ struct swp_active_dqs {
+ 
+ #define dpaa2_queue_storage_free(q, num) \
+ ({ \
+-	int i; \
+-	\
+-	for (i = 0; i < (num); i++) { \
+-		if ((q)->q_storage[i]) { \
+-			dpaa2_free_dq_storage((q)->q_storage[i]); \
+-			rte_free((q)->q_storage[i]); \
+-			(q)->q_storage[i] = NULL; \
++	if (q) { \
++		int i; \
++		\
++		for (i = 0; i < (num); i++) { \
++			if ((q)->q_storage[i]) { \
++				dpaa2_free_dq_storage((q)->q_storage[i]); \
++				rte_free((q)->q_storage[i]); \
++				(q)->q_storage[i] = NULL; \
++			} \
+ 		} \
+ 	} \
+ })
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index 9f8aca19f2..23049c7fe7 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -622,9 +622,11 @@ dpaa2_alloc_rx_tx_queues(struct rte_eth_dev *dev)
+ 		priv->rx_vq[i--] = NULL;
+ 	}
+ 
+-	if (priv->flags & DPAAX_RX_ERROR_QUEUE_FLAG) {
++	if (priv->rx_err_vq) {
+ 		dpaa2_q = priv->rx_err_vq;
+ 		dpaa2_queue_storage_free(dpaa2_q, RTE_MAX_LCORE);
++		rte_free(dpaa2_q);
++		priv->rx_err_vq = NULL;
+ 	}
+ 
+ 	rte_free(mc_q);
+@@ -690,9 +692,11 @@ dpaa2_free_rx_tx_queues(struct rte_eth_dev *dev)
+ 				priv->tx_conf_vq[i] = NULL;
+ 			}
+ 		}
+-		if (priv->flags & DPAAX_RX_ERROR_QUEUE_FLAG) {
++		if (priv->rx_err_vq) {
+ 			dpaa2_q = priv->rx_err_vq;
+ 			dpaa2_queue_storage_free(dpaa2_q, RTE_MAX_LCORE);
++			rte_free(dpaa2_q);
++			priv->rx_err_vq = NULL;
+ 		}
+ 
+ 		/*free memory for all queues (RX+TX) */
+-- 
+2.43.0
+

@@ -949,8 +949,11 @@ void kill_NR_RU_proc(int inst) {
    * returns promptly. */
   pthread_join(proc->pthread_FH, NULL);
 
+  /* The pool is created for every if_south now (7.2 uses it for the per-antenna BFP
+   * compression), so it must be torn down for every if_south too. The feprx/feptx FIFOs
+   * are still only used by the non-7.2 paths. */
+  abortTpool(ru->threadPool);
   if (ru->if_south != REMOTE_IF4p5) {
-    abortTpool(ru->threadPool);
     abortNotifiedFIFO(ru->respfeprx);
     abortNotifiedFIFO(ru->respfeptx);
   }
@@ -999,7 +1002,14 @@ void set_function_spec_param(RU_t *ru)
 
     case REMOTE_IF4p5:
       ru->feprx = NULL; // DFTs
-      ru->feptx_prec = nr_feptx_prec; // Precoding operation
+      /* No precoding stage for 7.2. nr_feptx_prec()'s only implemented path is a straight
+       * memcpy of gNB txdataF into ru->common.txdataF_BF (its digital-beamforming branch is
+       * an AssertFatal(false)), and tx_func() runs phy_procedures_gNB_TX(), the precoding
+       * stage and fh_south_out() back to back on one thread, so nothing can write txdataF
+       * while the fronthaul reads it. The copy therefore bought no decoupling, only a
+       * full-band memcpy per slot per antenna; oran_fh_if4p5_south_out() compresses out of
+       * gNB txdataF directly instead. */
+      ru->feptx_prec = NULL;
       ru->feptx_ofdm = NULL; // no OFDM mod
       ru->fh_south_in = NULL;
       ru->fh_south_out = NULL;
@@ -1073,9 +1083,10 @@ void init_NR_RU(configmodule_interface_t *cfg, char *rf_config_file)
     // init RU_proc -> needed for timing alignment
     ru->proc = (RU_proc_t){.ru = ru, .first_rx = 1, .first_tx = 1};
 
-    /* REMOTE_IF4p5 used to be excluded here because it has neither feprx nor feptx_ofdm to
-     * parallelise.  It does have work now: the 7.2 fronthaul south_out compresses every
-     * antenna in xran_fh_tx_send_slot(), and that spreads over this pool. */
+    /* REMOTE_IF4p5 used to be excluded here because it has neither feprx nor feptx_ofdm
+     * to parallelise. It has work now: the 7.2 fronthaul south_out compresses every
+     * antenna in xran_fh_tx_send_slot(), and that spreads over this pool. Size and
+     * pinning come from num_tp_cores/tp_cores in the RUs section. */
     {
       int threadCnt = ru->num_tpcores;
       if (threadCnt < 2)

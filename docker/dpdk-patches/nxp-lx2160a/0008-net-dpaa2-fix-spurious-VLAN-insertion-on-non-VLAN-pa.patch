@@ -1,0 +1,58 @@
+From bab8ffc3a3483afe1c1247b9651a28f59f90a6a8 Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Fri, 20 Feb 2026 15:55:14 +0100
+Subject: [PATCH 07/22] net/dpaa2: fix spurious VLAN insertion on non-VLAN
+ packets
+
+The VLAN insert check in dpaa2_dev_tx() tested the per-packet flag
+OR the port-level txmode offload:
+
+  if (ol_flags & RTE_MBUF_F_TX_VLAN ||
+      txmode.offloads & RTE_ETH_TX_OFFLOAD_VLAN_INSERT)
+
+When VLAN_INSERT is enabled in txmode, this causes rte_vlan_insert()
+to be called on every packet regardless of the per-packet flag, inserting
+a VLAN header with whatever stale value is in vlan_tci (typically 0).
+
+The port-level offload only advertises the capability. The actual trigger
+must be the per-packet RTE_MBUF_F_TX_VLAN flag, as done by every other
+DPDK driver (Intel, mlx5, virtio, vhost, af_packet, etc.).
+
+Fixes: 9e5c3d3c7778 ("net/dpaa2: support VLAN insert offload")
+Cc: stable@dpdk.org
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_rxtx.c | 10 +++-------
+ 1 file changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_rxtx.c b/drivers/net/dpaa2/dpaa2_rxtx.c
+index 7cbd3f33ae..5a98f295a7 100644
+--- a/drivers/net/dpaa2/dpaa2_rxtx.c
++++ b/drivers/net/dpaa2/dpaa2_rxtx.c
+@@ -1346,10 +1346,8 @@ dpaa2_dev_tx(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
+ 				    priv->bp_list->dpaa2_ops_index &&
+ 				    (*bufs)->nb_segs == 1 &&
+ 				    rte_mbuf_refcnt_read((*bufs)) == 1)) {
+-					if (unlikely(((*bufs)->ol_flags
+-						& RTE_MBUF_F_TX_VLAN) ||
+-						(eth_data->dev_conf.txmode.offloads
+-						& RTE_ETH_TX_OFFLOAD_VLAN_INSERT))) {
++					if (unlikely((*bufs)->ol_flags
++						& RTE_MBUF_F_TX_VLAN)) {
+ 						ret = rte_vlan_insert(bufs);
+ 						if (ret)
+ 							goto send_n_return;
+@@ -1402,9 +1400,7 @@ dpaa2_dev_tx(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
+ 				goto send_n_return;
+ 			}
+ 
+-			if (unlikely(((*bufs)->ol_flags & RTE_MBUF_F_TX_VLAN) ||
+-				(eth_data->dev_conf.txmode.offloads
+-				& RTE_ETH_TX_OFFLOAD_VLAN_INSERT))) {
++			if (unlikely((*bufs)->ol_flags & RTE_MBUF_F_TX_VLAN)) {
+ 				int ret = rte_vlan_insert(bufs);
+ 				if (ret)
+ 					goto send_n_return;
+-- 
+2.43.0
+

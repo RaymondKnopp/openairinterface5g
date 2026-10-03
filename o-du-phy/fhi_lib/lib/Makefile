@@ -1,0 +1,367 @@
+#/******************************************************************************
+#*
+#*   Copyright (c) 2020 Intel.
+#*
+#*   Licensed under the Apache License, Version 2.0 (the "License");
+#*   you may not use this file except in compliance with the License.
+#*   You may obtain a copy of the License at
+#*
+#*       http://www.apache.org/licenses/LICENSE-2.0
+#*
+#*   Unless required by applicable law or agreed to in writing, software
+#*   distributed under the License is distributed on an "AS IS" BASIS,
+#*   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#*   See the License for the specific language governing permissions and
+#*   limitations under the License.
+#*
+#*******************************************************************************/
+
+MYCUSTOMTAB='     '
+MYCUSTOMSPACE='============================================================================================'
+MYCUSTOMSPACE1='------------------------------------------------------------'
+
+##############################################################
+#  Tools configuration
+##############################################################
+
+# Default target architecture and compiler
+TARGET ?= $(shell uname -m)
+
+# Architecture and compiler-specific tools and flags
+ifeq ($(TARGET), x86_64)
+    ifeq ($(WIRELESS_SDK_TOOLCHAIN),gcc)
+        CC  := gcc
+        CPP := g++
+        AS := as
+        AR := ar
+        LD := gcc
+    else ifeq ($(WIRELESS_SDK_TOOLCHAIN),icc)
+        CC  := icc
+        CPP := icpc
+        AS := as
+        AR := ar
+        LD := icc
+    else ifeq ($(WIRELESS_SDK_TOOLCHAIN),icx)
+        CC  := icx
+        CPP := icpx
+        AS  := as
+        AR  := llvm-ar
+        LD  := icx
+    else
+        $(error "Please define WIRELESS_SDK_TOOLCHAIN environment variable")
+    endif
+else ifeq ($(TARGET), aarch64)
+    CROSS ?=
+    CC  := $(CROSS)gcc
+    CPP := $(CROSS)g++
+    LD  := $(CROSS)gcc
+    AR  := $(CROSS)ar
+    CFLAGS += -march=armv8-a
+    LDFLAGS +=
+else
+    $(error Unsupported target architecture: $(TARGET))
+endif
+
+ifeq ($(WIRELESS_SDK_TARGET_ISA),avx512)
+    TARGET_PROCESSOR := -march=skylake-avx512
+else ifeq ($(WIRELESS_SDK_TARGET_ISA),snc)
+    TARGET_PROCESSOR := -march=icelake-server
+else ifeq ($(WIRELESS_SDK_TARGET_ISA),spr)
+    TARGET_PROCESSOR := -march=sapphirerapids
+endif
+
+
+ifeq ($(SHELL),cmd.exe)
+MD := mkdir.exe -p
+CP := cp.exe -f
+RM := rm.exe -rf
+else
+MD := mkdir -p
+CP := cp -f
+RM := rm -rf
+endif
+
+ifeq ($(ORU),1)
+	PROJECT_NAME := libxran-oru
+	BUILDDIR := build-oru
+else
+	PROJECT_NAME := libxran
+	BUILDDIR := build
+endif
+PROJECT_TYPE := lib
+PROJECT_DIR  := $(XRAN_DIR)/lib
+
+ifeq ($(XRAN_LIB_SO),)
+PROJECT_BINARY := $(BUILDDIR)/$(PROJECT_NAME).a
+else
+PROJECT_BINARY := $(BUILDDIR)/$(PROJECT_NAME).so
+endif
+
+ifeq ($(RTE_SDK),)
+    $(error "Please define RTE_SDK environment variable")
+endif
+
+RTE_TARGET ?= x86_64-native-linux-icc
+ifeq ($(TARGET), aarch64)
+    # For NXP LX2160A: DPDK installed via Dockerfile.dpdk to $(RTE_SDK).
+    # Try pkg-config in the install prefix first, fall back to $(RTE_SDK)/include.
+    RTE_INC := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH):$(RTE_SDK)/lib/pkgconfig:$(RTE_SDK)/lib/aarch64-linux-gnu/pkgconfig:$(RTE_SDK)/build/meson-uninstalled pkg-config --cflags-only-I libdpdk 2>/dev/null || echo "-I$(RTE_SDK)/include")
+else
+    RTE_INC := $(shell PKG_CONFIG_PATH=$(PKG_CONFIG_PATH):/usr/lib64/pkgconfig:$(RTE_SDK)/build/meson-uninstalled pkg-config --cflags-only-I libdpdk)
+endif
+
+API_DIR := $(PROJECT_DIR)/api
+SRC_DIR := $(PROJECT_DIR)/src
+ETH_DIR := $(PROJECT_DIR)/ethernet
+
+ifeq ($(MLOG),1)
+ifeq ($(MLOG_DIR),)
+    MLOG_DIR=$(XRAN_DIR)/../mlog
+endif
+endif
+
+CC_SRC = $(ETH_DIR)/xran_ethdi.c \
+	$(ETH_DIR)/xran_ethernet.c \
+	$(SRC_DIR)/xran_up_api.c \
+	$(SRC_DIR)/xran_sync_api.c \
+	$(SRC_DIR)/xran_timer.c \
+	$(SRC_DIR)/xran_cp_api.c \
+	$(SRC_DIR)/xran_transport.c \
+	$(SRC_DIR)/xran_common.c \
+	$(SRC_DIR)/xran_ul_tables.c \
+	$(SRC_DIR)/xran_frame_struct.c \
+	$(SRC_DIR)/xran_dev.c \
+	$(SRC_DIR)/xran_rx_proc.c \
+	$(SRC_DIR)/xran_tx_proc.c \
+	$(SRC_DIR)/xran_cp_proc.c \
+	$(SRC_DIR)/xran_cb_proc.c \
+	$(SRC_DIR)/xran_mem_mgr.c \
+	$(SRC_DIR)/xran_main.c \
+	$(SRC_DIR)/xran_delay_measurement.c
+
+ifeq ($(TARGET), x86_64)
+    CPP_SRC = $(SRC_DIR)/xran_compression.cpp \
+              $(SRC_DIR)/xran_bfp_ref.cpp \
+              $(SRC_DIR)/xran_bfp_cplane8.cpp \
+              $(SRC_DIR)/xran_bfp_cplane16.cpp \
+              $(SRC_DIR)/xran_bfp_cplane32.cpp \
+              $(SRC_DIR)/xran_bfp_cplane64.cpp \
+              $(SRC_DIR)/xran_bfp_uplane.cpp
+
+    CPP_SRC_SNC = $(SRC_DIR)/xran_compression_snc.cpp \
+                  $(SRC_DIR)/xran_bfp_cplane8_snc.cpp \
+                  $(SRC_DIR)/xran_bfp_cplane16_snc.cpp \
+                  $(SRC_DIR)/xran_bfp_cplane32_snc.cpp \
+                  $(SRC_DIR)/xran_bfp_cplane64_snc.cpp \
+                  $(SRC_DIR)/xran_bfp_uplane_snc.cpp \
+                  $(SRC_DIR)/xran_bfp_uplane_spr.cpp
+endif
+
+CC_FLAGS += -std=gnu11 -Wall -Wno-deprecated-declarations  \
+	-fdata-sections \
+	-ffunction-sections \
+	-g \
+	-fPIC \
+	-Wall \
+	-Wimplicit-function-declaration \
+	-g -O
+
+ifeq ($(TARGET), x86_64)
+CC_FLAGS += -mavx512bw -march=skylake-avx512 -mtune=skylake-avx512
+endif
+
+ifeq ($(WIRELESS_SDK_TOOLCHAIN),icc)
+CC_FLAGS += -wd1786 -restrict
+endif
+
+ifeq ($(WIRELESS_SDK_TOOLCHAIN),icx)
+CC_FLAGS += -mintrinsic-promote $(TARGET_PROCESSOR) -Wno-unused-function -Wno-intrinsic-promote -Wno-error
+endif
+
+ifeq ($(WIRELESS_SDK_TARGET_ISA),spr)
+    CC_FLAGS += -D_BBLIB_SPR_ -qopt-zmm-usage=high
+endif
+
+ifeq ($(TARGET), x86_64)
+    CPP_FLAGS := -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -D_GNU_SOURCE -D_REENTRANT -pipe \
+                 -fPIC \
+                 -falign-functions=16  \
+                 -Werror -Wno-unused-variable -std=c++14 -mcmodel=large -mavx512bw -march=skylake-avx512 -mtune=skylake-avx512
+else ifeq ($(TARGET), aarch64)
+    CPP_FLAGS := -D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS -D_GNU_SOURCE -D_REENTRANT -pipe \
+                 -Werror -Wno-unused-variable -std=c++14
+endif
+
+ifeq ($(WIRELESS_SDK_TOOLCHAIN),icc)
+CPP_FLAGS +=  -fp-model fast=2 -no-prec-div -no-prec-sqrt -fast-transcendentals -restrict
+endif
+
+ifeq ($(WIRELESS_SDK_TOOLCHAIN),icx)
+CPP_FLAGS +=  -fp-model fast $(TARGET_PROCESSOR) -mintrinsic-promote -Wno-unused-function -Wno-intrinsic-promote -Wno-error
+endif
+
+ifeq ($(WIRELESS_SDK_TARGET_ISA),spr)
+    CPP_FLAGS += -D_BBLIB_SPR_ -qopt-zmm-usage=high
+endif
+
+INC :=  -I$(API_DIR) -I$(ETH_DIR) -I$(SRC_DIR) $(RTE_INC)
+DEF :=
+ifeq ($(MLOG),1)
+	INC  += -I$(MLOG_DIR)/source
+	DEF += -DMLOG_ENABLED
+else
+	DEF += -UMLOG_ENABLED
+endif
+
+ifeq ($(ORU),1)
+	DEF += -DXRAN_O_RU_BUILD
+else
+	DEF += -UXRAN_O_RU_BUILD
+endif
+
+ifeq ($(SAMPLEAPP),1)
+	DEF += -DXRAN_SAMPLEAPP_BUILD
+else
+	DEF += -UXRAN_SAMPLEAPP_BUILD
+endif
+
+ifeq ($(POLL_EBBU_OFFLOAD),1)
+	DEF += -DPOLL_EBBU_OFFLOAD
+else
+	DEF += -UPOLL_EBBU_OFFLOAD
+endif
+
+AS_FLAGS :=
+AR_FLAGS := rc
+
+PROJECT_OBJ_DIR := $(BUILDDIR)/obj
+PROJECT_DEP_DIR := $(PROJECT_OBJ_DIR)/$(PROJECT_NAME).dep.d
+
+CC_OBJS := $(patsubst %.c,%.o,$(CC_SRC))
+CPP_OBJS := $(patsubst %.cpp,%.o,$(CPP_SRC))
+CPP_OBJS_SNC := $(patsubst %.cpp,%.o,$(CPP_SRC_SNC))
+AS_OBJS := $(patsubst %.s,%.o,$(AS_SRC))
+OBJS    := $(CC_OBJS) $(CPP_OBJS) $(CPP_OBJS_SNC) $(AS_OBJS) $(LIBS)
+DIRLIST := $(addprefix $(PROJECT_OBJ_DIR)/,$(sort $(dir $(OBJS)))) $(PROJECT_DEP_DIR)
+
+CC_OBJTARGETS := $(addprefix $(PROJECT_OBJ_DIR)/,$(CC_OBJS))
+CPP_OBJTARGETS := $(addprefix $(PROJECT_OBJ_DIR)/,$(CPP_OBJS))
+CPP_SNC_OBJTARGETS := $(addprefix $(PROJECT_OBJ_DIR)/,$(CPP_OBJS_SNC))
+
+AS_OBJTARGETS := $(addprefix $(PROJECT_OBJ_DIR)/,$(AS_OBJS))
+#-qopt-report=5 -qopt-matmul -qopt-report-phase=all
+ifeq ($(TARGET), x86_64)
+    CPP_COMP       := -O3 -DNDEBUG  -fPIE
+    CPP_COMP_SNC   := -O3 -DNDEBUG -march=icelake-server -fPIE
+else ifeq ($(TARGET), aarch64)
+    CPP_COMP       := -O3 -DNDEBUG -fPIE -Wrestrict
+    CPP_COMP_SNC   := -O3 -DNDEBUG -march=icelake-server -fPIE -Wrestrict
+endif
+CC_FLAGS_FULL  := $(CC_FLAGS)  $(INC) $(DEF)
+CPP_FLAGS_FULL := $(CPP_FLAGS) $(CPP_COMP) $(INC) $(DEF)
+CPP_FLAGS_FULL_SNC := $(CPP_FLAGS) $(CPP_COMP_SNC) $(INC) $(DEF)
+
+AS_FLAGS := $(AS_FLAGS) $(INC)
+
+ifeq ($(wildcard $(PROJECT_DEP_DIR)),$(PROJECT_DEP_DIR))
+GENERATE_DEPS :=
+else
+
+CC_DEPS  := $(addprefix __dep__,$(subst ../,__up__,$(CC_SRC)))
+CPP_DEPS  := $(addprefix __dep__,$(subst ../,__up__,$(CPP_SRC)))
+CPP_SNC_DEPS  := $(addprefix __dep__,$(subst ../,__up__,$(CPP_SRC_SNC)))
+GENERATE_DEPS := generate_deps
+endif
+
+#Add CodeCoverage option
+ifeq ($(CODE_COVERAGE),1)
+    CC_FLAGS += -fprofile-instr-generate -fcoverage-mapping
+    CXX_FLAGS += -fprofile-instr-generate -fcoverage-mapping
+    LD_FLAGS += -fprofile-instr-generate
+endif
+
+all : welcome_line 	$(PROJECT_BINARY)
+	@echo $(PROJECT_BINARY)
+
+.PHONY : clear_dep
+clear_dep:
+	@echo [DEP] rm $(PROJECT_DEP_DIR)/$(@F).dep
+	@$(RM) $(PROJECT_DEP_DIR)/$(@F).dep
+
+$(CC_DEPS) : $(PROJECT_DEP_DIR)
+	@echo [DEP] $(subst __up__,../,$(subst __dep__,,$@))
+	@$(CC) $(CC_FLAGS_FULL) -MM $(subst __up__,../,$(subst __dep__,,$@)) -MT $(PROJECT_OBJ_DIR)/$(patsubst %.c,%.o,$(subst __up__,../,$(subst __dep__,,$@))) >> $(PROJECT_DEP_DIR)/$(@F).dep
+
+$(CPP_DEPS) : $(PROJECT_DEP_DIR)
+	@echo [DEP] $(subst __up__,../,$(subst __dep__,,$@))
+	@$(CPP) $(CPP_FLAGS_FULL) -MM $(subst __up__,../,$(subst __dep__,,$@)) -MT $(PROJECT_OBJ_DIR)/$(patsubst %.cpp,%.o,$(subst __up__,../,$(subst __dep__,,$@))) >> $(PROJECT_DEP_DIR)/$(@F).dep
+
+$(CPP_SNC_DEPS) : $(PROJECT_DEP_DIR)
+	@echo [DEP] $(subst __up__,../,$(subst __dep__,,$@))
+	@$(CPP) -MM $(subst __up__,../,$(subst __dep__,,$@)) -MT $(PROJECT_OBJ_DIR)/$(patsubst %.cpp,%.o,$(subst __up__,../,$(subst __dep__,,$@))) $(CPP_FLAGS_FULL_SNC) >> $(PROJECT_DEP_DIR)/$(@F).dep
+
+.PHONY : generate_deps
+generate_deps : clear_dep $(CC_DEPS) $(CPP_DEPS) $(CPP_SNC_DEPS)
+
+
+.PHONY : echo_start_build
+echo_start_build :
+	@echo [BUILD] $(PROJECT_TYPE) : $(PROJECT_NAME)
+
+$(DIRLIST) :
+	-@$(MD) $@
+
+$(CC_OBJTARGETS) : $(GENERATE_DEPS)
+	@echo [CC]    $(subst $(PROJECT_OBJ_DIR)/,,$@)
+	@$(CC) -c $(CC_FLAGS_FULL) -o"$@" $(patsubst %.o,%.c,$(subst $(PROJECT_OBJ_DIR)/,,$@))
+
+$(CPP_OBJTARGETS) : $(GENERATE_DEPS)
+	@echo [CPP]    $(subst $(PROJECT_OBJ_DIR)/,,$@)
+	@$(CPP) -c $(CPP_FLAGS_FULL) -o"$@" $(patsubst %.o,%.cpp,$(subst $(PROJECT_OBJ_DIR)/,,$@))
+
+$(CPP_SNC_OBJTARGETS) : $(GENERATE_DEPS)
+	@echo [CPP-SNC]    $(subst $(PROJECT_OBJ_DIR)/,,$@)
+	@$(CPP) -c $(CPP_FLAGS_FULL_SNC) -o"$@" $(patsubst %.o,%.cpp,$(subst $(PROJECT_OBJ_DIR)/,,$@))
+
+$(AS_OBJTARGETS) : $(CC_OBJTARGETS) $(CPP_OBJTARGETS) $(CPP_SNC_OBJTARGETS)
+	@echo [AS]    $(subst $(PROJECT_OBJ_DIR)/,,$@)
+	@$(AS) $(AS_FLAGS) -o"$@" $(patsubst %.o,%.s,$(subst $(PROJECT_OBJ_DIR)/,,$@))
+
+ifeq ($(wildcard $(PROJECT_DEP_DIR)),$(PROJECT_DEP_DIR))
+
+include $(PROJECT_DEP_DIR)/*
+
+endif
+
+.PHONY: clean xclean
+clean:
+	@echo [CLEAN]  : $(PROJECT_NAME)
+	@$(RM) $(CC_OBJTARGETS) $(CPP_OBJTARGETS) $(CPP_SNC_OBJTARGETS) $(AS_OBJTARGETS)
+
+xclean: clean
+ifneq ($(wildcard $(PROJECT_DIR)/$(PROJECT_MAKE)),)
+	@echo [XCLEAN] : $(PROJECT_NAME)
+	@$(RM) -rf $(PROJECT_BINARY) $(PROJECT_BINARY_LIB) $(PROJECT_DEP_DIR)
+endif
+
+.PHONY : welcome_line
+welcome_line :
+	@echo $(MYCUSTOMSPACE)
+	@echo Building  $(PROJECT_BINARY)
+	@echo $(MYCUSTOMTAB)TARGET_PROCESSOR = $(TARGET_PROCESSOR)
+	@echo $(MYCUSTOMTAB)RTE_TARGET           = $(RTE_TARGET)
+	@echo $(MYCUSTOMSPACE)
+
+
+.PHONY : debug release
+
+debug :  all
+release :  all
+
+$(PROJECT_BINARY) : $(DIRLIST) echo_start_build $(GENERATE_DEPS) $(CC_OBJTARGETS) $(CPP_OBJTARGETS) $(CPP_SNC_OBJTARGETS) $(AS_OBJTARGETS)
+	@echo [AR]    $(subst $(BUILDDIR)/,,$@)
+ifeq ($(XRAN_LIB_SO),)
+	@$(AR) $(AR_FLAGS) $@ $(CC_OBJTARGETS) $(CPP_OBJTARGETS) $(CPP_SNC_OBJTARGETS) $(AS_OBJTARGETS)
+else
+	@$(CC) $(CC_OBJTARGETS) $(CPP_OBJTARGETS) $(CPP_SNC_OBJTARGETS) $(AS_OBJTARGETS) -shared -fPIC -o $@
+endif

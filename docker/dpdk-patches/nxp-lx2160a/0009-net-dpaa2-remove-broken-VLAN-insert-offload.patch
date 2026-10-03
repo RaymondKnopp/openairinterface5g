@@ -1,0 +1,123 @@
+From 22b52930040b2e690aa9313592a5a4cde46209fb Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Fri, 20 Feb 2026 15:57:45 +0100
+Subject: [PATCH 08/22] net/dpaa2: remove broken VLAN insert offload
+
+Remove RTE_ETH_TX_OFFLOAD_VLAN_INSERT from advertised capabilities
+and drop all rte_vlan_insert() calls from the TX paths.
+
+The VLAN insert "offload" was implemented in software via
+rte_vlan_insert(), which modifies packet data by prepending a 4-byte
+VLAN header. This is not a real hardware offload and was broken in
+most TX paths:
+
+In dpaa2_dev_tx():
+- fast path (direct, single segment, refcnt == 1): worked
+- slow path (different mempool, multi-segment, refcnt > 1):
+  rte_vlan_insert() fails on indirect or shared mbufs, dropping
+  the packet and all remaining packets in the burst
+- external buffer path: no VLAN insert at all, packet silently
+  sent without the VLAN tag
+
+In dpaa2_dev_tx_ordered() and dpaa2_dev_tx_multi_txq_ordered():
+- fast path (direct, single segment, refcnt == 1): worked
+- slow path (indirect, different mempool, multi-segment,
+  refcnt > 1): no VLAN insert at all, packet silently sent
+  without the VLAN tag
+
+The network stack sets RTE_MBUF_F_TX_VLAN and expects it to work
+regardless of the mbuf state. It cannot know or control whether the
+mbuf will be indirect, shared, or have multiple segments when the
+driver processes it.
+
+Other drivers (Intel, mlx5, bnxt, cnxk, hns3) handle VLAN insert
+correctly because they program the VLAN TCI into hardware TX
+descriptors, requiring no packet data modification. This works with
+any mbuf type.
+
+Fixes: 9e5c3d3c7778 ("net/dpaa2: support VLAN insert offload")
+Cc: stable@dpdk.org
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/net/dpaa2/dpaa2_ethdev.c |  2 --
+ drivers/net/dpaa2/dpaa2_rxtx.c   | 23 -----------------------
+ 2 files changed, 25 deletions(-)
+
+diff --git a/drivers/net/dpaa2/dpaa2_ethdev.c b/drivers/net/dpaa2/dpaa2_ethdev.c
+index 5832b9fd5f..b2441c6f63 100644
+--- a/drivers/net/dpaa2/dpaa2_ethdev.c
++++ b/drivers/net/dpaa2/dpaa2_ethdev.c
+@@ -56,7 +56,6 @@ static uint64_t dev_rx_offloads_nodis =
+ 
+ /* Supported Tx offloads */
+ static uint64_t dev_tx_offloads_sup =
+-		RTE_ETH_TX_OFFLOAD_VLAN_INSERT |
+ 		RTE_ETH_TX_OFFLOAD_IPV4_CKSUM |
+ 		RTE_ETH_TX_OFFLOAD_UDP_CKSUM |
+ 		RTE_ETH_TX_OFFLOAD_TCP_CKSUM |
+@@ -487,7 +486,6 @@ dpaa2_dev_tx_burst_mode_get(struct rte_eth_dev *dev,
+ 		uint64_t flags;
+ 		const char *output;
+ 	} tx_offload_map[] = {
+-			{RTE_ETH_TX_OFFLOAD_VLAN_INSERT, " VLAN Insert,"},
+ 			{RTE_ETH_TX_OFFLOAD_IPV4_CKSUM, " IPV4 csum,"},
+ 			{RTE_ETH_TX_OFFLOAD_UDP_CKSUM, " UDP csum,"},
+ 			{RTE_ETH_TX_OFFLOAD_TCP_CKSUM, " TCP csum,"},
+diff --git a/drivers/net/dpaa2/dpaa2_rxtx.c b/drivers/net/dpaa2/dpaa2_rxtx.c
+index 5a98f295a7..fcf5c48673 100644
+--- a/drivers/net/dpaa2/dpaa2_rxtx.c
++++ b/drivers/net/dpaa2/dpaa2_rxtx.c
+@@ -1346,12 +1346,6 @@ dpaa2_dev_tx(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
+ 				    priv->bp_list->dpaa2_ops_index &&
+ 				    (*bufs)->nb_segs == 1 &&
+ 				    rte_mbuf_refcnt_read((*bufs)) == 1)) {
+-					if (unlikely((*bufs)->ol_flags
+-						& RTE_MBUF_F_TX_VLAN)) {
+-						ret = rte_vlan_insert(bufs);
+-						if (ret)
+-							goto send_n_return;
+-					}
+ 					DPAA2_MBUF_TO_CONTIG_FD((*bufs),
+ 					&fd_arr[loop], mempool_to_bpid(mp));
+ #ifdef RTE_LIBRTE_MEMPOOL_DEBUG
+@@ -1400,11 +1394,6 @@ dpaa2_dev_tx(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
+ 				goto send_n_return;
+ 			}
+ 
+-			if (unlikely((*bufs)->ol_flags & RTE_MBUF_F_TX_VLAN)) {
+-				int ret = rte_vlan_insert(bufs);
+-				if (ret)
+-					goto send_n_return;
+-			}
+ 			if (mp->ops_index != priv->bp_list->dpaa2_ops_index) {
+ 				DPAA2_PMD_WARN("Non DPAA2 buffer pool");
+ 				/* alloc should be from the default buffer pool
+@@ -1679,12 +1668,6 @@ dpaa2_dev_tx_multi_txq_ordered(void **queue,
+ 				priv->bp_list->dpaa2_ops_index &&
+ 				(*bufs)->nb_segs == 1 &&
+ 				rte_mbuf_refcnt_read((*bufs)) == 1)) {
+-				if (unlikely((*bufs)->ol_flags
+-					& RTE_MBUF_F_TX_VLAN)) {
+-					ret = rte_vlan_insert(bufs);
+-					if (ret)
+-						goto send_frames;
+-				}
+ 				DPAA2_MBUF_TO_CONTIG_FD((*bufs),
+ 					&fd_arr[loop],
+ 					mempool_to_bpid(mp));
+@@ -1857,12 +1840,6 @@ dpaa2_dev_tx_ordered(void *queue, struct rte_mbuf **bufs, uint16_t nb_pkts)
+ 				    priv->bp_list->dpaa2_ops_index &&
+ 				    (*bufs)->nb_segs == 1 &&
+ 				    rte_mbuf_refcnt_read((*bufs)) == 1)) {
+-					if (unlikely((*bufs)->ol_flags
+-						& RTE_MBUF_F_TX_VLAN)) {
+-					  ret = rte_vlan_insert(bufs);
+-					  if (ret)
+-						goto send_n_return;
+-					}
+ 					DPAA2_MBUF_TO_CONTIG_FD((*bufs),
+ 						&fd_arr[loop],
+ 						mempool_to_bpid(mp));
+-- 
+2.43.0
+

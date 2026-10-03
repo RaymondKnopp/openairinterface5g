@@ -1,0 +1,28 @@
+[TEMPORARY - DEBUG ONLY] Log IPC instance values read by the PMD
+
+Dump the IPC metadata offset/size, the Geul signature, the initialized flag
+and the raw max_*_feca_queues values as read from the shared IPC structure,
+to diagnose why the PMD reports 0 LDPC queues while the modem firmware
+unconditionally writes MAX_LDPC_DEC_FECA_QUEUES=8.
+
+To be removed once the root cause is identified.
+
+diff --git a/drivers/baseband/la12xx/bbdev_la12xx.c b/drivers/baseband/la12xx/bbdev_la12xx.c
+index e6e7480..048eb11 100644
+--- a/drivers/baseband/la12xx/bbdev_la12xx.c
++++ b/drivers/baseband/la12xx/bbdev_la12xx.c
+@@ -2808,6 +2808,14 @@ setup_la12xx_dev(struct rte_bbdev *dev)
+ 		(&ipc_md->instance_list[ipc_priv->instance_id]);
+ 
+ 	instance = ipc_priv->instance;
++
++	rte_bbdev_log(ERR, "DBG off=0x%x sz=0x%x sig=0x%08x init=0x%08x",
++    		mhif->ipc_regs.ipc_mdata_offset, mhif->ipc_regs.ipc_mdata_size,
++    		ipc_md->ipc_geul_signature, instance->initialized);
++	rte_bbdev_log(ERR, "DBG raw dec=0x%08x enc=0x%08x raw=0x%08x depth=0x%08x",
++    		instance->max_ldpc_dec_feca_queues, instance->max_ldpc_enc_feca_queues,
++    		instance->max_raw_queues, instance->max_channel_depth);
++
+ 	priv->max_queues = instance->max_ldpc_dec_feca_queues +
+ 		instance->max_ldpc_enc_feca_queues +
+ 		instance->max_polar_enc_feca_queues +

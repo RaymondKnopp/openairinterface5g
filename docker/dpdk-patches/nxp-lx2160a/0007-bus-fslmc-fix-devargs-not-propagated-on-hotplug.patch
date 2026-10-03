@@ -1,0 +1,43 @@
+From 84095ff71bdb4af1b294611575729543ccad78ac Mon Sep 17 00:00:00 2001
+From: Maxime Leroy <maxime@leroys.fr>
+Date: Wed, 18 Feb 2026 16:18:57 +0100
+Subject: [PATCH 06/22] bus/fslmc: fix devargs not propagated on hotplug
+
+When a device is hotplugged via rte_dev_probe(), the EAL adds the
+devargs to its global list before calling the bus scan and then probe.
+However, when the fslmc bus is rescanned, it returns early without
+refreshing devargs on existing devices.
+
+As a result, PMD-specific devargs (e.g. drv_no_taildrop) passed
+through rte_dev_probe() are silently ignored by the driver.
+
+Refresh devargs from the EAL list on all existing devices when rescan
+is triggered, before returning early.
+
+Fixes: b5721f271cbf ("bus/fslmc: support DPNI hotplug")
+Cc: stable@dpdk.org
+
+Signed-off-by: Maxime Leroy <maxime@leroys.fr>
+---
+ drivers/bus/fslmc/fslmc_bus.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/bus/fslmc/fslmc_bus.c b/drivers/bus/fslmc/fslmc_bus.c
+index abdb0ad50d..d058441a3f 100644
+--- a/drivers/bus/fslmc/fslmc_bus.c
++++ b/drivers/bus/fslmc/fslmc_bus.c
+@@ -322,7 +322,11 @@ rte_fslmc_scan(void)
+ 	char *group_name;
+ 
+ 	if (process_once) {
++		struct rte_dpaa2_device *dev;
++
+ 		DPAA2_BUS_DEBUG("Fslmc bus already scanned. Not rescanning");
++		TAILQ_FOREACH(dev, &rte_fslmc_bus.device_list, next)
++			dev->device.devargs = fslmc_devargs_lookup(dev);
+ 		return 0;
+ 	}
+ 	process_once = 1;
+-- 
+2.43.0
+

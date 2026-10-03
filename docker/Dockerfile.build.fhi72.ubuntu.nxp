@@ -1,0 +1,214 @@
+# SPDX-License-Identifier: LicenseRef-CSSL-1.0
+
+#---------------------------------------------------------------------
+#
+# Dockerfile for the Open-Air-Interface RAN Build for FHI 7.2
+#               Valid for UBUNTU 24.04
+#
+#---------------------------------------------------------------------
+
+FROM ran-base AS ran-build-fhi72
+
+ARG E2AP_VERSION=E2AP_V3
+ARG KPM_VERSION=KPM_V3_00
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Europe
+RUN apt-get update && \
+    apt-get upgrade --yes && \
+    apt-get install --yes \
+        meson \
+        wget \
+        xz-utils \
+        pkg-config \
+        python3-pyelftools \
+        libnuma-dev \
+        ## libraries for mellanox NIC
+        libibverbs-dev \
+        rdma-core && \
+    rm -rf /var/lib/apt/lists/*
+
+## Extra build-time deps for DPAA2/fsl-mc on aarch64 (NXP LX2160A)
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        libfdt-dev libssl-dev libpcap-dev && \
+      rm -rf /var/lib/apt/lists/*; \
+    fi
+
+## GCC wrapper: appends -march=armv8-a -mno-outline-atomics as the final compiler args.
+## GCC honours the last -march, so this wins over what DPDK's meson config injects —
+## required to keep the binary free of LSE atomics on Cortex-A72 (ARMv8.0-A / LX2160A).
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      A72_FLAGS='-march=armv8-a+simd+crypto -mtune=cortex-a72 -mno-outline-atomics'; \
+      printf '#!/bin/bash\nexec /usr/bin/gcc "$@" %s\n' "$A72_FLAGS" \
+          > /usr/local/bin/gcc-cortex-a72 && chmod +x /usr/local/bin/gcc-cortex-a72 && \
+      printf '#!/bin/bash\nexec /usr/bin/g++ "$@" %s\n' "$A72_FLAGS" \
+          > /usr/local/bin/g++-cortex-a72 && chmod +x /usr/local/bin/g++-cortex-a72; \
+    fi
+
+## Build ARM RAL only for aarch64 (used only for compression)
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      git clone https://git.gitlab.arm.com/networking/ral.git /opt/ral; \
+      cd /opt/ral; \
+      git checkout armral-25.01; \
+      mkdir -p build; \
+      cd build; \
+      cmake -GNinja -DBUILD_SHARED_LIBS=On \
+            -DCMAKE_C_COMPILER=/usr/local/bin/gcc-cortex-a72 \
+            -DCMAKE_CXX_COMPILER=/usr/local/bin/g++-cortex-a72 ..; \
+      ninja; \
+      ninja install; \
+    else \
+      echo "Skipping RAL build: not aarch64"; \
+    fi
+
+## DPDK source.
+##   aarch64 -> NXP's fork github.com/nxp/dpdk @ la12xx-sdk4.0. This is the tree
+##     the Buildroot image and the board are built from (package/genevisio/dpdk-nxp),
+##     and the only one carrying NXP's la12xx bbdev work for the LA1200 LDPC
+##     offload. It needs geul_common_headers via COMMON_HEADERS_DIR.
+##   x86_64 -> stock 24.11.4, unchanged; the DPAA2/la12xx bits are aarch64-only.
+WORKDIR /opt
+ARG NXP_SDK_TAG=la12xx-sdk4.0
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      git clone --depth 1 --branch ${NXP_SDK_TAG} https://github.com/nxp-qoriq/geul_common_headers.git /opt/geul_common_headers && \
+      git clone --depth 1 --branch ${NXP_SDK_TAG} https://github.com/nxp/dpdk.git /opt/dpdk-src; \
+    else \
+      wget --no-verbose http://fast.dpdk.org/rel/dpdk-24.11.4.tar.xz && \
+      tar -xf dpdk-24.11.4.tar.xz && mv dpdk-stable-24.11.4 /opt/dpdk-src && rm dpdk-24.11.4.tar.xz; \
+    fi
+
+## Only the DPDK patch series is needed to build DPDK - copy just that, not the
+## whole repo. Keeping the full `COPY . .` below this point means editing OAI
+## sources (or this Dockerfile, which lives in the context) no longer invalidates
+## the RAL and DPDK layers, which cost ~100 s and ~660 s under emulation.
+COPY docker/dpdk-patches /tmp/dpdk-patches
+COPY docker/scripts/check-a72-isa.sh /usr/local/bin/check-a72-isa.sh
+
+## Patches for the NXP fork (docker/dpdk-patches/nxp-la12xx-sdk4.0):
+##   0001 meson common-headers-dir option   0002 IPC instance debug
+##   0003 la12xx CB-mode LDPC encode        0004 la12xx honour CRC attach flags
+##   0005 lower the fslmc MC version floor to 10.33 (board ships MC 10.33.0)
+## The separate nxp-lx2160a/ series (23 dpaa2 fixes) targets UPSTREAM dpdk and
+## does NOT apply to this fork - none of the 23 apply. See README.nxp-npe010.md.
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      for p in $(ls /tmp/dpdk-patches/nxp-la12xx-sdk4.0/*.patch | sort); do \
+          echo "Applying $p" && patch -p1 -d /opt/dpdk-src --fuzz=5 < "$p"; \
+      done && \
+      python3 /tmp/dpdk-patches/nxp-lx2160a/strip_lse.py \
+          /opt/dpdk-src/config/arm/meson.build; \
+    fi
+
+## Configure, build, and install DPDK to /usr/local.
+## Options mirror package/genevisio/dpdk-nxp/dpdk-nxp.mk: platform=dpaa,
+## enable_driver_sdk (the la12xx PMD needs driver headers), and
+## cpu_instruction_set=generic - Buildroot deliberately avoids cortex-a72 there
+## because DPDK turns it into an invalid -march. The gcc wrapper still appends
+## -march=armv8-a -mno-outline-atomics last, which is what keeps LSE atomics out.
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      printf '[binaries]\nc = '"'"'/usr/local/bin/gcc-cortex-a72'"'"'\ncpp = '"'"'/usr/local/bin/g++-cortex-a72'"'"'\n' \
+          > /tmp/cortex-a72.ini && \
+      COMMON_HEADERS_DIR=/opt/geul_common_headers \
+      meson setup /opt/dpdk-src/build /opt/dpdk-src \
+          --native-file /tmp/cortex-a72.ini \
+          --prefix=/usr/local \
+          -Dcommon_headers_dir=/opt/geul_common_headers \
+          -Dcpu_instruction_set=generic \
+          -Dplatform=dpaa \
+          -Denable_driver_sdk=true \
+          -Denable_apps=test-bbdev,proc-info \
+          -Dexamples= \
+          -Ddisable_drivers=net/hns3,net/cnxk; \
+    else \
+      meson setup /opt/dpdk-src/build /opt/dpdk-src --prefix=/usr/local; \
+    fi && \
+    COMMON_HEADERS_DIR=/opt/geul_common_headers ninja -C /opt/dpdk-src/build && \
+    ninja install -C /opt/dpdk-src/build && \
+    if [ "$(uname -m)" = "aarch64" ]; then \
+      install -m 0644 /opt/geul_common_headers/*.h /usr/local/include/; \
+    fi && \
+    ldconfig
+
+## Confirm the la12xx bbdev PMD actually built - without it there is no LDPC offload
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      ls /usr/local/lib/aarch64-linux-gnu/librte_baseband_la12xx.so* >/dev/null && \
+      echo "OK: la12xx bbdev PMD present"; \
+    fi
+
+## Build LL/SC shim: forces __aarch64_have_lse_atomics=0 at process start so the
+## outline-atomics stubs never take the LSE path — SIGILL-safe on Cortex-A72.
+## Deploy at runtime: LD_PRELOAD=/usr/local/lib/aarch64-linux-gnu/libforce_no_lse.so
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      printf '%s\n%s\n%s\n%s\n' \
+          'extern int __aarch64_have_lse_atomics __attribute__((visibility("hidden"), weak));' \
+          '__attribute__((constructor(101)))' \
+          'static void force_no_lse_atomics(void)' \
+          '{ if (&__aarch64_have_lse_atomics) __aarch64_have_lse_atomics = 0; }' \
+          > /tmp/force_no_lse.c && \
+      /usr/local/bin/gcc-cortex-a72 -shared -fPIC \
+          -o /usr/local/lib/aarch64-linux-gnu/libforce_no_lse.so /tmp/force_no_lse.c; \
+    fi
+
+## Gate: nothing post-ARMv8.0 may reach the board. The previous version of this
+## check looked at librte_bus_fslmc.so only, and only for LSE atomics - it missed
+## a FEAT_CSSC (v8.9) `smin w4, w3, #1` that GCC emitted into OAI because
+## /proc/cpuinfo in an emulated container has no "CPU part" line, so OAI fell back
+## to -march=native. That SIGILLed in config_assign_int before main().
+RUN if [ "$(uname -m)" = "aarch64" ]; then \
+      chmod +x /usr/local/bin/check-a72-isa.sh && \
+      /usr/local/bin/check-a72-isa.sh /usr/local/lib /opt/ral/build; \
+    fi
+
+RUN rm -Rf /oai-ran
+WORKDIR /oai-ran
+COPY . .
+
+## Build Fronthaul library from the in-tree o-du-phy fork (K release).
+## Both arches build XRAN from the in-tree o-du-phy, which carries the DPAA2/fsl-mc
+## EAL fixes, the aarch64 Makefile updates, and the OAI integration; the DPAA2 code is
+## #if aarch64-guarded, so it is a no-op on x86_64. The Makefile auto-selects its target
+## from `uname -m` (aarch64 / x86_64) — do not pass a legacy TARGET.
+## Replace __rte_packed with __attribute__((__packed__)) — the DPDK 24.11+ deprecation
+## wrapper emits a _Pragma that is illegal inside a struct definition.
+RUN cp -r /oai-ran/o-du-phy /opt/phy && \
+    find /opt/phy/fhi_lib/lib/api -name '*.h' \
+        -exec sed -i 's/__rte_packed/__attribute__((__packed__))/g' {} + && \
+    cd /opt/phy/fhi_lib/lib && \
+    WIRELESS_SDK_TOOLCHAIN=gcc RTE_SDK=/usr/local XRAN_DIR=/opt/phy/fhi_lib \
+        CC=/usr/local/bin/gcc-cortex-a72 CXX=/usr/local/bin/g++-cortex-a72 \
+        make -j"$(nproc)" XRAN_LIB_SO=1
+
+## Build and install OAI
+## Uses the same `cmake -B build/` layout as Dockerfile.build.fhi72.t2.ubuntu so the
+## slim target image can copy from /oai-ran/build/, and enables the LDPC AAL backend:
+## the NPE-010 offloads LDPC to the LA1200 FECA through DPDK BBDEV, which needs
+## ENABLE_LDPC_AAL=ON. The la12xx bbdev PMD is in upstream DPDK 25.11, so the DPDK
+## built above already provides it alongside the DPAA2 fronthaul PMD.
+RUN EXTRA_CMAKE_OPTS=""; A72_CC=""; A72_CXX=""; \
+    if [ "$(uname -m)" = "aarch64" ]; then \
+      EXTRA_CMAKE_OPTS="-Darmral_LOCATION=/opt/ral"; \
+      A72_CC=/usr/local/bin/gcc-cortex-a72; A72_CXX=/usr/local/bin/g++-cortex-a72; \
+      EXTRA_CMAKE_OPTS="$EXTRA_CMAKE_OPTS -DCPUPART=0xd08"; \
+      echo "ARM64 detected -> enabling RAL: $EXTRA_CMAKE_OPTS"; \
+    fi; \
+    \
+    /bin/sh oaienv && \
+    cmake -B build/ -GNinja \
+          ${A72_CC:+-DCMAKE_C_COMPILER=$A72_CC} \
+          ${A72_CXX:+-DCMAKE_CXX_COMPILER=$A72_CXX} \
+          -DOAI_FHI72=ON \
+          -Dxran_LOCATION=/opt/phy/fhi_lib/lib \
+          -DENABLE_LDPC_AAL=ON \
+          $EXTRA_CMAKE_OPTS \
+          $BUILD_OPTION && \
+    echo "=== resolved compile command (must NOT contain -march=native) ===" && \
+    ninja -C build/ -t commands params_libconfig 2>/dev/null | grep -m1 " -c " | tr ' ' '\n' | grep -E "^-m(arch|cpu|tune)" && \
+    ninja -C build/ nr-softmodem oran_fhlib_5g ldpc_aal ldpc coding \
+                    params_libconfig params_yaml dfts && \
+    ldd build/nr-softmodem && \
+    ldd build/liboran_fhlib_5g.so && \
+    ldd build/libldpc_aal.so && \
+    test -L build/liboai_transpro.so && \
+    ldd /opt/phy/fhi_lib/lib/build/libxran.so && \
+    if [ "$(uname -m)" = "aarch64" ]; then \
+      /usr/local/bin/check-a72-isa.sh build /opt/phy/fhi_lib/lib/build; \
+    fi
