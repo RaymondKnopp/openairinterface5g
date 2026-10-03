@@ -1371,6 +1371,42 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     handle_pucch(gNB, rxdataF, &pucch[i], uci++);
   }
 
+  UL_INFO->srs_ind.sfn = frame_rx;
+  UL_INFO->srs_ind.slot = slot_rx;
+  UL_INFO->srs_ind.pdu_list = UL_INFO->srs_pdu_list;
+  UL_INFO->srs_ind.number_of_pdus = n_srs;
+  for (int i = 0; i < n_srs; ++i) {
+    start_meas(&gNB->rx_srs_stats);
+    handle_srs(now, gNB, &srs[i], &UL_INFO->srs_ind.pdu_list[i], &UL_INFO->srs_toa_vendor_ext_ind);
+    stop_meas(&gNB->rx_srs_stats);
+  }
+
+  /* Deliver RACH, UCI and SRS to the MAC now, ahead of the PUSCH chain, instead of
+   * bundling them with the ULSCH results at the end of the slot. They are ready here and
+   * would otherwise wait for the PUSCH front end plus the LDPC decode -- milliseconds at
+   * 273 PRB with two layers. That wait is paid by the one indication the DOWNLINK depends
+   * on: UCI carries the DL HARQ-ACK, so holding it inflates the DL HARQ round trip against
+   * a pool of only 16 processes, and it also delays CSI and SR.
+   *
+   * Safe because every handler inside NR_UL_indication is guarded on its own count and is
+   * a no-op for the parts left empty; because NR_UL_indication does not run the scheduler
+   * (that has its own slot tick); and because the two halves touch disjoint MAC state --
+   * the one ordering that matters, the feedback_ul_harq FIFO, is ULSCH-only and stays in
+   * the second call. SRS moved up with them: handle_srs reads SRS symbols out of rxdataF
+   * and touches nothing the PUSCH stage produces.
+   *
+   * Counts are zeroed after sending so the end-of-slot indication cannot deliver any of
+   * this twice. The if_inst guard is not padding: nr_ulsim and nr_ulsim_mu_mimo call this
+   * function directly with no MAC attached. */
+  if (gNB->if_inst && gNB->if_inst->NR_UL_indication
+      && (UL_INFO->rach_ind.number_of_pdus > 0 || UL_INFO->uci_ind.num_ucis > 0
+          || UL_INFO->srs_ind.number_of_pdus > 0 || UL_INFO->srs_toa_vendor_ext_ind.num_ta > 0)) {
+    gNB->if_inst->NR_UL_indication(UL_INFO);
+    UL_INFO->rach_ind.number_of_pdus = 0;
+    UL_INFO->uci_ind.num_ucis = 0;
+    UL_INFO->srs_ind.number_of_pdus = 0;
+    UL_INFO->srs_toa_vendor_ext_ind.num_ta = 0;
+  }
 
   UL_INFO->crc_ind.sfn = frame_rx;
   UL_INFO->crc_ind.slot = slot_rx;
@@ -1427,16 +1463,6 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     if (ret_nr_ulsch_procedures != 0)
       LOG_E(NR_PHY, "Error in nr_ulsch_procedures, returned %d\n", ret_nr_ulsch_procedures);
     STOP_MEAS_FULL_SLOT(&gNB->ulsch_decoding_stats, slot_type, NR_UPLINK_SLOT);
-  }
-
-  UL_INFO->srs_ind.sfn = frame_rx;
-  UL_INFO->srs_ind.slot = slot_rx;
-  UL_INFO->srs_ind.pdu_list = UL_INFO->srs_pdu_list;
-  UL_INFO->srs_ind.number_of_pdus = n_srs;
-  for (int i = 0; i < n_srs; ++i) {
-    start_meas(&gNB->rx_srs_stats);
-    handle_srs(now, gNB, &srs[i], &UL_INFO->srs_ind.pdu_list[i], &UL_INFO->srs_toa_vendor_ext_ind);
-    stop_meas(&gNB->rx_srs_stats);
   }
 
   STOP_MEAS_FULL_SLOT(&gNB->phy_proc_rx, slot_type, NR_UPLINK_SLOT);
