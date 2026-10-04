@@ -18,7 +18,13 @@ add_library(oran_fhlib_5g MODULE
             oran-init.c
 )
 
-set(K_VERSION 11.1.8)
+# 11.1.6, not develop's 11.1.8: the in-tree NXP o-du-phy fork is a K-release 11.1.6
+# carrying the DPAA2/fsl-mc patches, and this branch keeps its own radio/fhi_72
+# sources, which need no 11.1.8 library API -- every xran_* symbol they call that is
+# absent from 11.1.6's api/ (xran_fh_tx_send_slot, _ant, xran_send_cp_slot,
+# xran_compress_iq_section) is defined OAI-side in oaioran.c.  Moving to 11.1.8 means
+# porting NXP's DPAA2 patches onto the newer K release first.
+set(K_VERSION 11.1.6)
 
 add_boolean_option(xran_DOWNLOAD ON "Download and build xran library if not found in xran_LOCATION" OFF)
 

@@ -249,14 +249,20 @@ static void tx_func(processingData_L1tx_t *info)
       t_gen_end = rdtsc_oai();
       STOP_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
 
-      processingData_RU_t syncMsgRU;
-      syncMsgRU.frame_tx = gen_frame;
-      syncMsgRU.slot_tx = gen_slot;
-      syncMsgRU.ru = gNB->RU_list[0];
-      syncMsgRU.timestamp_tx = gen_ts;
-      LOG_D(PHY, "gNB: %d.%d : calling RU TX function\n", syncMsgRU.frame_tx, syncMsgRU.slot_tx);
+      /* develop's 5ee8de9fd0 removed ru_tx_func() and processingData_RU_t, inlining the
+         three stages at the call site.  Same three stages here, on the pipelined slot
+         rather than the current one. */
+      RU_t *ru_gen = gNB->RU_list[0];
+      LOG_D(PHY, "gNB: %d.%d : RU TX (pipelined)\n", gen_frame, gen_slot);
       START_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
-      ru_tx_func((void *)&syncMsgRU);
+      // split 7.2 precoding
+      if (ru_gen->feptx_prec)
+        ru_gen->feptx_prec(ru_gen, gen_frame, gen_slot);
+      // split 8 precoding and IDFT
+      if (ru_gen->feptx_ofdm)
+        ru_gen->feptx_ofdm(ru_gen, gen_frame, gen_slot);
+      if (ru_gen->fh_south_out)
+        ru_gen->fh_south_out(ru_gen, gen_frame, gen_slot, gen_ts);
       t_ru_end = rdtsc_oai();
       STOP_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
     }

@@ -18,6 +18,12 @@ CSSC='[[:space:]](smin|smax|umin|umax|abs|ctz|cnt)[[:space:]]+[wx][0-9]'
 # LSE atomics. Excluded inside the __aarch64_* outline stubs, which are
 # HWCAP-guarded and therefore safe.
 LSE='[[:space:]](cas|casa|casl|casal|casb|cash|swp|swpa|swpl|swpal|ldadd|ldadda|ldaddl|ldaddal|ldclr|ldclra|ldset|ldseta|ldeor|ldeora)[[:space:]]'
+# SVE2 DFT kernels (develop's NewDFT, 1c5a5bd807) are compiled with
+# __attribute__((target("arch=armv8.5-a+sve2"))) and so are always emitted, but they are
+# only ever entered through sve2_vl128_usable(), which returns 0 unless HWCAP_SVE and
+# HWCAP2_SVE2 are both set -- zero on the A72 -- before any SVE instruction executes.
+# Same reasoning as the __aarch64_* LSE stubs above, so sve2_* symbols are excluded from
+# the post-v8.0 scan.  Everything else, including CSSC and LSE inside them, still fails.
 # Assorted post-v8.0 families.
 MISC='[[:space:]](ldapr|ldaprb|ldaprh|fjcvtzs|sdot|udot|bfdot|bfmmla|smmla|ummla|sqrdmlah|sqrdmlsh|ptrue|whilelo|fmlal|fmlal2|irg|gmi|st2g|stzg)[[:space:]]'
 
@@ -35,12 +41,16 @@ scan_one() {
     local f="$1" out
     head -c4 "$f" 2>/dev/null | grep -q ELF || return 0
     out=$(objdump -d "$f" 2>/dev/null | awk -v cssc="$CSSC" -v lse="$LSE" -v misc="$MISC" '
-        /^[[:xdigit:]]+ <__aarch64_(cas|ldadd|swp|ldclr|ldeor|ldset)[^>]*>:/ { stub=1; next }
-        /^[[:xdigit:]]+ <[^>]+>:/ { stub=0; sym=$2 }
+        /^[[:xdigit:]]+ <__aarch64_(cas|ldadd|swp|ldclr|ldeor|ldset)[^>]*>:/ { stub=1; sve=0; next }
+        /^[[:xdigit:]]+ <sve2_[^>]*>:/ { stub=0; sve=1; sym=$2; next }
+        # Compiler-local labels (GCC emits .SVLPEND<n> for SVE loop ends) are not new
+        # functions -- they sit inside the enclosing one, so carry its region flags over.
+        /^[[:xdigit:]]+ <\.[^>]*>:/ { next }
+        /^[[:xdigit:]]+ <[^>]+>:/ { stub=0; sve=0; sym=$2 }
         {
           if ($0 ~ cssc) { print "  CSSC(v8.9) " sym " " $0; next }
           if (!stub && $0 ~ lse) { print "  LSE(v8.1)  " sym " " $0; next }
-          if ($0 ~ misc) { print "  post-v8.0  " sym " " $0 }
+          if (!sve && $0 ~ misc) { print "  post-v8.0  " sym " " $0 }
         }' | head -5)
     if [ -n "$out" ]; then
         echo "FAIL $(basename "$f")"; echo "$out"; rc=1
