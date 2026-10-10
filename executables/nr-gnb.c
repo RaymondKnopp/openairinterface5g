@@ -132,8 +132,21 @@ typedef struct {
   bool valid;
 } tx_pending_t;
 
+/* accumulate one RX dispatch lag component, windowed like rx_dispatch_lag */
+static void lag_acc(time_stats_t *ts, uint64_t t0, uint64_t t1)
+{
+  const uint64_t d = t1 > t0 ? t1 - t0 : 0;
+  ts->trials++;
+  ts->diff += d;
+  if ((ts->trials & 16383) < 10)
+    ts->max = 0;
+  if (d > ts->max)
+    ts->max = d;
+}
+
 static void tx_func(processingData_L1tx_t *info)
 {
+  const uint64_t t_txstart = (uint64_t)clock_gettime_oai();
   int frame_tx = info->frame;
   int slot_tx = info->slot;
   int frame_rx = info->frame_rx;
@@ -182,7 +195,9 @@ static void tx_func(processingData_L1tx_t *info)
   syncMsg->slot_rx = slot_rx;
   syncMsg->timestamp_tx = info->timestamp_tx;
   syncMsg->dispatch_tsc = info->dispatch_tsc; // stamped by ru_thread after feprx()
+  syncMsg->txstart_tsc = t_txstart;
   res->key = slot_rx;
+  syncMsg->push_tsc = (uint64_t)clock_gettime_oai();
   pushNotifiedFIFO(&gNB->resp_L1, res);
 
   int tx_slot_type = nr_slot_select(cfg, frame_tx, slot_tx);
@@ -375,6 +390,13 @@ void *L1_rx_thread(void *arg)
        if (lag_us > 200.0) gNB->rx_lag_over[0]++;
        if (lag_us > 500.0) gNB->rx_lag_over[1]++;
        if (lag_us > 1000.0) gNB->rx_lag_over[2]++;
+       const uint64_t now = info->dispatch_tsc + lag;
+       lag_acc(&gNB->rx_lag_txq, info->dispatch_tsc, info->txstart_tsc);
+       lag_acc(&gNB->rx_lag_sched, info->txstart_tsc, info->push_tsc);
+       lag_acc(&gNB->rx_lag_rxq, info->push_tsc, now);
+       if (info->txstart_tsc > info->dispatch_tsc
+           && (double)(info->txstart_tsc - info->dispatch_tsc) / (1000.0 * get_cpu_freq_GHz()) > 500.0)
+         gNB->rx_lag_txq_over500++;
      }
      const uint64_t t_rx_start = (uint64_t)clock_gettime_oai();
      START_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
@@ -647,6 +669,10 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->dlsch_pdsch_generation_stats);
   reset_meas(&gNB->phy_proc_rx);
   reset_meas(&gNB->rx_dispatch_lag);
+  reset_meas(&gNB->rx_lag_txq);
+  reset_meas(&gNB->rx_lag_sched);
+  reset_meas(&gNB->rx_lag_rxq);
+  gNB->rx_lag_txq_over500 = 0;
   reset_meas(&gNB->ulsch_decoding_stats);
   reset_meas(&gNB->ts_ldpc_decode);
   reset_meas(&gNB->ul_indication_stats);
@@ -721,6 +747,13 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                        (unsigned long long)gNB->rx_lag_over[0], 100.0 * gNB->rx_lag_over[0] / gNB->rx_dispatch_lag.trials,
                        (unsigned long long)gNB->rx_lag_over[1], 100.0 * gNB->rx_lag_over[1] / gNB->rx_dispatch_lag.trials,
                        (unsigned long long)gNB->rx_lag_over[2], 100.0 * gNB->rx_lag_over[2] / gNB->rx_dispatch_lag.trials);
+  output += print_meas_log(&gNB->rx_lag_txq, "  lag: wait TX thread", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_lag_sched, "  lag: MAC scheduler", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_lag_rxq, "  lag: wait RX thread", NULL, NULL, output, end - output);
+  if (gNB->rx_lag_txq.trials > 0 && output < end)
+    output += snprintf(output, end - output, "%25s:  >500us %llu (%.3f%%)\n", "  lag: wait TX tail",
+                       (unsigned long long)gNB->rx_lag_txq_over500,
+                       100.0 * gNB->rx_lag_txq_over500 / gNB->rx_lag_txq.trials);
   output += print_meas_log(&gNB->ts_ldpc_decode, "UL segments decoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ul_indication_stats, "UL Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);
