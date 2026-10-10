@@ -436,6 +436,39 @@ void *L1_tx_thread(void *arg) {
   return NULL;
 }
 
+/* PRACH detection off the L1 RX thread.
+ *
+ * At 4T4R on the A72, PRACH detection costs ~340 us per occasion and ran serially on
+ * L1_rx_thread together with PUCCH, PUSCH and the noise estimate.  PRACH has no slot
+ * deadline of its own -- the RAR window is several slots -- but those 340 us delay the
+ * PUCCH/PUSCH work queued behind it, and the dedicated RX pool was idle.  So run it on
+ * the pool and let the task deliver its own RACH indication.
+ *
+ * Safe to run concurrently with the RX thread:
+ *  - the job owns its sample buffer (calloc'd per job in nr_schedule_rx_prach() and
+ *    freed by L1_nr_prach_procedures() via free_nr_prach_entry());
+ *  - nr_initiate_ra_proc(), the MAC entry point, takes nr_mac->sched_lock itself;
+ *  - every handler in NR_UL_indication is guarded by its own count, so an indication
+ *    carrying only RACH does nothing else.
+ * The only other shared state is the prach_I0 EMA and prach_energy_counter, which at
+ * worst see a different update order. */
+typedef struct {
+  PHY_VARS_gNB *gNB;
+  prach_item_t item;
+  NR_UL_IND_t ul;
+} prach_task_t;
+
+static void prach_task(void *arg)
+{
+  prach_task_t *t = (prach_task_t *)arg;
+  t->ul.rach_ind.pdu_list = t->ul.prach_pdu_indication_list;
+  t->ul.rach_ind.number_of_pdus = 0;
+  L1_nr_prach_procedures(t->gNB, &t->item, &t->ul.rach_ind);
+  if (t->ul.rach_ind.number_of_pdus > 0)
+    t->gNB->if_inst->NR_UL_indication(&t->ul);
+  free(t);
+}
+
 static void rx_func(processingData_L1_t *info)
 {
   PHY_VARS_gNB *gNB = info->gNB;
@@ -457,9 +490,21 @@ static void rx_func(processingData_L1_t *info)
     UL_INFO.rach_ind.number_of_pdus = 0;
     // even if processing is late, we might collect all PRACH
     // the last PRACH's frame/slot is when all UE's appear to have accessed
+    /* With a dedicated RX pool, PRACH detection runs there and the task hands its RACH
+     * indication to the MAC itself (see prach_task()); otherwise it stays inline. */
+    const bool prach_async = gNB->threadPoolRx == &gNB->threadPoolRxOwn && gNB->if_inst && gNB->if_inst->NR_UL_indication;
     prach_item_t p;
-    while (spsc_q_get(&gNB->prach_l1rx_queue, &p, sizeof(p)))
-      L1_nr_prach_procedures(gNB, &p, &UL_INFO.rach_ind);
+    while (spsc_q_get(&gNB->prach_l1rx_queue, &p, sizeof(p))) {
+      if (prach_async) {
+        prach_task_t *t = calloc_or_fail(1, sizeof(*t));
+        t->gNB = gNB;
+        t->item = p;
+        t->ul = (NR_UL_IND_t){.frame = p.frame, .slot = p.slot, .module_id = gNB->Mod_id, .phy_id = gNB->CC_id};
+        pushTpool(gNB->threadPoolRx, (task_t){.func = prach_task, .args = t});
+      } else {
+        L1_nr_prach_procedures(gNB, &p, &UL_INFO.rach_ind);
+      }
+    }
 
     //WA: comment rotation in tx/rx
     if (gNB->phase_comp) {
