@@ -1462,7 +1462,22 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
     } else {
       num_symb = frame_parms->symbols_per_slot;
     }
-    gNB_I0_measurements(gNB, slot_rx, first_symb, num_symb, rb_mask_ul);
+    /* The noise estimate runs over every unused PRB, every UL symbol and every RX antenna
+     * -- about 15000 per-PRB energy calls per slot at 273 PRB / 4 RX, on the single L1 RX
+     * thread.  At 4T4R that alone kept the thread ~50% busy with no UE, so as soon as DL
+     * traffic added PUCCH HARQ-ACKs and PUSCH the thread fell behind and the fronthaul
+     * overwrote unread rxdataF (L1 DTX, BLER collapse between 25 and 50 Mbps DL).
+     * n0_subband_power is an EMA with a 0.1 update weight and only needs refreshing when
+     * the channel is quiet, so measure only on UL slots that carry neither PUSCH nor
+     * PUCCH: idle slots keep it tracking, loaded slots keep the last value.  This assumes
+     * no significant inter-cell interference varying under load. */
+    if (n_pusch_jobs == 0 && n_pucch == 0) {
+      start_meas(&gNB->rx_i0_meas);
+      gNB_I0_measurements(gNB, slot_rx, first_symb, num_symb, rb_mask_ul);
+      stop_meas(&gNB->rx_i0_meas);
+    } else {
+      gNB->rx_i0_skipped++;
+    }
   }
 
   int slot_type = nr_slot_select(&gNB->gNB_config, frame_rx, slot_rx);
