@@ -546,6 +546,7 @@ static void nrL1_stats_init_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru, unsigned in
   init_sorted_list_meas(&gNB->slot_indication_stats, size);
   init_sorted_list_meas(&gNB->rx_pusch_stats, size);
   init_sorted_list_meas(&gNB->rx_prach, size);
+  init_sorted_list_meas(&gNB->rx_i0_meas, size);
   if (ru->feprx) {
     init_sorted_list_meas(&ru->ofdm_demod_stats, size);
   }
@@ -582,6 +583,7 @@ static void nrL1_stats_free_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru)
   free_sorted_list_meas(&gNB->slot_indication_stats);
   free_sorted_list_meas(&gNB->rx_pusch_stats);
   free_sorted_list_meas(&gNB->rx_prach);
+  free_sorted_list_meas(&gNB->rx_i0_meas);
   if (ru->feprx) {
     free_sorted_list_meas(&ru->ofdm_demod_stats);
   }
@@ -622,6 +624,8 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->slot_indication_stats);
   reset_meas(&gNB->rx_pusch_stats);
   reset_meas(&gNB->rx_prach);
+  reset_meas(&gNB->rx_i0_meas);
+  gNB->rx_i0_skipped = 0;
   memset(gNB->rx_slot_stats, 0, sizeof(gNB->rx_slot_stats));
   memset(gNB->tx_slot_stats, 0, sizeof(gNB->tx_slot_stats));
   if (ru->feprx) {
@@ -693,6 +697,8 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_pusch_stats, "PUSCH inner-receiver", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_prach, "PRACH RX", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_i0_meas, "I0 measurements", NULL, NULL, output, end - output);
+  output += snprintf(output, end - output, "   I0 measurements skipped:  %lu UL slots (busy: PUSCH/PUCCH)\n", gNB->rx_i0_skipped);
   if (ru->feprx) {
     output += print_meas_log(&ru->ofdm_demod_stats, "feprx", NULL, NULL, output, end - output);
   }

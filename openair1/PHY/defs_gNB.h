@@ -504,6 +504,10 @@ typedef struct PHY_VARS_gNB_s {
   time_stats_t ru_tx_func_stats;
   time_stats_t phy_proc_rx;
   time_stats_t rx_prach;
+  /// gNB_I0_measurements() -- full-band noise estimate, run only on UL slots with no PUSCH/PUCCH
+  time_stats_t rx_i0_meas;
+  /// UL slots where the noise estimate was skipped because the slot carried PUSCH or PUCCH
+  uint64_t rx_i0_skipped;
 
   time_stats_t dlsch_encoding_stats;
   time_stats_t dlsch_ldpc_encode_stats;
