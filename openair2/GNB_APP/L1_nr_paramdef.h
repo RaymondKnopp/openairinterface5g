@@ -39,6 +39,9 @@
 #define HLP_L1_ENC_POOL_CORES                "cores for a separate DLSCH encoding thread pool, e.g. \"2,3,4\" (empty = share the --thread-pool one). Needed to overlap encoding with the previous slot's PDSCH generation: encoding does not scale past 2 tasks, so it cannot use a wider shared pool, but it must not queue behind generation either."
 #define HLP_L1_TX_PIPELINE                   "1 to encode slot N while the grid of slot N-1 is filled and sent to the RU. Encoding does not scale with cores, so this is the only way to fit both into a slot at high MCS. Costs one slot of sl_ahead and needs L1_enc_pool_cores set."
 #define L1_TX_OVERRUN_US                     "L1_tx_overrun_us"
+#define L1_TX_SPLIT                          "L1_tx_split"
+#define HLP_L1_TX_SPLIT                      "1 to run the PDSCH grid fill and RU path on their own thread (L1_tx_gen), leaving the MAC scheduler and the RX trigger on L1_tx_thread. Otherwise a TX slot that runs long delays the RX processing of the slots behind it."
+#define L1_TX_GEN_THREAD_CORE                "L1_tx_gen_thread_core"
 #define L1_RX_OVERRUN_US                     "L1_rx_overrun_us"
 #define HLP_L1_RX_OVERRUN_US                 "log the split of the feprx->rx_func path whenever it exceeds this many us (0 = off). Exceeding the rxdataF ring budget is what destroys UL samples."
 #define HLP_L1_TX_OVERRUN_US                 "log the PDSCH configuration whenever L1 TX processing exceeds this many us (0 = off). Aggregate stats hide a rare tail; this reports the conditions of the outlier itself."
@@ -78,6 +81,8 @@
   {L1_ENC_POOL_CORES,                    HLP_L1_ENC_POOL_CORES, 0,      .strptr=NULL, .defstrval="",              TYPE_STRING,   0},         \
   {L1_TX_PIPELINE,                       HLP_L1_TX_PIPELINE, 0,         .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_OVERRUN_US,                     HLP_L1_TX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
+  {L1_TX_SPLIT,                          HLP_L1_TX_SPLIT, 0,            .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
+  {L1_TX_GEN_THREAD_CORE,                NULL,       0,         .iptr=NULL,           .defintval=-1,              TYPE_INT,      0},         \
   {L1_RX_OVERRUN_US,                     HLP_L1_RX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_AMP_BACKOFF_dB,                 HLP_L1TX_BO,0,         .uptr=NULL,           .defintval=36,              TYPE_UINT,     0},         \
   {L1_PHASE_COMP,                        HLP_L1_PHASE_COMP,PARAMFLAG_BOOL, .uptr=NULL,.defintval=1,               TYPE_UINT,     0},         \

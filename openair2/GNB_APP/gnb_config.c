@@ -822,6 +822,8 @@ void RCconfig_NR_L1(void)
       gNB->rx_pool_cores = *gpd(params, np, L1_RX_POOL_CORES)->strptr;
       gNB->enc_pool_cores = *gpd(params, np, L1_ENC_POOL_CORES)->strptr;
       gNB->tx_pipeline = *gpd(params, np, L1_TX_PIPELINE)->iptr;
+      gNB->tx_split = *gpd(params, np, L1_TX_SPLIT)->iptr;
+      gNB->L1_tx_gen_thread_core = *gpd(params, np, L1_TX_GEN_THREAD_CORE)->iptr;
       gNB->tx_overrun_us = *gpd(params, np, L1_TX_OVERRUN_US)->iptr;
       if (gNB->tx_overrun_us > 0)
         LOG_I(NR_PHY, "L1 TX overrun alarm armed at %d us\n", gNB->tx_overrun_us);
