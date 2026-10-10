@@ -10,6 +10,7 @@
 #include "nr_rlc_asn1_utils.h"
 #include "nr_rlc_ue_manager.h"
 #include "nr_rlc_entity.h"
+#include "nr_rlc_sdu.h"
 #include "nr_rlc_oai_api.h"
 #include "NR_RLC-BearerConfig.h"
 #include "NR_DRB-ToAddMod.h"
