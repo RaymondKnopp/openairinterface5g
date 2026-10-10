@@ -375,11 +375,10 @@ static void tx_func(processingData_L1tx_t *info)
     if (ru->fh_south_ctrl)
       ru->fh_south_ctrl(ru, frame_tx, slot_tx, info->timestamp_tx);
   }
-
-  if (tx_slot_type == NR_DOWNLINK_SLOT || tx_slot_type == NR_MIXED_SLOT || get_softmodem_params()->continuous_tx || IS_SOFTMODEM_RFSIM) {
-    if (ru->fh_south_out)
-      ru->fh_south_out(ru, frame_tx, slot_tx, info->timestamp_tx);
-  }
+  /* No fh_south_out() here: develop calls it at this point for slot_tx, but this tx_func
+     already ran it above for the slot it generated (gen_slot), and with L1_tx_pipeline
+     slot_tx is not generated yet.  Calling it here too repeated the fronthaul stage on
+     every DL slot (~120-220 us at 4T4R) and shipped a not-yet-generated grid. */
 }
 
 void *L1_rx_thread(void *arg) 
