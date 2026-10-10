@@ -520,9 +520,27 @@ void phy_procedures_gNB_TX_generate(PHY_VARS_gNB *gNB,
     }
   }
 
+  /* L1_tx_pipeline diagnostics: does the encoded data handed to this generate match what
+   * this slot schedules?  Counters only -- no logging on the TX thread. */
+  int n_pdsch_req = 0;
+  for (int i = 0; i < DL_req->dl_tti_request_body.nPDUs; i++)
+    if (DL_req->dl_tti_request_body.dl_tti_pdu_list[i].PDUType == NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
+      n_pdsch_req++;
+  if (n_pdsch_req > 0) {
+    gNB->tx_gen_pdsch_slots++;
+    if (enc->n_pdsch == 0)
+      gNB->tx_gen_enc_empty++;
+    else if (enc->frame != frame || enc->slot != slot)
+      gNB->tx_gen_enc_stale++;
+    else if (enc->n_pdsch != n_pdsch_req)
+      gNB->tx_gen_enc_mismatch++;
+  }
+
   if (enc->n_pdsch > 0) {
     LOG_D(PHY, "PDSCH generation started (%d) in frame %d.%d\n", enc->n_pdsch, frame, slot);
+    start_meas(&gNB->tx_pdsch_generate_call);
     nr_dlsch_generate(gNB, slot, enc, &phase_comp_prb_mask[0][0][0], prb_mask_words);
+    stop_meas(&gNB->tx_pdsch_generate_call);
   }
 
   START_MEAS_FULL_SLOT(&gNB->phase_comp_stats, slot_type, NR_DOWNLINK_SLOT);
