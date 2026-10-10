@@ -212,7 +212,11 @@ static void tx_func(processingData_L1tx_t *info)
     /* Split the measured region so the overrun alarm can say WHICH half was slow: PDCCH/PDSCH
      * generation, or the RU path (precoding + fronthaul BFP compression).  One aggregate
      * number cannot distinguish them, and they have entirely different causes. */
-    const uint64_t t_gen_start = rdtsc_oai();
+    /* clock_gettime_oai(), not rdtsc_oai(): every duration below is divided by
+     * get_cpu_freq_GHz(), which is calibrated against clock_gettime_oai().  On aarch64
+     * rdtsc_oai() reads cntvct_el0, the generic timer -- 25 MHz on the LX2160A -- so raw
+     * rdtsc deltas came out 40x too small there (and off by the TSC frequency on x86). */
+    const uint64_t t_gen_start = (uint64_t)clock_gettime_oai();
 
     /* Start this slot's encoding, then spend the wait for it filling the previous slot's
      * grid.  The two stages are gated separately on purpose: tx_func() runs on every slot,
@@ -248,7 +252,7 @@ static void tx_func(processingData_L1tx_t *info)
                                        &gNB->dlsch_encoded[gen_slot & 1]);
       else
         phy_procedures_gNB_TX(gNB, &sched->DL_req, &sched->TX_req, &sched->UL_dci_req, frame_tx, slot_tx);
-      t_gen_end = rdtsc_oai();
+      t_gen_end = (uint64_t)clock_gettime_oai();
       STOP_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
 
       /* develop's 5ee8de9fd0 removed ru_tx_func() and processingData_RU_t, inlining the
@@ -265,7 +269,7 @@ static void tx_func(processingData_L1tx_t *info)
         ru_gen->feptx_ofdm(ru_gen, gen_frame, gen_slot);
       if (ru_gen->fh_south_out)
         ru_gen->fh_south_out(ru_gen, gen_frame, gen_slot, gen_ts);
-      t_ru_end = rdtsc_oai();
+      t_ru_end = (uint64_t)clock_gettime_oai();
       STOP_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
     }
 
@@ -377,7 +381,7 @@ void *L1_rx_thread(void *arg)
      if (cpu_meas_enabled && info->dispatch_tsc) {
        /* how long this job sat between ru_thread queuing it and us starting it */
        gNB->rx_dispatch_lag.trials++;
-       const uint64_t lag = rdtsc_oai() - info->dispatch_tsc;
+       const uint64_t lag = (uint64_t)clock_gettime_oai() - info->dispatch_tsc;
        gNB->rx_dispatch_lag.diff += lag;
        /* windowed like start_meas() does, so the max describes recent behaviour */
        if ((gNB->rx_dispatch_lag.trials & 16383) < 10)
@@ -389,11 +393,11 @@ void *L1_rx_thread(void *arg)
        if (lag_us > 500.0) gNB->rx_lag_over[1]++;
        if (lag_us > 1000.0) gNB->rx_lag_over[2]++;
      }
-     const uint64_t t_rx_start = rdtsc_oai();
+     const uint64_t t_rx_start = (uint64_t)clock_gettime_oai();
      START_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
      rx_func(info);
      STOP_MEAS_FULL_SLOT(&gNB->l1_rx_proc, slot_type, NR_UPLINK_SLOT);
-     const uint64_t t_rx_end = rdtsc_oai();
+     const uint64_t t_rx_end = (uint64_t)clock_gettime_oai();
      /* RX overrun alarm: the ring budget applies to the whole feprx -> here path, so judge
       * that, and report which half consumed it.  proc_ comes from our own timestamps, not
       * l1_rx_proc.p_time, because STOP_MEAS_FULL_SLOT measures only full UL slots while the
@@ -426,7 +430,7 @@ void *L1_rx_thread(void *arg)
           full UL slots, and the point of this table is to compare those against the mixed
           slot, whose cost differs by several times. */
        AssertFatal(slot_rx < NR_MAX_SLOTS_PER_FRAME, "slot_rx %d out of range\n", slot_rx);
-       const double us = (double)(rdtsc_oai() - t_rx_start) / (1000.0 * get_cpu_freq_GHz());
+       const double us = (double)((uint64_t)clock_gettime_oai() - t_rx_start) / (1000.0 * get_cpu_freq_GHz());
        typeof(gNB->rx_slot_stats[0]) *st = &gNB->rx_slot_stats[slot_rx];
        st->n++;
        st->tot_us += (uint64_t)us;
