@@ -16,6 +16,8 @@
 #include <string.h>
 #include <complex.h>
 #include <pthread.h>
+#include <stdint.h>
+#include <time.h>
 #include "fsn.h"
 #include "common/utils/ds/seq_arr.h"
 #include "common/utils/nr/nr_common.h"
@@ -24,14 +26,37 @@
 #include "openair2/LAYER2/nr_rlc/nr_rlc_configuration.h"
 #include "openair2/LAYER2/NR_MAC_gNB/nr_pos_ue_context.h"
 
+/* sched_lock instrumentation.  Every NR_SCHED_LOCK() call site registers itself once
+ * (file:line) and accumulates how long it waited for the lock and how long it then held
+ * it.  The hold is charged to the site that took the lock, whichever site releases it.
+ * nrmac_stats_thread() appends the table to nrMAC_stats.log.  Meant to find who holds
+ * the lock for milliseconds while NR_UL_indication() on L1_rx_thread waits for it.
+ * Assumes one sched_lock per process (one MAC instance), as the gNB has. */
+int nr_sched_lock_site(const char *file, int line, const char *func);
+void nr_sched_lock_acquired(int site, uint64_t t_req);
+void nr_sched_lock_releasing(void);
+size_t nr_sched_lock_stats(char *buf, size_t len);
+static inline uint64_t nr_sched_lock_now(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
 #define NR_SCHED_LOCK(lock)                                        \
   do {                                                             \
+    static int nr_sched_site_ = -1;                                \
+    if (nr_sched_site_ < 0)                                        \
+      nr_sched_site_ = nr_sched_lock_site(__FILE__, __LINE__, __func__); \
+    const uint64_t nr_sched_t_req_ = nr_sched_lock_now();          \
     int rc = pthread_mutex_lock(lock);                             \
     AssertFatal(rc == 0, "error while locking scheduler mutex, pthread_mutex_lock() returned %d\n", rc); \
+    nr_sched_lock_acquired(nr_sched_site_, nr_sched_t_req_);       \
   } while (0)
 
 #define NR_SCHED_UNLOCK(lock)                                      \
   do {                                                             \
+    nr_sched_lock_releasing();                                     \
     int rc = pthread_mutex_unlock(lock);                           \
     AssertFatal(rc == 0, "error while locking scheduler mutex, pthread_mutex_unlock() returned %d\n", rc); \
   } while (0)
