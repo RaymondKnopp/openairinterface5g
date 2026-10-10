@@ -740,7 +740,7 @@ typedef struct processingData_L1 {
   /* rdtsc when ru_thread queued this job, so L1_rx_thread can report how long the
    * job waited before rx_func() started -- the dispatch term of the rxdataF ring
    * budget, which cannot be separated from rx_func()'s own cost otherwise. */
-  uint64_t dispatch_tsc;
+  uint64_t dispatch_tsc; // clock_gettime_oai() units, NOT rdtsc_oai() -- see nr-gnb.c
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
   notifiedFIFO_elt_t *elt;
@@ -751,7 +751,7 @@ typedef struct processingData_L1tx {
   int slot;
   int frame_rx;
   int slot_rx;
-  uint64_t dispatch_tsc;
+  uint64_t dispatch_tsc; // clock_gettime_oai() units, NOT rdtsc_oai() -- see nr-gnb.c
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
 } processingData_L1tx_t;
