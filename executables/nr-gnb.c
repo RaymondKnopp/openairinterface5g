@@ -9,8 +9,10 @@
 #define _GNU_SOURCE
 #undef MALLOC //there are two conflicting definitions, so we better make sure we don't use it at all
 
+#include <errno.h>
 #include <fcntl.h> // for SEEK_SET
 #include <pthread.h> // for pthread_join
+#include <semaphore.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -123,13 +125,39 @@ static void tx_encode_task(void *arg)
 }
 
 /* The TX slot whose grid has not been filled yet because its encoding was still in
- * flight.  Only tx_func() touches it, and tx_func() is serial. */
+ * flight.  Only tx_gen() touches it, and tx_gen() is serial. */
 typedef struct {
   int frame;
   int slot;
   openair0_timestamp_t timestamp_tx;
+  int ring_idx;
   bool valid;
 } tx_pending_t;
+
+/* MAC scheduler responses, handed from tx_func() (scheduler + RX trigger) to tx_gen()
+ * (encode, grid fill, RU path).
+ *
+ * Each one is very big (multiple MB: TX_req carries the PDSCH payloads inline), so they
+ * live in static storage.  Serially, two suffice: with L1_tx_pipeline the grid of slot
+ * N-1 is filled from its DL_req while the MAC has already written slot N's.  With
+ * L1_tx_split the scheduler runs ahead of tx_gen() by however many slots tx_gen() is
+ * behind, so it needs a ring, and a count of free entries to stop it overwriting one
+ * tx_gen() still reads.  Indexed by a running sequence number, not by slot: ru_thread
+ * may skip a slot when it is late, and slot parity would then collide. */
+#define TX_SCHED_RING 8
+static NR_Sched_Rsp_t tx_sched_ring[TX_SCHED_RING];
+static sem_t tx_sched_free;
+static uint32_t tx_sched_seq; // tx_func() only
+
+/* One slot handed from tx_func() to tx_gen() */
+typedef struct {
+  PHY_VARS_gNB *gNB;
+  int frame;
+  int slot;
+  openair0_timestamp_t timestamp_tx;
+  int ring_idx;
+  uint64_t push_tsc; // clock_gettime_oai() when queued, for the tx_gen_qwait stat
+} tx_gen_job_t;
 
 /* accumulate one RX dispatch lag component, windowed like rx_dispatch_lag */
 static void lag_acc(time_stats_t *ts, uint64_t t0, uint64_t t1)
@@ -143,6 +171,17 @@ static void lag_acc(time_stats_t *ts, uint64_t t0, uint64_t t1)
     ts->max = d;
 }
 
+static void run_tx_gen(const tx_gen_job_t *job);
+
+/* Stage A of L1 TX: MAC scheduler, then the RX trigger, then hand the slot to tx_gen().
+ *
+ * With L1_tx_split, tx_gen() runs on its own thread (L1_tx_gen_thread), so a slot whose
+ * grid fill + RU path overruns delays only the TX slots behind it.  Before the split it
+ * also delayed the scheduler and RX trigger of every following slot, because both ran
+ * after the previous slot's tx_gen() on this one thread: at 4T4R full band the PUCCH and
+ * PUSCH of the UL slots then started 1-3 ms late although the RX thread was half idle,
+ * and the UL collapsed.  The TX work fits the TDD period on average (DDDSU gives 625 us
+ * per TX slot); it only must not hold up RX while it catches up. */
 static void tx_func(processingData_L1tx_t *info)
 {
   const uint64_t t_txstart = (uint64_t)clock_gettime_oai();
@@ -153,7 +192,6 @@ static void tx_func(processingData_L1tx_t *info)
   LOG_D(NR_PHY, "%d.%d running tx_func\n", frame_tx, slot_tx);
   PHY_VARS_gNB *gNB = info->gNB;
   NR_IF_Module_t *ifi = gNB->if_inst;
-  nfapi_nr_config_request_scf_t *cfg = &gNB->gNB_config;
 
   T(T_GNB_PHY_DL_TICK, T_INT(gNB->Mod_id), T_INT(frame_tx), T_INT(slot_tx));
 
@@ -164,20 +202,18 @@ static void tx_func(processingData_L1tx_t *info)
 
   clear_slot_beamid(gNB, slot_tx);
 
+  /* Wait for a free scheduler response.  Never blocks serially (tx_gen() holds at most
+   * two); split, it blocks only if tx_gen() has fallen TX_SCHED_RING - 2 slots behind,
+   * by which time those slots have missed the air anyway. */
+  while (sem_wait(&tx_sched_free) != 0)
+    AssertFatal(errno == EINTR, "sem_wait: %s\n", strerror(errno));
+  const int ring_idx = tx_sched_seq++ % TX_SCHED_RING;
+  NR_Sched_Rsp_t *sched = &tx_sched_ring[ring_idx];
+
   nfapi_nr_slot_indication_scf_t ind = {.header = {.phy_id = 0}, .sfn = frame_tx, .slot = slot_tx};
   start_meas(&gNB->slot_indication_stats);
-  // this variable is very big (multiple MB), so we put it into static storage
-  // to not overflow the stack while still having it in local (function) scope
-  // also, tx_func() is only executed by one thread, serially
-  //
-  // Two of them, indexed by slot parity: with L1_tx_pipeline the grid of slot N-1 is
-  // filled from its DL_req while the MAC has already written slot N's into the other.
-  static NR_Sched_Rsp_t sched_response[2];
-  NR_Sched_Rsp_t *sched = &sched_response[slot_tx & 1];
   ifi->NR_slot_indication(&ind, sched);
   stop_meas(&gNB->slot_indication_stats);
-
-  info->gNB = gNB;
 
   // At this point, MAC scheduler just ran, including scheduling
   // PRACH/PUCCH/PUSCH, so trigger RX chain processing
@@ -199,6 +235,32 @@ static void tx_func(processingData_L1tx_t *info)
   syncMsg->push_tsc = (uint64_t)clock_gettime_oai();
   pushNotifiedFIFO(&gNB->resp_L1, res);
 
+  const tx_gen_job_t job = {.gNB = gNB,
+                            .frame = frame_tx,
+                            .slot = slot_tx,
+                            .timestamp_tx = info->timestamp_tx,
+                            .ring_idx = ring_idx,
+                            .push_tsc = (uint64_t)clock_gettime_oai()};
+  if (gNB->tx_split) {
+    notifiedFIFO_elt_t *g = newNotifiedFIFO_elt(sizeof(tx_gen_job_t), slot_tx, &gNB->L1_tx_gen, NULL);
+    *(tx_gen_job_t *)NotifiedFifoData(g) = job;
+    pushNotifiedFIFO(&gNB->L1_tx_gen, g);
+  } else {
+    run_tx_gen(&job);
+  }
+}
+
+/* Stage B of L1 TX: start this slot's encoding, fill a grid, run the RU path.  Serial
+ * (one caller at a time): inline in tx_func(), or on L1_tx_gen_thread with L1_tx_split. */
+static void tx_gen(const tx_gen_job_t *job)
+{
+  PHY_VARS_gNB *gNB = job->gNB;
+  const int frame_tx = job->frame;
+  const int slot_tx = job->slot;
+  nfapi_nr_config_request_scf_t *cfg = &gNB->gNB_config;
+  /* the encode task takes &sched->DL_req etc.; tx_gen() only reads the ring entry */
+  NR_Sched_Rsp_t *sched = &tx_sched_ring[job->ring_idx];
+
   RU_t *ru = gNB->RU_list[0];
   int tx_slot_type = nr_slot_select(cfg, frame_tx, slot_tx);
   // TODO check for analog_bf_vendor_ext set to 1 is a workaround while no beam API for beam selection is implemented
@@ -213,17 +275,19 @@ static void tx_func(processingData_L1tx_t *info)
   bool do_generate = tx_this_slot;
   int gen_frame = frame_tx;
   int gen_slot = slot_tx;
-  openair0_timestamp_t gen_ts = info->timestamp_tx;
+  openair0_timestamp_t gen_ts = job->timestamp_tx;
+  int gen_ring_idx = job->ring_idx;
   if (gNB->tx_pipeline) {
     do_generate = pend.valid;
     gen_frame = pend.frame;
     gen_slot = pend.slot;
     gen_ts = pend.timestamp_tx;
+    gen_ring_idx = pend.ring_idx;
   }
-  const NR_Sched_Rsp_t *gen_sched = &sched_response[gen_slot & 1];
+  const NR_Sched_Rsp_t *gen_sched = &tx_sched_ring[gen_ring_idx];
 
   if (do_generate || (gNB->tx_pipeline && tx_this_slot)) {
-    start_meas(&info->gNB->phy_proc_tx);
+    start_meas(&gNB->phy_proc_tx);
     /* Split the measured region so the overrun alarm can say WHICH half was slow: PDCCH/PDSCH
      * generation, or the RU path (precoding + fronthaul BFP compression).  One aggregate
      * number cannot distinguish them, and they have entirely different causes. */
@@ -257,7 +321,7 @@ static void tx_func(processingData_L1tx_t *info)
     uint64_t t_ru_end = t_gen_start;
     if (do_generate) {
       const int gen_slot_type = nr_slot_select(cfg, gen_frame, gen_slot);
-      START_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      START_MEAS_FULL_SLOT(&gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
       if (gNB->tx_pipeline)
         phy_procedures_gNB_TX_generate(gNB,
                                        &gen_sched->DL_req,
@@ -268,14 +332,14 @@ static void tx_func(processingData_L1tx_t *info)
       else
         phy_procedures_gNB_TX(gNB, &sched->DL_req, &sched->TX_req, &sched->UL_dci_req, frame_tx, slot_tx);
       t_gen_end = (uint64_t)clock_gettime_oai();
-      STOP_MEAS_FULL_SLOT(&info->gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      STOP_MEAS_FULL_SLOT(&gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
 
       /* develop's 5ee8de9fd0 removed ru_tx_func() and processingData_RU_t, inlining the
          three stages at the call site.  Same three stages here, on the pipelined slot
          rather than the current one. */
       RU_t *ru_gen = gNB->RU_list[0];
       LOG_D(PHY, "gNB: %d.%d : RU TX (pipelined)\n", gen_frame, gen_slot);
-      START_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      START_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
       // split 7.2 precoding
       if (ru_gen->feptx_prec)
         ru_gen->feptx_prec(ru_gen, gen_frame, gen_slot);
@@ -285,12 +349,12 @@ static void tx_func(processingData_L1tx_t *info)
       if (ru_gen->fh_south_out)
         ru_gen->fh_south_out(ru_gen, gen_frame, gen_slot, gen_ts);
       t_ru_end = (uint64_t)clock_gettime_oai();
-      STOP_MEAS_FULL_SLOT(&info->gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      STOP_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
     }
 
     if (encoding)
       join_task_ans(&enc_ans);
-    stop_meas(&info->gNB->phy_proc_tx);
+    stop_meas(&gNB->phy_proc_tx);
 
     /* L1 TX overrun alarm.  A TX that misses its deadline still hands xran a buffer on
      * time, so the O-RU reports nothing wrong (RX_LATE ~0, RX_CORRUPT 0) -- only the
@@ -363,22 +427,59 @@ static void tx_func(processingData_L1tx_t *info)
     }
   }
 
+  /* Return scheduler responses tx_gen() is done with.  Pipelined, the one generated above
+   * is finished, and this slot's is kept for next call's generate if it has a grid to
+   * fill; serially, this slot's is finished. */
   if (gNB->tx_pipeline) {
+    if (do_generate)
+      sem_post(&tx_sched_free);
+    if (!tx_this_slot)
+      sem_post(&tx_sched_free);
     pend.valid = tx_this_slot;
     pend.frame = frame_tx;
     pend.slot = slot_tx;
-    pend.timestamp_tx = info->timestamp_tx;
+    pend.timestamp_tx = job->timestamp_tx;
+    pend.ring_idx = job->ring_idx;
+  } else {
+    sem_post(&tx_sched_free);
   }
 
   // beam API - fill TX and/or RX beam IDs
   if (gNB->common_vars.analog_bf) {
     if (ru->fh_south_ctrl)
-      ru->fh_south_ctrl(ru, frame_tx, slot_tx, info->timestamp_tx);
+      ru->fh_south_ctrl(ru, frame_tx, slot_tx, job->timestamp_tx);
   }
   /* No fh_south_out() here: develop calls it at this point for slot_tx, but this tx_func
      already ran it above for the slot it generated (gen_slot), and with L1_tx_pipeline
      slot_tx is not generated yet.  Calling it here too repeated the fronthaul stage on
      every DL slot (~120-220 us at 4T4R) and shipped a not-yet-generated grid. */
+}
+
+/* tx_gen() with its stats: "L1 Tx job" times the TX work itself wherever it runs, and
+ * tx_gen_qwait how long the slot waited for it after the scheduler (0 when inline). */
+static void run_tx_gen(const tx_gen_job_t *job)
+{
+  PHY_VARS_gNB *gNB = job->gNB;
+  const int slot_type = nr_slot_select(&gNB->gNB_config, job->frame, job->slot);
+  if (cpu_meas_enabled)
+    lag_acc(&gNB->tx_gen_qwait, job->push_tsc, (uint64_t)clock_gettime_oai());
+  START_MEAS_FULL_SLOT(&gNB->l1_tx_proc, slot_type, NR_DOWNLINK_SLOT);
+  tx_gen(job);
+  STOP_MEAS_FULL_SLOT(&gNB->l1_tx_proc, slot_type, NR_DOWNLINK_SLOT);
+}
+
+/* L1_tx_split: stage B of L1 TX on its own thread, fed by tx_func() through L1_tx_gen */
+static void *L1_tx_gen_thread(void *arg)
+{
+  PHY_VARS_gNB *gNB = (PHY_VARS_gNB *)arg;
+  while (oai_exit == 0) {
+    notifiedFIFO_elt_t *res = pullNotifiedFIFO(&gNB->L1_tx_gen);
+    if (res == NULL)
+      break;
+    run_tx_gen((const tx_gen_job_t *)NotifiedFifoData(res));
+    delNotifiedFIFO_elt(res);
+  }
+  return NULL;
 }
 
 void *L1_rx_thread(void *arg) 
@@ -473,12 +574,9 @@ void *L1_tx_thread(void *arg) {
      if (res == NULL) // stopping condition, happens only when queue is freed
        break;
      processingData_L1tx_t *info = (processingData_L1tx_t *)NotifiedFifoData(res);
-     int slot_type = nr_slot_select(&gNB->gNB_config, info->frame, info->slot);
      const int call_slot = info->slot;
      const uint64_t t_call = (uint64_t)clock_gettime_oai();
-     START_MEAS_FULL_SLOT(&gNB->l1_tx_proc, slot_type, NR_DOWNLINK_SLOT);
      tx_func(info);
-     STOP_MEAS_FULL_SLOT(&gNB->l1_tx_proc, slot_type, NR_DOWNLINK_SLOT);
      if (cpu_meas_enabled) {
        const uint64_t t_end = (uint64_t)clock_gettime_oai();
        const uint64_t old_max = gNB->tx_call_all.max;
@@ -711,6 +809,7 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->rx_lag_rxq);
   gNB->rx_lag_txq_over500 = 0;
   reset_meas(&gNB->tx_call_all);
+  reset_meas(&gNB->tx_gen_qwait);
   gNB->tx_call_over[0] = gNB->tx_call_over[1] = 0;
   reset_meas(&gNB->pucch01_proc_rx);
   reset_meas(&gNB->pucch23_proc_rx);
@@ -799,6 +898,7 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                        (unsigned long long)gNB->rx_lag_txq_over500,
                        100.0 * gNB->rx_lag_txq_over500 / gNB->rx_lag_txq.trials);
   output += print_meas_log(&gNB->tx_call_all, "tx_func call (all slots)", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->tx_gen_qwait, "TX gen queue wait", NULL, NULL, output, end - output);
   if (gNB->tx_call_all.trials > 0 && output < end)
     output += snprintf(output, end - output, "%25s:  >500us %llu (%.3f%%), >1ms %llu (%.3f%%), window max at slot %d\n",
                        "tx_func call tail", (unsigned long long)gNB->tx_call_over[0],
@@ -1012,12 +1112,22 @@ void init_gNB_Tpool(int inst)
   initNotifiedFIFO(&gNB->resp_L1);
   // L1 TX result FIFO
   initNotifiedFIFO(&gNB->L1_tx_out);
+  // fault the scheduler response ring in now, not on the first slots of the RT threads
+  memset(tx_sched_ring, 0, sizeof(tx_sched_ring));
+  AssertFatal(sem_init(&tx_sched_free, 0, TX_SCHED_RING) == 0, "sem_init: %s\n", strerror(errno));
+  if (gNB->tx_split)
+    initNotifiedFIFO(&gNB->L1_tx_gen);
   initNotifiedFIFO(&gNB->L1_rx_out);
 
   // create the RX thread responsible for RX processing start event (resp_L1 msg queue), then launch rx_func()
   threadCreate(&gNB->L1_rx_thread, L1_rx_thread, (void *)gNB, "L1_rx_thread", gNB->L1_rx_thread_core, OAI_PRIORITY_RT_MAX);
   // create the TX thread responsible for TX processing start event (L1_tx_out msg queue), then launch tx_func()
   threadCreate(&gNB->L1_tx_thread, L1_tx_thread, (void *)gNB, "L1_tx_thread", gNB->L1_tx_thread_core, OAI_PRIORITY_RT_MAX);
+  if (gNB->tx_split) {
+    LOG_I(NR_PHY, "L1 TX split: grid fill and RU path on L1_tx_gen (core %d), scheduler and RX trigger on L1_tx_thread\n",
+          gNB->L1_tx_gen_thread_core);
+    threadCreate(&gNB->L1_tx_gen_thread, L1_tx_gen_thread, (void *)gNB, "L1_tx_gen", gNB->L1_tx_gen_thread_core, OAI_PRIORITY_RT_MAX);
+  }
 
   if (!IS_SOFTMODEM_NOSTATS)
     threadCreate(&proc->L1_stats_thread, nrL1_stats_thread, (void *)gNB, "L1_stats", -1, OAI_PRIORITY_RT_LOW);
@@ -1028,7 +1138,13 @@ void term_gNB_Tpool(int inst) {
   abortNotifiedFIFO(&gNB->resp_L1);
   pthread_join(gNB->L1_rx_thread, NULL);
   abortNotifiedFIFO(&gNB->L1_tx_out);
+  for (int i = 0; i < TX_SCHED_RING; i++) // tx_func() may wait for a ring entry tx_gen() will not free
+    sem_post(&tx_sched_free);
   pthread_join(gNB->L1_tx_thread, NULL);
+  if (gNB->tx_split) {
+    abortNotifiedFIFO(&gNB->L1_tx_gen);
+    pthread_join(gNB->L1_tx_gen_thread, NULL);
+  }
 
   if (gNB->threadPoolRx == &gNB->threadPoolRxOwn)
     abortTpool(&gNB->threadPoolRxOwn);

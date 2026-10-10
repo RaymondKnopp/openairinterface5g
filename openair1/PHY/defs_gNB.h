@@ -557,6 +557,9 @@ typedef struct PHY_VARS_gNB_s {
   time_stats_t tx_call_all;
   uint64_t tx_call_over[2]; /* >500 us, >1 ms */
   int tx_call_max_slot; /* slot of the current window's max */
+  /* L1_tx_split: how long a slot waits between the scheduler and the start of its grid
+   * fill on L1_tx_gen, i.e. how far behind the TX stage runs */
+  time_stats_t tx_gen_qwait;
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
@@ -585,6 +588,11 @@ typedef struct PHY_VARS_gNB_s {
 
   notifiedFIFO_t resp_L1;
   notifiedFIFO_t L1_tx_out;
+  /* L1_tx_split: tx_func() -> L1_tx_gen_thread (grid fill + RU path).  See tx_func(). */
+  int tx_split;
+  int L1_tx_gen_thread_core;
+  notifiedFIFO_t L1_tx_gen;
+  pthread_t L1_tx_gen_thread;
   notifiedFIFO_t L1_rx_out;
   /* TX work (DLSCH encoding, PDSCH generation), and RX work too unless a separate RX pool
    * is configured.  Sized by --thread-pool. */
