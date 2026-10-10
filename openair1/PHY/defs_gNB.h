@@ -371,8 +371,8 @@ typedef struct {
 typedef struct {
   uint32_t frame, slot;
   uint64_t count; /* value of the alarm's total counter when this record was taken */
-  float a, b, c, d; /* TX: tot/gen/ru/prec  RX: e2e/queued/proc/unused */
-  float e; /* TX: fhaul */
+  float a, b, c, d; /* TX: tot/gen/ru/prec  RX: e2e/queued/proc/txq */
+  float e; /* TX: fhaul  RX: sched */
   uint8_t n_pdsch;
   l1_alarm_pdsch_t pdsch[L1_ALARM_MAX_PDSCH];
 } l1_alarm_rec_t;
@@ -552,6 +552,11 @@ typedef struct PHY_VARS_gNB_s {
   time_stats_t rx_lag_sched;
   time_stats_t rx_lag_rxq;
   uint64_t rx_lag_txq_over500;
+  /* wall time of EVERY tx_func() call, whatever the slot type: l1_tx_proc only times
+   * full DL slots, so a long S- or U-slot call would be invisible there */
+  time_stats_t tx_call_all;
+  uint64_t tx_call_over[2]; /* >500 us, >1 ms */
+  int tx_call_max_slot; /* slot of the current window's max */
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
