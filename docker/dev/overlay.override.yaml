@@ -1,0 +1,12 @@
+services:
+  oai-du:
+    volumes:
+      - /build/dev/bin/nr-softmodem:/opt/oai-gnb/bin/nr-softmodem:ro
+      - /build/dev/lib/liboran_fhlib_5g.so:/usr/local/lib/liboran_fhlib_5g.so:ro
+      - /build/dev/lib/libcoding.so:/usr/local/lib/libcoding.so:ro
+      - /build/dev/lib/libparams_libconfig.so:/usr/local/lib/libparams_libconfig.so:ro
+      - /build/dev/lib/libdfts.so:/usr/local/lib/libdfts.so:ro
+      - /build/dev/lib/libldpc.so:/usr/local/lib/libldpc.so:ro
+      - /build/dev/lib/libldpc_aal.so:/usr/local/lib/libldpc_aal.so:ro
+      - /build/dev/lib/libldpc_orig.so:/usr/local/lib/libldpc_orig.so:ro
+      - /build/dev/lib/libparams_yaml.so:/usr/local/lib/libparams_yaml.so:ro
