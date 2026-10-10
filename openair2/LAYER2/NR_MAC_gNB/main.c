@@ -38,9 +38,103 @@
 #include "seq_arr.h"
 #include "system.h"
 #include "time_meas.h"
+#include <stdatomic.h>
 #include "utils.h"
 
 #define MACSTATSSTRLEN 36256
+
+/* sched_lock instrumentation, see NR_SCHED_LOCK() in nr_mac_gNB.h */
+#define NR_SCHED_LOCK_MAX_SITES 64
+typedef struct {
+  const char *file;
+  const char *func;
+  int line;
+  _Atomic uint64_t n;
+  _Atomic uint64_t wait_ns, wait_max_ns, wait_win_ns; // win: max since the last dump
+  _Atomic uint64_t hold_ns, hold_max_ns, hold_win_ns;
+} nr_sched_lock_site_t;
+static nr_sched_lock_site_t sl_sites[NR_SCHED_LOCK_MAX_SITES];
+static _Atomic int sl_nsites;
+static pthread_mutex_t sl_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+/* written only by the current lock holder */
+static int sl_owner = -1;
+static uint64_t sl_t_acq;
+
+int nr_sched_lock_site(const char *file, int line, const char *func)
+{
+  pthread_mutex_lock(&sl_reg_lock);
+  int id = -1;
+  for (int i = 0; i < sl_nsites; i++)
+    if (sl_sites[i].line == line && strcmp(sl_sites[i].file, file) == 0)
+      id = i;
+  if (id < 0 && sl_nsites < NR_SCHED_LOCK_MAX_SITES) {
+    id = sl_nsites;
+    const char *b = strrchr(file, '/');
+    sl_sites[id].file = b ? b + 1 : file;
+    sl_sites[id].func = func;
+    sl_sites[id].line = line;
+    sl_nsites = id + 1;
+  }
+  pthread_mutex_unlock(&sl_reg_lock);
+  return id < 0 ? NR_SCHED_LOCK_MAX_SITES : id; // overflow: never registered, never counted
+}
+
+static void sl_max(_Atomic uint64_t *m, uint64_t v)
+{
+  uint64_t cur = *m;
+  while (v > cur && !atomic_compare_exchange_weak(m, &cur, v))
+    ;
+}
+
+void nr_sched_lock_acquired(int site, uint64_t t_req)
+{
+  const uint64_t now = nr_sched_lock_now();
+  sl_owner = site;
+  sl_t_acq = now;
+  if (site >= NR_SCHED_LOCK_MAX_SITES)
+    return;
+  nr_sched_lock_site_t *s = &sl_sites[site];
+  const uint64_t w = now - t_req;
+  s->n++;
+  s->wait_ns += w;
+  sl_max(&s->wait_max_ns, w);
+  sl_max(&s->wait_win_ns, w);
+}
+
+void nr_sched_lock_releasing(void)
+{
+  const int site = sl_owner;
+  if (site < 0 || site >= NR_SCHED_LOCK_MAX_SITES)
+    return;
+  const uint64_t h = nr_sched_lock_now() - sl_t_acq;
+  sl_owner = -1;
+  nr_sched_lock_site_t *s = &sl_sites[site];
+  s->hold_ns += h;
+  sl_max(&s->hold_max_ns, h);
+  sl_max(&s->hold_win_ns, h);
+}
+
+/* One line per call site that has taken the lock.  The "win" columns are maxima since the
+ * previous call and are reset here, so with the 1 s stats dump they show the last second. */
+size_t nr_sched_lock_stats(char *buf, size_t len)
+{
+  char *p = buf, *end = buf + len;
+  p += snprintf(p, end - p, "\nsched_lock per call site [us]: n | wait avg max win | hold avg max win\n");
+  const int ns = sl_nsites;
+  for (int i = 0; i < ns && p < end; i++) {
+    nr_sched_lock_site_t *s = &sl_sites[i];
+    const uint64_t n = s->n;
+    if (n == 0)
+      continue;
+    const uint64_t ww = atomic_exchange(&s->wait_win_ns, 0);
+    const uint64_t hw = atomic_exchange(&s->hold_win_ns, 0);
+    p += snprintf(p, end - p, "  %-28s %5d %-28s %9llu | %7.1f %8.1f %8.1f | %7.1f %8.1f %8.1f\n",
+                  s->file, s->line, s->func, (unsigned long long)n,
+                  s->wait_ns / 1e3 / n, s->wait_max_ns / 1e3, ww / 1e3,
+                  s->hold_ns / 1e3 / n, s->hold_max_ns / 1e3, hw / 1e3);
+  }
+  return p - buf;
+}
 
 void *nrmac_stats_thread(void *arg) {
 
@@ -75,6 +169,7 @@ void *nrmac_stats_thread(void *arg) {
       p += print_meas_log(&cell->nr_srs_tpmi_computation_timer, "UL-TPMI computation time", NULL, NULL, p, end - p);
     }
     NR_SCHED_UNLOCK(&gNB->sched_lock);
+    p += nr_sched_lock_stats(p, end - p);
     size_t len = p - output;
     if (fwrite(output, len, 1, file) != 1 || fflush(file) != 0) {
       LOG_E(NR_MAC, "error while writing nrMAC_stats.log: %d, %s\n", errno, strerror(errno));
