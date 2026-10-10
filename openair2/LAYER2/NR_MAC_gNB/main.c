@@ -39,6 +39,7 @@
 #include "system.h"
 #include "time_meas.h"
 #include <stdatomic.h>
+#include "openair2/LAYER2/nr_rlc/nr_rlc_ue_manager.h"
 #include "utils.h"
 
 #define MACSTATSSTRLEN 36256
@@ -260,6 +261,7 @@ void *nrmac_stats_thread(void *arg) {
     }
     NR_SCHED_UNLOCK(&gNB->sched_lock);
     p += nr_sched_lock_stats(p, end - p);
+    p += nr_rlc_lock_stats(p, end - p);
     size_t len = p - output;
     if (fwrite(output, len, 1, file) != 1 || fflush(file) != 0) {
       LOG_E(NR_MAC, "error while writing nrMAC_stats.log: %d, %s\n", errno, strerror(errno));
