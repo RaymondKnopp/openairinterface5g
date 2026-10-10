@@ -1,8 +1,7 @@
-# NPE-010: fast debug loop, board access, and the 4T4R findings
+# NPE-010: fast debug loop and board access
 
 Companion to `README.nxp-npe010.md`.  That one covers building and running the
-image; this one covers iterating on OAI code quickly once an image is on the board,
-and what was learned on 2026-10-10 bringing a 4T4R cell up with a Quectel module.
+image; this one covers iterating on OAI code quickly once an image is on the board.
 
 ## 1. Fast debug loop: overlay binaries instead of rebuilding images
 
@@ -97,68 +96,3 @@ now live on the persistent partition and are reinstalled by bringup:
 To grant or revoke access, add or remove a `.pub` file and rerun `setup-keys.sh`.
 **Until bringup has run after a reboot nothing is mounted**, so the first login after a
 reboot needs the root password or the console.
-
-## 3. What was found on 2026-10-10
-
-### UE stuck at Msg1 after the w39 merge — fixed (`16470125b7`)
-
-develop's `d0b0de4c93` made `rxdataF` flat (first RB at index 0) and changed the 7.2 RX
-path in `oaioran.c` to decompress straight into it.  The merge kept this branch's
-`oaioran.c` (for the tp-batch work) and with it the old DC-centred staging, while every
-RX reader taken from develop reads flat.  Every PUSCH subcarrier landed in the wrong
-bin; PRACH has its own buffer, so the cell looked alive and the UE reached Msg1.
-
-Why it was hard to see: the simulators never go through `oaioran.c`, and MAC drops a
-Msg3 NACK **silently** when its frame/slot doesn't match the scheduled Msg3.  At the
-default log level, the reliable test is to count `Scheduling retransmission of Msg3`
-(INFO) and `Reached msg3 max harq rounds` (WARN): both zero across many attempts means
-MAC never acted on any Msg3 result.
-
-### 4T4R throughput: one RX thread does all the UL work
-
-2T2R had sustained 750 Mbps DL.  At 4T4R the DL collapsed above ~35 Mbps.  It is not a
-merge regression (the pre-merge build broke too), not the LA1200, and not core sharing.
-
-`L1_rx_thread` (core 2) does all UL processing serially; the dedicated RX pool
-(`L1_rx_pool_cores`, cores 7,8,13,14) was ~idle.  When that thread falls behind, the
-fronthaul overwrites `rxdataF` slots L1 hasn't read: PUCCH HARQ-ACKs and PUSCH become
-DTX, DL BLER rises, MCS drops to 0, and closed-loop power control drives the UE to
-maximum power (UL RSSI −35 → −9 dB).
-
-| change | commit | DL breakpoint |
-|---|---|---|
-| none | — | ~35 Mbps |
-| noise estimate only on UL slots with no PUSCH and no PUCCH | `2f96654cbf` | ~175 Mbps (clean at 150, degrades at 200) |
-| + PRACH detection on the RX pool | `32c5aeb0c7` | **inconclusive**: one run failed at 150 Mbps (UE at rank 1, CQI 14, vs rank 2/CQI 15 before); RX thread only 31% busy but TX overrunning -- needs an A/B against `2f96654cbf` in one session |
-
-- **`gNB_I0_measurements()`** made ~15 000 per-PRB `signal_energy_nodc()` calls per UL
-  slot (every unused PRB × every UL symbol × 4 RX), outside every timer: ~690 µs per
-  full UL slot, keeping the RX thread 53% busy with no UE.  It is an EMA (0.1), so it
-  now runs only on UL slots with neither PUSCH nor PUCCH.  This assumes no
-  load-dependent inter-cell interference.
-- **PRACH detection** costs ~340 µs per occasion at 4 antennas.  It has no slot
-  deadline of its own but delayed the PUCCH/PUSCH work behind it; it now runs on the RX
-  pool and delivers its own RACH indication (MAC's RACH entry point takes `sched_lock`
-  itself).
-- **After moving PRACH, the RX thread was no longer the limit** (31% busy under load),
-  yet RX jobs still waited ~1 ms to start and the TX thread was at 69% with TX job peaks
-  of ~770 us against a 500 us slot.  RX start is gated on TX scheduling by design, so a
-  late TX thread delays RX: the bottleneck may have moved to TX.
-- **Still open at 200 Mbps:** PUCCH F2/F3 reception 191 µs avg / 469 µs max on the RX
-  thread; the UL indication occasionally blocking up to ~1.4 ms (suspected `sched_lock`
-  contention with the DL scheduler); and the TX side starting to overrun (TX job max
-  ~760 µs against a 500 µs slot).
-
-### How to measure this yourself
-
-- Run the DU with `-q`.  Timers land in `/opt/oai-gnb/nrL1_stats.log` inside the
-  container (`I0 measurements`, `PRACH RX`, `PUCCH23 reception`, `UL Indication`, `RX
-  dispatch lag tail`, ...).  `L1 Rx job` covers full UL slots only, and the values are
-  cumulative since start.
-- **The RX overrun alarm is armed at 1000 µs, twice the 500 µs slot**, so lag can build
-  up without it firing.  The reliable signals are the counts of `RX slot overwrite` and
-  `PRACH job is in the past` in `docker logs oai-du`.
-- **Per-thread CPU without trusting any timer:** sample fields 14+15 of
-  `/proc/<pid>/task/*/stat` twice, 5 s apart (100 ticks/s).
-- **Ramp DL in steps** (10, 25, 50, 100, 150, 200, ... Mbps, ~30 s each) and watch
-  goodput, BLER, PUCCH/PUSCH DTX and those two counts.
