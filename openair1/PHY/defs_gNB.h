@@ -508,6 +508,11 @@ typedef struct PHY_VARS_gNB_s {
   time_stats_t rx_i0_meas;
   /// UL slots where the noise estimate was skipped because the slot carried PUSCH or PUCCH
   uint64_t rx_i0_skipped;
+  /// L1_tx_pipeline diagnostics: the whole pipelined encode task, and the nr_dlsch_generate() call
+  time_stats_t tx_encode_task_stats;
+  time_stats_t tx_pdsch_generate_call;
+  /// generate calls whose DL_req schedules PDSCH, and how often the encoded data did not match it
+  uint64_t tx_gen_pdsch_slots, tx_gen_enc_empty, tx_gen_enc_stale, tx_gen_enc_mismatch;
 
   time_stats_t dlsch_encoding_stats;
   time_stats_t dlsch_ldpc_encode_stats;
