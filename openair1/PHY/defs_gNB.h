@@ -545,6 +545,13 @@ typedef struct PHY_VARS_gNB_s {
    * them and rx_func() starting.  A max alone cannot distinguish one init outlier
    * from a tail that recurs every frame. */
   uint64_t rx_lag_over[3];
+  /* rx_dispatch_lag split at the two hand-offs on its path: ru_thread -> L1_tx_out ->
+   * tx_func() start (TX thread still busy with an earlier slot), tx_func() start ->
+   * resp_L1 push (MAC scheduler), resp_L1 push -> L1_rx_thread pickup (RX thread busy). */
+  time_stats_t rx_lag_txq;
+  time_stats_t rx_lag_sched;
+  time_stats_t rx_lag_rxq;
+  uint64_t rx_lag_txq_over500;
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
@@ -737,6 +744,8 @@ typedef struct processingData_L1 {
    * job waited before rx_func() started -- the dispatch term of the rxdataF ring
    * budget, which cannot be separated from rx_func()'s own cost otherwise. */
   uint64_t dispatch_tsc; // clock_gettime_oai() units, NOT rdtsc_oai() -- see nr-gnb.c
+  uint64_t txstart_tsc; // tx_func() start, same units
+  uint64_t push_tsc; // resp_L1 push in tx_func(), same units
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
   notifiedFIFO_elt_t *elt;
