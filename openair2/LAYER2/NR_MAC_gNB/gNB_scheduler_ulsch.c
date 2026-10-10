@@ -399,6 +399,22 @@ static rnti_t lcid_crnti_lookahead(uint8_t *pdu, uint32_t pdu_len)
   return 0;
 }
 
+/* UL RLC PDUs of one MAC PDU, handed to RLC after sched_lock is released.
+ *
+ * nr_mac_rlc_data_ind() runs RLC recv_pdu() and takes the RLC manager lock.  At high DL
+ * rate the UL carries the RLC AM STATUS PDUs of the DL bearer, and processing them (freeing
+ * every acknowledged SDU) plus waiting for the RLC lock against the F1-U ingress took up to
+ * 2.3 ms on the A72 -- all of it under sched_lock, so the DL scheduler and the next PUCCH
+ * on L1_rx_thread waited for it.  RLC has its own lock and needs no MAC state, so only
+ * the decoding stays under sched_lock.  The buffers point into the PHY's PDU, which stays
+ * valid until nr_rx_sdu() returns. */
+typedef struct {
+  rnti_t rnti;
+  int num;
+  nr_rlc_data_ind_t ind[MAX_NUM_DATA_IND];
+} nr_rlc_ul_deferred_t;
+
+/* defer == NULL delivers to RLC here, under sched_lock, as the RA paths need */
 static int nr_process_mac_pdu(gNB_MAC_INST *nrmac,
                               nr_cell_sched_t *cell,
                               NR_UE_info_t *UE,
@@ -406,7 +422,8 @@ static int nr_process_mac_pdu(gNB_MAC_INST *nrmac,
                               slot_t slot,
                               uint8_t *pduP,
                               uint32_t pdu_len,
-                              const int8_t harq_pid)
+                              const int8_t harq_pid,
+                              nr_rlc_ul_deferred_t *defer)
 {
   int sdus = 0;
   NR_UE_UL_BWP_t *ul_bwp = &UE->current_UL_BWP;
@@ -639,7 +656,13 @@ static int nr_process_mac_pdu(gNB_MAC_INST *nrmac,
     pdu_len -= (mac_subheader_len + mac_len);
   }
 
-  nr_mac_rlc_data_ind(nrmac->Mod_id, UE->rnti, true, data_ind, num_data_ind);
+  if (defer) {
+    defer->rnti = UE->rnti;
+    defer->num = num_data_ind;
+    memcpy(defer->ind, data_ind, num_data_ind * sizeof(*data_ind));
+  } else {
+    nr_mac_rlc_data_ind(nrmac->Mod_id, UE->rnti, true, data_ind, num_data_ind);
+  }
 
   UE->mac_stats.ul.num_mac_sdu += sdus;
 
@@ -890,7 +913,7 @@ static void nr_rx_ra_sdu(gNB_MAC_INST *mac,
 
     // Decode the entire MAC PDU
     // It may have multiple MAC subPDUs, for example, a MAC subPDU with LCID 1 caring a RRCReestablishmentComplete
-    nr_process_mac_pdu(mac, cell, old_UE, frame, slot, sdu, sdu_len, harq_pid);
+    nr_process_mac_pdu(mac, cell, old_UE, frame, slot, sdu, sdu_len, harq_pid, NULL);
     return;
   }
 
@@ -903,7 +926,7 @@ static void nr_rx_ra_sdu(gNB_MAC_INST *mac,
   memcpy(ra->cont_res_id, &sdu[1], sizeof(uint8_t) * 6);
 
   // Decode MAC PDU
-  nr_process_mac_pdu(mac, cell, UE, frame, slot, sdu, sdu_len, harq_pid);
+  nr_process_mac_pdu(mac, cell, UE, frame, slot, sdu, sdu_len, harq_pid, NULL);
 
   LOG_I(NR_MAC,
         "Activating scheduling %s for TC_RNTI 0x%04x (state %s)\n",
@@ -925,7 +948,8 @@ static void _nr_rx_sdu(gNB_MAC_INST *gNB_mac,
                        const int8_t harq_pid,
                        const uint16_t timing_advance,
                        const uint8_t ul_cqi,
-                       const uint16_t rssi)
+                       const uint16_t rssi,
+                       nr_rlc_ul_deferred_t *defer)
 {
   const int current_rnti = rntiP;
   LOG_D(NR_MAC, "rx_sdu for rnti %04x\n", current_rnti);
@@ -1003,7 +1027,7 @@ static void _nr_rx_sdu(gNB_MAC_INST *gNB_mac,
       if (UE_scheduling_control->sched_ul_bytes < 0)
         UE_scheduling_control->sched_ul_bytes = 0;
 
-      nr_process_mac_pdu(gNB_mac, cell, UE, frameP, slotP, sduP, sdu_lenP, harq_pid);
+      nr_process_mac_pdu(gNB_mac, cell, UE, frameP, slotP, sduP, sdu_lenP, harq_pid, defer);
     } else {
       if (ul_cqi == 0xff || ul_cqi <= 128) {
         UE->UE_sched_ctrl.pusch_consecutive_dtx_cnt++;
@@ -1045,10 +1069,14 @@ void nr_rx_sdu(const module_id_t gnb_mod_idP,
   gNB_MAC_INST *gNB_mac = RC.nrmac[gnb_mod_idP];
   NR_SCHED_LOCK(&gNB_mac->sched_lock);
   nr_cell_sched_t *cell = nr_mac_get_cell_by_phy_id(gNB_mac, CC_idP);
+  nr_rlc_ul_deferred_t defer; // ~24 KB: set only the count, not zero the whole list per PDU
+  defer.num = 0;
   start_meas(&cell->rx_ulsch_sdu);
-  _nr_rx_sdu(gNB_mac, cell, frameP, slotP, rntiP, sduP, sdu_lenP, harq_pid, timing_advance, ul_cqi, rssi);
+  _nr_rx_sdu(gNB_mac, cell, frameP, slotP, rntiP, sduP, sdu_lenP, harq_pid, timing_advance, ul_cqi, rssi, &defer);
   stop_meas(&cell->rx_ulsch_sdu);
   NR_SCHED_UNLOCK(&gNB_mac->sched_lock);
+  if (defer.num > 0)
+    nr_mac_rlc_data_ind(gNB_mac->Mod_id, defer.rnti, true, defer.ind, defer.num);
 }
 
 static uint32_t calc_power_complex(const int16_t *x, const int16_t *y, const uint32_t size)
