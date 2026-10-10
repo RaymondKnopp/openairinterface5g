@@ -5,8 +5,12 @@
 #include "nr_rlc_ue_manager.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "LOG/log.h"
 
@@ -45,22 +49,116 @@ int nr_rlc_manager_get_gnb_flag(nr_rlc_ue_manager_t *_m)
   return m->mode != NR_RLC_OP_MODE_UE;
 }
 
-void nr_rlc_manager_lock(nr_rlc_ue_manager_t *_m)
+/* manager lock instrumentation, see nr_rlc_manager_lock() in nr_rlc_ue_manager.h */
+#define RLC_LOCK_MAX_SITES 64
+typedef struct {
+  const char *file;
+  const char *func;
+  int line;
+  _Atomic uint64_t n;
+  _Atomic uint64_t wait_ns, wait_max_ns, wait_win_ns; // win: max since the last dump
+  _Atomic uint64_t hold_ns, hold_max_ns, hold_win_ns;
+} rlc_lock_site_t;
+static rlc_lock_site_t rl_sites[RLC_LOCK_MAX_SITES];
+static _Atomic int rl_nsites;
+static pthread_mutex_t rl_reg_lock = PTHREAD_MUTEX_INITIALIZER;
+static int rl_owner = -1; // written only by the lock holder
+static uint64_t rl_t_acq;
+
+static inline uint64_t rl_now(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+static void rl_max(_Atomic uint64_t *m, uint64_t v)
+{
+  uint64_t cur = *m;
+  while (v > cur && !atomic_compare_exchange_weak(m, &cur, v))
+    ;
+}
+
+static int rl_register(const char *file, int line, const char *func)
+{
+  pthread_mutex_lock(&rl_reg_lock);
+  int id = -1;
+  for (int i = 0; i < rl_nsites; i++)
+    if (rl_sites[i].line == line && strcmp(rl_sites[i].file, file) == 0)
+      id = i;
+  if (id < 0 && rl_nsites < RLC_LOCK_MAX_SITES) {
+    id = rl_nsites;
+    const char *b = strrchr(file, '/');
+    rl_sites[id].file = b ? b + 1 : file;
+    rl_sites[id].func = func;
+    rl_sites[id].line = line;
+    rl_nsites = id + 1;
+  }
+  pthread_mutex_unlock(&rl_reg_lock);
+  return id < 0 ? RLC_LOCK_MAX_SITES : id; // overflow: never counted
+}
+
+void nr_rlc_manager_lock_at(nr_rlc_ue_manager_t *_m, int *site, const char *file, int line, const char *func)
 {
   nr_rlc_ue_manager_internal_t *m = _m;
+  if (*site < 0)
+    *site = rl_register(file, line, func);
+  const uint64_t t_req = rl_now();
   if (pthread_mutex_lock(&m->lock)) {
+    LOG_E(RLC, "%s:%d:%s: fatal\n", __FILE__, __LINE__, __FUNCTION__);
+    exit(1);
+  }
+  const uint64_t now = rl_now();
+  rl_owner = *site;
+  rl_t_acq = now;
+  if (*site >= RLC_LOCK_MAX_SITES)
+    return;
+  rlc_lock_site_t *s = &rl_sites[*site];
+  const uint64_t w = now - t_req;
+  s->n++;
+  s->wait_ns += w;
+  rl_max(&s->wait_max_ns, w);
+  rl_max(&s->wait_win_ns, w);
+}
+
+void nr_rlc_manager_unlock_at(nr_rlc_ue_manager_t *_m)
+{
+  nr_rlc_ue_manager_internal_t *m = _m;
+  const int site = rl_owner;
+  if (site >= 0 && site < RLC_LOCK_MAX_SITES) {
+    const uint64_t h = rl_now() - rl_t_acq;
+    rlc_lock_site_t *s = &rl_sites[site];
+    s->hold_ns += h;
+    rl_max(&s->hold_max_ns, h);
+    rl_max(&s->hold_win_ns, h);
+  }
+  rl_owner = -1;
+  if (pthread_mutex_unlock(&m->lock)) {
     LOG_E(RLC, "%s:%d:%s: fatal\n", __FILE__, __LINE__, __FUNCTION__);
     exit(1);
   }
 }
 
-void nr_rlc_manager_unlock(nr_rlc_ue_manager_t *_m)
+/* One line per call site that took the lock; "win" maxima are since the previous call and
+ * reset here, so with the 1 s MAC stats dump they cover the last second. */
+size_t nr_rlc_lock_stats(char *buf, size_t len)
 {
-  nr_rlc_ue_manager_internal_t *m = _m;
-  if (pthread_mutex_unlock(&m->lock)) {
-    LOG_E(RLC, "%s:%d:%s: fatal\n", __FILE__, __LINE__, __FUNCTION__);
-    exit(1);
+  char *p = buf, *end = buf + len;
+  p += snprintf(p, end - p, "\nRLC manager lock per call site [us]: n | wait avg max win | hold avg max win\n");
+  const int ns = rl_nsites;
+  for (int i = 0; i < ns && p < end; i++) {
+    rlc_lock_site_t *s = &rl_sites[i];
+    const uint64_t n = s->n;
+    if (n == 0)
+      continue;
+    const uint64_t ww = atomic_exchange(&s->wait_win_ns, 0);
+    const uint64_t hw = atomic_exchange(&s->hold_win_ns, 0);
+    p += snprintf(p, end - p, "  %-24s %5d %-30s %9llu | %7.1f %8.1f %8.1f | %7.1f %8.1f %8.1f\n",
+                  s->file, s->line, s->func, (unsigned long long)n,
+                  s->wait_ns / 1e3 / n, s->wait_max_ns / 1e3, ww / 1e3,
+                  s->hold_ns / 1e3 / n, s->hold_max_ns / 1e3, hw / 1e3);
   }
+  return p - buf;
 }
 
 /* must be called with lock acquired */
