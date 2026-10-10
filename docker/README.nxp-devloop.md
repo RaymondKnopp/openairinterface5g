@@ -129,7 +129,7 @@ maximum power (UL RSSI −35 → −9 dB).
 |---|---|---|
 | none | — | ~35 Mbps |
 | noise estimate only on UL slots with no PUSCH and no PUCCH | `2f96654cbf` | ~175 Mbps (clean at 150, degrades at 200) |
-| + PRACH detection on the RX pool | `32c5aeb0c7` | being measured |
+| + PRACH detection on the RX pool | `32c5aeb0c7` | **inconclusive**: one run failed at 150 Mbps (UE at rank 1, CQI 14, vs rank 2/CQI 15 before); RX thread only 31% busy but TX overrunning -- needs an A/B against `2f96654cbf` in one session |
 
 - **`gNB_I0_measurements()`** made ~15 000 per-PRB `signal_energy_nodc()` calls per UL
   slot (every unused PRB × every UL symbol × 4 RX), outside every timer: ~690 µs per
@@ -140,6 +140,10 @@ maximum power (UL RSSI −35 → −9 dB).
   deadline of its own but delayed the PUCCH/PUSCH work behind it; it now runs on the RX
   pool and delivers its own RACH indication (MAC's RACH entry point takes `sched_lock`
   itself).
+- **After moving PRACH, the RX thread was no longer the limit** (31% busy under load),
+  yet RX jobs still waited ~1 ms to start and the TX thread was at 69% with TX job peaks
+  of ~770 us against a 500 us slot.  RX start is gated on TX scheduling by design, so a
+  late TX thread delays RX: the bottleneck may have moved to TX.
 - **Still open at 200 Mbps:** PUCCH F2/F3 reception 191 µs avg / 469 µs max on the RX
   thread; the UL indication occasionally blocking up to ~1.4 ms (suspected `sched_lock`
   contention with the DL scheduler); and the TX side starting to overrun (TX job max
