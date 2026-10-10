@@ -882,6 +882,25 @@ static int pmd_lcore_ldpc_dec(void *arg)
   return tp->iter_count;
 }
 
+/* The device accepted the slot's encode ops and never returned some of them.  Say which
+ * slot and what was in it before aborting: the bare DevAssert left no way to tell a
+ * device that wedges at random from one that fails on a particular TB shape (seen once
+ * on the LA1200 at ~740 Mbps DL, 256QAM 2 layers full band). */
+static void enc_timeout_fatal(const nrLDPC_slot_encoding_parameters_t *p, int num_segments, int enq, int deq)
+{
+  char tbs[512];
+  int off = 0;
+  for (int i = 0; i < p->nb_TBs && off < (int)sizeof(tbs) - 128; i++) {
+    const nrLDPC_TB_encoding_parameters_t *t = &p->TBs[i];
+    off += snprintf(tbs + off, sizeof(tbs) - off,
+                    " [TB%d A %u C %u Z %u BG %u G %u Qm %u mcs %u rb %u layers %u rv %u tbslbrm %u]",
+                    i, t->A, t->C, t->Z, t->BG, t->G, t->Qm, t->mcs, t->nb_rb, t->nb_layers, t->rv_index, t->tbslbrm);
+  }
+  AssertFatal(false,
+              "%d.%d LDPC encode timeout: %d of %d ops returned (%d segments enqueued, TB mode %s), %d TB(s):%s\n",
+              p->frame, p->slot, deq, enq, num_segments, tb_mode() ? "on" : "off", p->nb_TBs, tbs);
+}
+
 // based on DPDK BBDEV throughput_pmd_lcore_ldpc_enc
 static int pmd_lcore_ldpc_enc(void *arg)
 {
@@ -917,7 +936,8 @@ static int pmd_lcore_ldpc_enc(void *arg)
   while (deq < enq) {
     deq += rte_bbdev_dequeue_ldpc_enc_ops(tp->dev_id, queue_id, &ops_deq[deq], enq - deq);
     time_out++;
-    DevAssert(time_out <= TIME_OUT_POLL);
+    if (time_out > TIME_OUT_POLL)
+      enc_timeout_fatal(nrLDPC_slot_encoding_parameters, num_segments, enq, deq);
   }
   if(ts_ldpc_encode != NULL) stop_meas(ts_ldpc_encode);
   // We report timing only once in (0,0) since the timers are merged at the end
