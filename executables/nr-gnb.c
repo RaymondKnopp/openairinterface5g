@@ -89,8 +89,8 @@ static void l1_alarm_drain(l1_alarm_ring_t *r, bool is_tx, int thresh_us)
             e->n_pdsch ? cfg : " none");
     } else {
       LOG_W(NR_PHY,
-            "%4u.%2u L1 RX overrun: %.1f us > %d us (queued %.1f + proc %.1f), ring idx %u, %llu total\n",
-            e->frame, e->slot, e->a, thresh_us, e->b, e->c, e->slot % RU_RX_SLOT_DEPTH,
+            "%4u.%2u L1 RX overrun: %.1f us > %d us (queued %.1f = txq %.1f + sched %.1f + rxq %.1f, proc %.1f), ring idx %u, %llu total\n",
+            e->frame, e->slot, e->a, thresh_us, e->b, e->d, e->e, e->b - e->d - e->e, e->c, e->slot % RU_RX_SLOT_DEPTH,
             (unsigned long long)e->count);
     }
     r->drained++;
@@ -425,6 +425,8 @@ void *L1_rx_thread(void *arg)
            e->a = e2e_;
            e->b = e2e_ - proc_;
            e->c = proc_;
+           e->d = info->txstart_tsc > info->dispatch_tsc ? (double)(info->txstart_tsc - info->dispatch_tsc) / ghz_ : 0;
+           e->e = info->push_tsc > info->txstart_tsc ? (double)(info->push_tsc - info->txstart_tsc) / ghz_ : 0;
            e->n_pdsch = 0;
            l1_alarm_publish(&gNB->rx_alarms);
          }
@@ -456,9 +458,21 @@ void *L1_tx_thread(void *arg) {
        break;
      processingData_L1tx_t *info = (processingData_L1tx_t *)NotifiedFifoData(res);
      int slot_type = nr_slot_select(&gNB->gNB_config, info->frame, info->slot);
+     const int call_slot = info->slot;
+     const uint64_t t_call = (uint64_t)clock_gettime_oai();
      START_MEAS_FULL_SLOT(&gNB->l1_tx_proc, slot_type, NR_DOWNLINK_SLOT);
      tx_func(info);
      STOP_MEAS_FULL_SLOT(&gNB->l1_tx_proc, slot_type, NR_DOWNLINK_SLOT);
+     if (cpu_meas_enabled) {
+       const uint64_t t_end = (uint64_t)clock_gettime_oai();
+       const uint64_t old_max = gNB->tx_call_all.max;
+       lag_acc(&gNB->tx_call_all, t_call, t_end);
+       if (gNB->tx_call_all.max != old_max)
+         gNB->tx_call_max_slot = call_slot;
+       const double us = (double)(t_end - t_call) / (1000.0 * get_cpu_freq_GHz());
+       if (us > 500.0) gNB->tx_call_over[0]++;
+       if (us > 1000.0) gNB->tx_call_over[1]++;
+     }
      delNotifiedFIFO_elt(res);
   }
   return NULL;
@@ -673,6 +687,8 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->rx_lag_sched);
   reset_meas(&gNB->rx_lag_rxq);
   gNB->rx_lag_txq_over500 = 0;
+  reset_meas(&gNB->tx_call_all);
+  gNB->tx_call_over[0] = gNB->tx_call_over[1] = 0;
   reset_meas(&gNB->ulsch_decoding_stats);
   reset_meas(&gNB->ts_ldpc_decode);
   reset_meas(&gNB->ul_indication_stats);
@@ -754,6 +770,12 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
     output += snprintf(output, end - output, "%25s:  >500us %llu (%.3f%%)\n", "  lag: wait TX tail",
                        (unsigned long long)gNB->rx_lag_txq_over500,
                        100.0 * gNB->rx_lag_txq_over500 / gNB->rx_lag_txq.trials);
+  output += print_meas_log(&gNB->tx_call_all, "tx_func call (all slots)", NULL, NULL, output, end - output);
+  if (gNB->tx_call_all.trials > 0 && output < end)
+    output += snprintf(output, end - output, "%25s:  >500us %llu (%.3f%%), >1ms %llu (%.3f%%), window max at slot %d\n",
+                       "tx_func call tail", (unsigned long long)gNB->tx_call_over[0],
+                       100.0 * gNB->tx_call_over[0] / gNB->tx_call_all.trials, (unsigned long long)gNB->tx_call_over[1],
+                       100.0 * gNB->tx_call_over[1] / gNB->tx_call_all.trials, gNB->tx_call_max_slot);
   output += print_meas_log(&gNB->ts_ldpc_decode, "UL segments decoding", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->ul_indication_stats, "UL Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);
