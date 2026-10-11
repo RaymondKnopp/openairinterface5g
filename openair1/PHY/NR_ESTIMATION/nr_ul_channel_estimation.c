@@ -19,6 +19,17 @@
 #include "nr_phy_common.h"
 #include "openair1/PHY/TOOLS/phy_scope_interface.h"
 #include "T.h"
+#include <time.h>
+
+/* per-job timing of the antenna jobs, read by the L1 stats dump: queue wait (push to start)
+   and run time, ns */
+uint64_t nr_chest_job_wait_ns, nr_chest_job_run_ns, nr_chest_job_run_max_ns, nr_chest_job_n;
+static inline uint64_t chest_now_ns(void)
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
 
 //#define DEBUG_CH
 //#define DEBUG_PUSCH
@@ -50,6 +61,7 @@ typedef struct puschAntennaProc_s {
   scopeData_t *scope;
   c16_t *pusch_ch_est_dmrs_pos_slot_mem;
   int dmrs_symbol_start_idx;
+  uint64_t t_push;
 } puschAntennaProc_t;
 
 __attribute__((always_inline)) inline c16_t c32x16cumulVectVectWithSteps(c16_t *in1,
@@ -76,6 +88,7 @@ __attribute__((always_inline)) inline c16_t c32x16cumulVectVectWithSteps(c16_t *
 
 static void nr_pusch_antenna_processing(void *arg)
 {
+  const uint64_t t_start = chest_now_ns();
   puschAntennaProc_t *rdata = (puschAntennaProc_t *)arg;
   unsigned char Ns = rdata->Ns;
   int nl = rdata->nl;
@@ -454,6 +467,14 @@ static void nr_pusch_antenna_processing(void *arg)
     *(rdata->noise_amp2) = noise_amp2;
     *(rdata->nest_count) = nest_count;
   }
+  const uint64_t t_end = chest_now_ns();
+  const uint64_t run = t_end - t_start;
+  __atomic_add_fetch(&nr_chest_job_wait_ns, t_start - rdata->t_push, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&nr_chest_job_run_ns, run, __ATOMIC_RELAXED);
+  __atomic_add_fetch(&nr_chest_job_n, 1, __ATOMIC_RELAXED);
+  uint64_t m = __atomic_load_n(&nr_chest_job_run_max_ns, __ATOMIC_RELAXED);
+  while (run > m && !__atomic_compare_exchange_n(&nr_chest_job_run_max_ns, &m, run, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+    ;
   completed_task_ans(rdata->ans);
 }
 
@@ -599,6 +620,7 @@ int nr_pusch_channel_estimation(PHY_VARS_gNB *gNB,
     rdata->dmrs_symbol_start_idx = dmrs_symbol_start_idx;
     // Call the nr_pusch_antenna_processing function. The last job runs on this thread,
     // which would otherwise just block in join_task_ans() below.
+    rdata->t_push = chest_now_ns();
     pushTpool_batch(gNB->threadPoolRx, task, job_id == num_jobs - 1);
   } // Antenna Loop
 

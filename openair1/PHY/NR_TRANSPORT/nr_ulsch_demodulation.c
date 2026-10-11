@@ -744,6 +744,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
      symbol (layer 0, every RX antenna, every 4th subcarrier).  A residual frequency offset
      or phase noise shows here as a phase that grows with the symbol distance; QPSK
      tolerates tens of degrees, 16QAM about ten. */
+  start_meas(&gNB->pusch_chest_diag_stats);
   joint_pv->dmrs_drift_dsym = 0;
   {
     int s0 = -1, s1 = -1;
@@ -817,6 +818,8 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
     }
   }
 
+  stop_meas(&gNB->pusch_chest_diag_stats);
+  start_meas(&gNB->pusch_chest_avg_stats);
   // averaging time domain channel estimates
   // Change to joint processing
   const uint8_t num_sp_streams = rel15_ul_ref->param_v4.numSpatialStreamIndices;
@@ -832,6 +835,8 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                              num_sp_streams);
   }
 
+  stop_meas(&gNB->pusch_chest_avg_stats);
+  start_meas(&gNB->pusch_chest_power_stats);
   // ULSCH signal and noise power measurements
   // This is same for all the UEs in the group
   allocCast2D(n0_subband_power,
@@ -869,6 +874,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
           joint_pv->ulsch_power[aa_pusch],
           joint_pv->ulsch_noise_power[aa_pusch]);
   }
+  stop_meas(&gNB->pusch_chest_power_stats);
   stop_meas(&gNB->pusch_chest_post_stats);
   stop_meas(&gNB->ulsch_channel_estimation_stats);
 

@@ -844,6 +844,9 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->ulsch_channel_estimation_stats);
   reset_meas(&gNB->pusch_channel_estimation_antenna_processing_stats);
   reset_meas(&gNB->pusch_chest_post_stats);
+  reset_meas(&gNB->pusch_chest_diag_stats);
+  reset_meas(&gNB->pusch_chest_avg_stats);
+  reset_meas(&gNB->pusch_chest_power_stats);
   reset_meas(&gNB->rx_pusch_init_stats);
   reset_meas(&gNB->pusch_scr_init_stats);
   reset_meas(&gNB->pusch_extraction_stats);
@@ -981,6 +984,19 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->ulsch_channel_estimation_stats, "  PUSCH chest (total)", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->pusch_channel_estimation_antenna_processing_stats, "   chest pool round", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->pusch_chest_post_stats, "   chest serial post", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_chest_diag_stats, "    post: diagnostics", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_chest_avg_stats, "    post: time avg", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_chest_power_stats, "    post: power meas", NULL, NULL, output, end - output);
+  {
+    extern uint64_t nr_chest_job_wait_ns, nr_chest_job_run_ns, nr_chest_job_run_max_ns, nr_chest_job_n;
+    const uint64_t n = __atomic_exchange_n(&nr_chest_job_n, 0, __ATOMIC_RELAXED);
+    const uint64_t w = __atomic_exchange_n(&nr_chest_job_wait_ns, 0, __ATOMIC_RELAXED);
+    const uint64_t r = __atomic_exchange_n(&nr_chest_job_run_ns, 0, __ATOMIC_RELAXED);
+    const uint64_t mx = __atomic_exchange_n(&nr_chest_job_run_max_ns, 0, __ATOMIC_RELAXED);
+    if (n)
+      output += snprintf(output, end - output, "    chest antenna job:  n %lu, queue wait avg %.1f us, run avg %.1f us, run max %.1f us\n",
+                         (unsigned long)n, w / 1e3 / n, r / 1e3 / n, mx / 1e3);
+  }
   output += print_meas_log(&gNB->rx_pusch_init_stats, "  PUSCH init", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->pusch_scr_init_stats, "   scrambling init", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->pusch_extraction_stats, "   init extraction", NULL, NULL, output, end - output);
