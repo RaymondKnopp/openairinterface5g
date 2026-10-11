@@ -479,6 +479,77 @@ static int fh_rx_shift(void)
   return shift;
 }
 
+/* Debug: OAI_FH_BFP_CHECK=1 decodes every BFP PRB a second time with a scalar O-RAN
+ * reference (WG4 CUS Annex A.1.2: one exponent byte, then 2*12 mantissas of iqWidth bits,
+ * MSB first, value = sign-extended mantissa << exponent) and counts disagreements with the
+ * library decompressor; =2 also makes the reference the output.  Only the aarch64 path
+ * (armral) is compared: x86 uses xran's own decompressor. */
+static int fh_bfp_check(void)
+{
+  static int mode = -1;
+  if (mode < 0) {
+    const char *s = getenv("OAI_FH_BFP_CHECK");
+    mode = s ? atoi(s) : 0;
+    if (mode)
+      LOG_I(HW, "OAI_FH_BFP_CHECK=%d: BFP PRBs %s against a scalar reference decoder\n", mode,
+            mode == 2 ? "decoded by (and compared with)" : "compared");
+  }
+  return mode;
+}
+
+static void bfp_decompress_ref(int iq_width, int n_prb, const uint8_t *src, int16_t *dst)
+{
+  const int prb_bytes = 3 * iq_width + 1;
+  for (int p = 0; p < n_prb; p++) {
+    const uint8_t *b = src + p * prb_bytes;
+    const int exponent = b[0] & 0x0f;
+    const uint8_t *m = b + 1;
+    const int nbytes = 3 * iq_width;
+    for (int k = 0; k < 24; k++) {
+      const int bitpos = k * iq_width;
+      const int byte = bitpos >> 3, off = bitpos & 7;
+      uint32_t w = (uint32_t)m[byte] << 16;
+      if (byte + 1 < nbytes)
+        w |= (uint32_t)m[byte + 1] << 8;
+      if (byte + 2 < nbytes)
+        w |= m[byte + 2];
+      int v = (int)((w >> (24 - iq_width - off)) & ((1u << iq_width) - 1));
+      if (v & (1 << (iq_width - 1)))
+        v -= 1 << iq_width;
+      int32_t s = (int32_t)v * (1 << exponent);
+      dst[p * 24 + k] = s > INT16_MAX ? INT16_MAX : (s < INT16_MIN ? INT16_MIN : (int16_t)s);
+    }
+  }
+}
+
+static void bfp_check_prbs(int iq_width, int n_prb, const uint8_t *src, int16_t *lib_out, int ant, int sym, int start_rb)
+{
+  static _Atomic uint64_t n_prbs, n_bad_prbs, n_logged;
+  int16_t ref[24 * 273];
+  if (n_prb > 273)
+    return;
+  bfp_decompress_ref(iq_width, n_prb, src, ref);
+  const int prb_bytes = 3 * iq_width + 1;
+  for (int p = 0; p < n_prb; p++) {
+    int bad = -1;
+    for (int k = 0; k < 24 && bad < 0; k++)
+      if (ref[p * 24 + k] != lib_out[p * 24 + k])
+        bad = k;
+    const uint64_t n = atomic_fetch_add(&n_prbs, 1) + 1;
+    if (bad >= 0) {
+      const uint64_t nb = atomic_fetch_add(&n_bad_prbs, 1) + 1;
+      if (atomic_fetch_add(&n_logged, 1) < 10)
+        LOG_W(HW, "BFP check: ant %d sym %d PRB %d exp %d: sample %d lib %d ref %d (lib/ref of sample 0: %d/%d)\n", ant, sym,
+              start_rb + p, src[p * prb_bytes] & 0x0f, bad, lib_out[p * 24 + bad], ref[p * 24 + bad], lib_out[p * 24], ref[p * 24]);
+      (void)nb;
+    }
+    if ((n % 2000000) == 0)
+      LOG_I(HW, "BFP check: %llu PRBs compared, %llu disagree\n", (unsigned long long)n, (unsigned long long)atomic_load(&n_bad_prbs));
+  }
+  if (fh_bfp_check() == 2)
+    memcpy(lib_out, ref, (size_t)n_prb * 24 * sizeof(int16_t));
+}
+
 /* One antenna's worth of U-plane decompression, for the thread pool. Everything the body
  * touches is indexed by ant_id -- ru->rxdataF[ant_id], the dstcp/dst buffers picked by
  * ant_id, and info->nRxPkt[cc_id][ant_id][] -- so antennas are independent. The cursors
@@ -568,6 +639,8 @@ static void xran_fh_rx_read_slot_ant(ru_info_t *ru,
             xranlib_decompress_avx512(&bfp_decom_req, &bfp_decom_rsp);
 #elif defined(__arm__) || defined(__aarch64__)
             armral_bfp_decompression(pRbElm->iqWidth, numRB, (int8_t *)src, (int16_t *)(pos + startRB * N_SC_PER_PRB));
+            if (fh_bfp_check())
+              bfp_check_prbs(pRbElm->iqWidth, numRB, src, (int16_t *)(pos + startRB * N_SC_PER_PRB), ant_id, sym_idx, startRB);
 #else
             AssertFatal(1 == 0, "BFP compression not supported on this architecture");
 #endif
