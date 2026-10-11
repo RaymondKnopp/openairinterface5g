@@ -463,6 +463,22 @@ bool is_tdd_ul_guard_slot(const struct xran_frame_config *frame_conf, int slot)
  * Function is blocking and waits for next frame/slot combination. It is unblocked
  * by oai_xran_fh_rx_callback(). It writes the current slot into parameters
  * frame/slot. */
+/* Debug: OAI_FH_RX_SHIFT=n shifts the decompressed UL samples right by n bits (0..6, default
+ * 0 = untouched), to move the receiver's input level without changing the SNR.  Used to
+ * test whether a failure depends on the absolute signal level (fixed-point range). */
+static int fh_rx_shift(void)
+{
+  static int shift = -1;
+  if (shift < 0) {
+    const char *s = getenv("OAI_FH_RX_SHIFT");
+    int v = s ? atoi(s) : 0;
+    shift = (v >= 0 && v <= 6) ? v : 0;
+    if (shift)
+      LOG_I(HW, "OAI_FH_RX_SHIFT=%d: UL U-plane samples shifted right by %d bits after decompression\n", shift, shift);
+  }
+  return shift;
+}
+
 /* One antenna's worth of U-plane decompression, for the thread pool. Everything the body
  * touches is indexed by ant_id -- ru->rxdataF[ant_id], the dstcp/dst buffers picked by
  * ant_id, and info->nRxPkt[cc_id][ant_id][] -- so antennas are independent. The cursors
@@ -558,6 +574,12 @@ static void xran_fh_rx_read_slot_ant(ru_info_t *ru,
           } else {
             printf("pRbElm->compMethod == %d is not supported\n", pRbElm->compMethod);
             exit(-1);
+          }
+          if (fh_rx_shift()) {
+            int16_t *q = (int16_t *)(pos + startRB * N_SC_PER_PRB);
+            const int sh = fh_rx_shift();
+            for (int k = 0; k < numRB * N_SC_PER_PRB * 2; k++)
+              q[k] >>= sh;
           }
             /* rxdataF is flat since develop's d0b0de4c93 (first RB at index 0), and every
              * reader -- PUSCH, PUCCH, SRS, channel estimation -- indexes it that way, so the
