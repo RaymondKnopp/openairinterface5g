@@ -756,16 +756,27 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
       const int sz = frame_parms->ofdm_symbol_size;
       const int nsc = 12 * rel15_ul_ref->rb_size;
       int64_t re = 0, im = 0, p0 = 0, p1 = 0;
+      const int nant = min(frame_parms->nb_antennas_rx, 8);
       for (int aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
         const c16_t *h0 = (const c16_t *)&joint_pv->ul_ch_estimates[aa][s0 * sz];
         const c16_t *h1 = (const c16_t *)&joint_pv->ul_ch_estimates[aa][s1 * sz];
+        int64_t are = 0, aim = 0, ap0 = 0, ap1 = 0;
         for (int k = 0; k < nsc; k += 4) {
-          re += (int64_t)h0[k].r * h1[k].r + (int64_t)h0[k].i * h1[k].i;
-          im += (int64_t)h0[k].r * h1[k].i - (int64_t)h0[k].i * h1[k].r;
-          p0 += (int64_t)h0[k].r * h0[k].r + (int64_t)h0[k].i * h0[k].i;
-          p1 += (int64_t)h1[k].r * h1[k].r + (int64_t)h1[k].i * h1[k].i;
+          are += (int64_t)h0[k].r * h1[k].r + (int64_t)h0[k].i * h1[k].i;
+          aim += (int64_t)h0[k].r * h1[k].i - (int64_t)h0[k].i * h1[k].r;
+          ap0 += (int64_t)h0[k].r * h0[k].r + (int64_t)h0[k].i * h0[k].i;
+          ap1 += (int64_t)h1[k].r * h1[k].r + (int64_t)h1[k].i * h1[k].i;
+        }
+        re += are;
+        im += aim;
+        p0 += ap0;
+        p1 += ap1;
+        if (aa < nant && ap0 > 0 && ap1 > 0) {
+          gNB->dmrs_coh_sum[aa] += sqrt((double)are * are + (double)aim * aim) / sqrt((double)ap0 * (double)ap1);
+          gNB->dmrs_pwr_db_sum[aa] += 10.0 * log10((double)ap0 / (nsc / 4));
         }
       }
+      gNB->dmrs_ant_n++;
       if (p0 > 0 && p1 > 0) {
         const double deg = atan2((double)im, (double)re) * 180.0 / M_PI;
         joint_pv->dmrs_drift_x10 = (int16_t)lround(deg * 10);

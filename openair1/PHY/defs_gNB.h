@@ -688,6 +688,11 @@ typedef struct PHY_VARS_gNB_s {
   uint64_t dmrs_drift_n;
   double dmrs_drift_abs_sum; // degrees
   int dmrs_drift_max_x10;
+  /* per RX antenna: coherence |sum H0*.H1| / sqrt(P0.P1) between the first and last DMRS
+   * symbol, and DMRS channel power (dB), summed for averaging (see the L1 stats) */
+  double dmrs_coh_sum[8];
+  double dmrs_pwr_db_sum[8];
+  uint64_t dmrs_ant_n;
   int rx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t rx_overrun_count;
   uint64_t rx_overrun_logged;

@@ -918,6 +918,14 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                        gNB->dmrs_drift_max_x10 / 10.0);
     gNB->dmrs_drift_max_x10 = 0; // per dump
   }
+  if (gNB->dmrs_ant_n > 0 && output < end) {
+    output += snprintf(output, end - output, "%25s:", "PUSCH DMRS per RX ant");
+    for (int aa = 0; aa < min(gNB->frame_parms.nb_antennas_rx, 8) && output < end; aa++)
+      output += snprintf(output, end - output, "  ant%d coh %.3f pwr %.1f dB", aa, gNB->dmrs_coh_sum[aa] / gNB->dmrs_ant_n,
+                         gNB->dmrs_pwr_db_sum[aa] / gNB->dmrs_ant_n);
+    if (output < end)
+      output += snprintf(output, end - output, "\n");
+  }
   output += print_meas_log(&gNB->rx_lag_txq, "  lag: wait TX thread", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_lag_sched, "  lag: MAC scheduler", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_lag_rxq, "  lag: wait RX thread", NULL, NULL, output, end - output);
