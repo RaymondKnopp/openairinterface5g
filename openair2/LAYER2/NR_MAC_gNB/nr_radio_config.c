@@ -1619,6 +1619,10 @@ static NR_SetupRelease_PUSCH_Config_t *config_pusch(const nr_mac_config_t *confi
   }
   NR_DMRS_UplinkConfig->dmrs_Type = NULL;
   NR_DMRS_UplinkConfig->dmrs_AdditionalPosition = NULL;
+  if (configuration->pusch_dmrs_addpos >= 0) {
+    NR_DMRS_UplinkConfig->dmrs_AdditionalPosition = calloc_or_fail(1, sizeof(*NR_DMRS_UplinkConfig->dmrs_AdditionalPosition));
+    *NR_DMRS_UplinkConfig->dmrs_AdditionalPosition = configuration->pusch_dmrs_addpos;
+  }
   NR_DMRS_UplinkConfig->phaseTrackingRS = NULL;
   NR_DMRS_UplinkConfig->maxLength = NULL;
   if (!NR_DMRS_UplinkConfig->transformPrecodingDisabled)

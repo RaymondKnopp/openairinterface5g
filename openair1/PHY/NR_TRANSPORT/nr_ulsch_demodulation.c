@@ -746,7 +746,10 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
      tolerates tens of degrees, 16QAM about ten. */
   start_meas(&gNB->pusch_chest_diag_stats);
   joint_pv->dmrs_drift_dsym = 0;
-  {
+  /* sampled on 1 PUSCH in 16: double-precision per-antenna and per-sub-band sums cost ~50 us
+     on the A72 when run for every PUSCH. dmrs_drift_dsym == 0 marks an unsampled PUSCH. */
+  static unsigned dmrs_diag_cnt;
+  if ((dmrs_diag_cnt++ & 15) == 0) {
     int s0 = -1, s1 = -1;
     for (int s = rel15_ul_ref->start_symbol_index; s < end_symbol; s++)
       if ((rel15_ul_ref->ul_dmrs_symb_pos >> s) & 1) {
@@ -854,13 +857,20 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
     joint_pv->ulsch_noise_power[aa_pusch] = 0;
     int64_t symb_energy = 0;
 
+    /* DMRS symbols only: a DMRS symbol carries the same total energy as a data symbol
+       (CDM group without data is boosted by the same ratio it leaves empty), and reading
+       every symbol of every antenna cost ~170 us on the A72 serially on the RX thread */
+    int n_meas = 0;
     for (uint8_t symbol = rel15_ul_ref->start_symbol_index; symbol < end_symbol; symbol++) {
+      if (!((rel15_ul_ref->ul_dmrs_symb_pos >> symbol) & 0x01))
+        continue;
       int offset0 = ((slot % RU_RX_SLOT_DEPTH) * frame_parms->symbols_per_slot + symbol) * frame_parms->ofdm_symbol_size;
       int offset = offset0 + start_sc;
       c16_t *ul_ch = &gNB->common_vars.rxdataF[aarx][offset];
       symb_energy += signal_energy_nodc(ul_ch, rel15_ul_ref->rb_size * NR_NB_SC_PER_RB);
+      n_meas++;
     }
-    joint_pv->ulsch_power[aa_pusch] += (symb_energy / rel15_ul_ref->nr_of_symbols);
+    joint_pv->ulsch_power[aa_pusch] += n_meas ? symb_energy / n_meas : 0;
 
     joint_pv->ulsch_noise_power[aa_pusch] +=
         average_u32(&n0_subband_power[aarx][rel15_ul_ref->bwp_start + rel15_ul_ref->rb_start], rel15_ul_ref->rb_size);
