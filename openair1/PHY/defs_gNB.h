@@ -383,6 +383,28 @@ typedef struct {
   uint64_t drained; /* consumer only */
 } l1_alarm_ring_t;
 
+/* One ULSCH TB that failed CRC: the PHY's view of it (SNR, timing, allocation) at the
+ * time, so a run of failures can be lined up in time and against the link.  Several
+ * threads may post-decode at once, so a record is claimed with a fetch-add and tagged
+ * with its sequence number once written; the stats thread prints only tagged records. */
+#define UL_FAIL_RING 64
+typedef struct {
+  _Atomic uint64_t tag; /* claim index + 1 once the record is complete */
+  uint64_t t_ns;
+  uint32_t frame, slot;
+  uint32_t tbs, C;
+  uint16_t rnti, rb_start, rb_size;
+  int16_t snr_x10, delay;
+  uint8_t pid, round, rv, mcs, qm, layers, delay_valid;
+} ul_fail_rec_t;
+
+typedef struct {
+  ul_fail_rec_t rec[UL_FAIL_RING];
+  _Atomic uint64_t claim; /* producers */
+  uint64_t drained; /* stats thread only */
+  uint64_t last_t_ns; /* stats thread only */
+} ul_fail_ring_t;
+
 /* The encoded DLSCH bits of one slot, handed from the encoding stage to the generation
    stage.  This used to be a stack VLA inside nr_generate_pdsch(), which forced the two
    stages to live in one call; holding it here lets them run on different slots at once.
@@ -653,6 +675,7 @@ typedef struct PHY_VARS_gNB_s {
   /// alarm detail rings; RT threads produce, the stats thread prints. See l1_alarm_ring_t.
   l1_alarm_ring_t tx_alarms;
   l1_alarm_ring_t rx_alarms;
+  ul_fail_ring_t ul_fails;
   int rx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t rx_overrun_count;
   uint64_t rx_overrun_logged;

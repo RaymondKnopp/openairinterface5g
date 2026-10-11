@@ -64,6 +64,28 @@ static inline void l1_alarm_publish(l1_alarm_ring_t *r)
 
 /* Drained from the stats thread, which is unpinned and non-RT: the write(2) inside LOG_W
    is harmless there. */
+/* Print the ULSCH CRC failures recorded since the last call; see ul_fail_ring_t */
+static void ul_fail_drain(ul_fail_ring_t *r)
+{
+  const uint64_t head = atomic_load_explicit(&r->claim, memory_order_acquire);
+  if (head - r->drained > UL_FAIL_RING) {
+    LOG_W(NR_PHY, "UL CRC fail: %llu record(s) lost, ring holds %u\n", (unsigned long long)(head - r->drained - UL_FAIL_RING), UL_FAIL_RING);
+    r->drained = head - UL_FAIL_RING;
+  }
+  while (r->drained < head) {
+    const ul_fail_rec_t *e = &r->rec[r->drained % UL_FAIL_RING];
+    if (atomic_load_explicit(&e->tag, memory_order_acquire) != r->drained + 1)
+      break; // still being written; next call
+    const double dt_ms = r->last_t_ns ? (double)(e->t_ns - r->last_t_ns) / 1e6 : 0;
+    r->last_t_ns = e->t_ns;
+    LOG_W(NR_PHY,
+          "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u SNR %.1f dB delay %d%s, +%.1f ms\n",
+          e->frame, e->slot, (unsigned long long)r->drained + 1, e->rnti, e->pid, e->round, e->rv, e->mcs, e->qm, e->layers,
+          e->rb_start, e->rb_size, e->tbs, e->C, e->snr_x10 / 10.0, e->delay, e->delay_valid ? "" : " (invalid)", dt_ms);
+    r->drained++;
+  }
+}
+
 static void l1_alarm_drain(l1_alarm_ring_t *r, bool is_tx, int thresh_us)
 {
   const uint64_t head = atomic_load_explicit(&r->seq, memory_order_acquire);
@@ -1042,6 +1064,7 @@ void *nrL1_stats_thread(void *param) {
        a blocking write(2) on the calling thread, which must never be L1_tx/L1_rx. */
     l1_alarm_drain(&gNB->tx_alarms, true, gNB->tx_overrun_us);
     l1_alarm_drain(&gNB->rx_alarms, false, gNB->rx_overrun_us);
+    ul_fail_drain(&gNB->ul_fails);
     /* and anything ru_thread deferred: it drives fronthaul timing and must never write */
     rt_log_drain();
   }

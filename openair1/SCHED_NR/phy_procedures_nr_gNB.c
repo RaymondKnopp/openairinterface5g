@@ -600,6 +600,30 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
             ulsch_harq->ulsch_pdu.rb_size,
             pusch_pdu->pusch_data.tb_size);
       nr_fill_indication(gNB, ulsch->frame, ulsch->slot, pusch, pusch_pdu, stats, NULL, 0, crc, pdu);
+      {
+        /* record the failure for the stats thread; see ul_fail_ring_t */
+        ul_fail_ring_t *r = &gNB->ul_fails;
+        const uint64_t n = atomic_fetch_add_explicit(&r->claim, 1, memory_order_relaxed);
+        ul_fail_rec_t *e = &r->rec[n % UL_FAIL_RING];
+        e->t_ns = (uint64_t)clock_gettime_oai();
+        e->frame = ulsch->frame;
+        e->slot = ulsch->slot;
+        e->tbs = pusch_pdu->pusch_data.tb_size;
+        e->C = ulsch_harq->C;
+        e->rnti = pusch_pdu->rnti;
+        e->rb_start = pusch_pdu->rb_start;
+        e->rb_size = pusch_pdu->rb_size;
+        e->snr_x10 = dB_fixed_x10(pusch->ulsch_power_tot) - dB_fixed_x10(pusch->ulsch_noise_power_tot);
+        e->delay = pusch->delay.est_delay;
+        e->delay_valid = pusch->delay.valid;
+        e->pid = pusch_pdu->pusch_data.harq_process_id;
+        e->round = ulsch_harq->round;
+        e->rv = pusch_pdu->pusch_data.rv_index;
+        e->mcs = pusch_pdu->mcs_index;
+        e->qm = pusch_pdu->qam_mod_order;
+        e->layers = pusch_pdu->nrOfLayers;
+        atomic_store_explicit(&e->tag, n + 1, memory_order_release);
+      }
       gNBdumpScopeData(gNB, ulsch->slot, ulsch->frame, "ULSCH_NACK");
       LOG_D(PHY, "ULSCH %d in error\n",ULSCH_id);
       ulsch->last_iteration_cnt = ulsch->max_ldpc_iterations; // Setting to max_ldpc_iterations is sufficient given that this variable is only used for checking for failure
