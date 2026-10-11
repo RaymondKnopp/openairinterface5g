@@ -479,6 +479,22 @@ static int fh_rx_shift(void)
   return shift;
 }
 
+/* Debug: OAI_FH_RX_ANT_MASK=<hex> zeroes the UL U-plane samples of the RX antennas whose bit
+ * is set (e.g. 0xc = antennas 2 and 3), to run the receiver on a subset of branches. */
+static uint32_t fh_rx_ant_mask(void)
+{
+  static int init = 0;
+  static uint32_t mask = 0;
+  if (!init) {
+    const char *s = getenv("OAI_FH_RX_ANT_MASK");
+    mask = s ? (uint32_t)strtoul(s, NULL, 0) : 0;
+    if (mask)
+      LOG_I(HW, "OAI_FH_RX_ANT_MASK=0x%x: UL samples of these RX antennas are zeroed\n", mask);
+    init = 1;
+  }
+  return mask;
+}
+
 /* Debug: OAI_FH_BFP_CHECK=1 decodes every BFP PRB a second time with a scalar O-RAN
  * reference (WG4 CUS Annex A.1.2: one exponent byte, then 2*12 mantissas of iqWidth bits,
  * MSB first, value = sign-extended mantissa << exponent) and counts disagreements with the
@@ -648,6 +664,8 @@ static void xran_fh_rx_read_slot_ant(ru_info_t *ru,
             printf("pRbElm->compMethod == %d is not supported\n", pRbElm->compMethod);
             exit(-1);
           }
+          if ((fh_rx_ant_mask() >> ant_id) & 1)
+            memset(pos + startRB * N_SC_PER_PRB, 0, (size_t)numRB * N_SC_PER_PRB * sizeof(int32_t));
           if (fh_rx_shift()) {
             int16_t *q = (int16_t *)(pos + startRB * N_SC_PER_PRB);
             const int sh = fh_rx_shift();
