@@ -927,6 +927,18 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
     if (output < end)
       output += snprintf(output, end - output, "\n");
   }
+  if (gNB->dmrs_sb_n > 0 && output < end) {
+    output += snprintf(output, end - output, "PUSCH DMRS coherence / power per 25-PRB sub-band (n %llu PUSCHs >= 200 PRB):\n",
+                       (unsigned long long)gNB->dmrs_sb_n);
+    for (int aa = 0; aa < min(gNB->frame_parms.nb_antennas_rx, 8) && output < end; aa++) {
+      output += snprintf(output, end - output, "  ant%d:", aa);
+      for (int sb = 0; sb < 11 && output < end; sb++)
+        output += snprintf(output, end - output, " %.2f/%.0f", gNB->dmrs_sb_coh_sum[aa][sb] / gNB->dmrs_sb_n,
+                           gNB->dmrs_sb_pwr_sum[aa][sb] / gNB->dmrs_sb_n);
+      if (output < end)
+        output += snprintf(output, end - output, "\n");
+    }
+  }
   output += print_meas_log(&gNB->rx_lag_txq, "  lag: wait TX thread", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_lag_sched, "  lag: MAC scheduler", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_lag_rxq, "  lag: wait RX thread", NULL, NULL, output, end - output);

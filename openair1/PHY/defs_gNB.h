@@ -694,6 +694,11 @@ typedef struct PHY_VARS_gNB_s {
   double dmrs_pwr_db_sum[8];
   double dmrs_phase_abs_sum[8]; // |phase| first->last DMRS symbol, degrees
   uint64_t dmrs_ant_n;
+  /* per RX antenna and 25-PRB sub-band (absolute PRB / 25), over PUSCHs of >= 200 PRBs:
+   * coherence between the first and last DMRS symbol, and DMRS power (dB) */
+  double dmrs_sb_coh_sum[8][11];
+  double dmrs_sb_pwr_sum[8][11];
+  uint64_t dmrs_sb_n;
   int rx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t rx_overrun_count;
   uint64_t rx_overrun_logged;

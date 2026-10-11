@@ -778,6 +778,31 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
         }
       }
       gNB->dmrs_ant_n++;
+      if (rel15_ul_ref->rb_size >= 200) {
+        /* the same coherence per 25-PRB sub-band, to locate a frequency-dependent defect */
+        for (int aa = 0; aa < nant; aa++) {
+          const c16_t *h0 = (const c16_t *)&joint_pv->ul_ch_estimates[aa][s0 * sz];
+          const c16_t *h1 = (const c16_t *)&joint_pv->ul_ch_estimates[aa][s1 * sz];
+          for (int sb = 0; sb < 11; sb++) {
+            const int k0 = (sb * 25 - rel15_ul_ref->rb_start) * 12;
+            const int k1 = min(((sb + 1) * 25 - rel15_ul_ref->rb_start) * 12, nsc);
+            if (k0 < 0 || k0 >= k1)
+              continue;
+            int64_t bre = 0, bim = 0, bp0 = 0, bp1 = 0;
+            for (int k = k0; k < k1; k += 2) {
+              bre += (int64_t)h0[k].r * h1[k].r + (int64_t)h0[k].i * h1[k].i;
+              bim += (int64_t)h0[k].r * h1[k].i - (int64_t)h0[k].i * h1[k].r;
+              bp0 += (int64_t)h0[k].r * h0[k].r + (int64_t)h0[k].i * h0[k].i;
+              bp1 += (int64_t)h1[k].r * h1[k].r + (int64_t)h1[k].i * h1[k].i;
+            }
+            if (bp0 > 0 && bp1 > 0) {
+              gNB->dmrs_sb_coh_sum[aa][sb] += sqrt((double)bre * bre + (double)bim * bim) / sqrt((double)bp0 * (double)bp1);
+              gNB->dmrs_sb_pwr_sum[aa][sb] += 10.0 * log10((double)bp0 / ((k1 - k0) / 2));
+            }
+          }
+        }
+        gNB->dmrs_sb_n++;
+      }
       if (p0 > 0 && p1 > 0) {
         const double deg = atan2((double)im, (double)re) * 180.0 / M_PI;
         joint_pv->dmrs_drift_x10 = (int16_t)lround(deg * 10);
