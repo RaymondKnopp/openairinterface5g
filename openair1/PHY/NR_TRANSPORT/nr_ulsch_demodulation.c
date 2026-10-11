@@ -702,6 +702,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
     }
   }
 
+  start_meas(&gNB->pusch_chest_post_stats);
   // PTRS processing.
   const bool is_ptrs = rel15_ul_ref->pdu_bit_map & PUSCH_PDU_BITMAP_PUSCH_PTRS;
   c16_t cpe[NR_SYMBOLS_PER_SLOT];
@@ -868,6 +869,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
           joint_pv->ulsch_power[aa_pusch],
           joint_pv->ulsch_noise_power[aa_pusch]);
   }
+  stop_meas(&gNB->pusch_chest_post_stats);
   stop_meas(&gNB->ulsch_channel_estimation_stats);
 
   start_meas(&gNB->rx_pusch_init_stats);
@@ -905,12 +907,14 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   int16_t scrambling_sequences[group_size][max_G + 96] __attribute__((aligned(32)));
   int16_t *scrambling_sequences_arr[group_size];
 
+  start_meas(&gNB->pusch_scr_init_stats);
   for (int u = 0; u < group_size; u++) {
     scrambling_sequences_arr[u] = scrambling_sequences[u];
     const nfapi_nr_pusch_pdu_t *p = rel15_ul_group[u];
     int G_u = nr_get_G(p->rb_size, p->nr_of_symbols, nb_re_dmrs, number_dmrs_symbols, unav_res, p->qam_mod_order, p->nrOfLayers);
     nr_codeword_unscrambling_init(scrambling_sequences_arr[u], G_u, 0, p->data_scrambling_id, p->rnti);
   }
+  stop_meas(&gNB->pusch_scr_init_stats);
 
   // Computation of channel levels
   int nb_re_pusch = 0, meas_symbol = -1;

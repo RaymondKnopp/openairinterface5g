@@ -841,6 +841,13 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->ul_indication_stats);
   reset_meas(&gNB->slot_indication_stats);
   reset_meas(&gNB->rx_pusch_stats);
+  reset_meas(&gNB->ulsch_channel_estimation_stats);
+  reset_meas(&gNB->pusch_channel_estimation_antenna_processing_stats);
+  reset_meas(&gNB->pusch_chest_post_stats);
+  reset_meas(&gNB->rx_pusch_init_stats);
+  reset_meas(&gNB->pusch_scr_init_stats);
+  reset_meas(&gNB->pusch_extraction_stats);
+  reset_meas(&gNB->rx_pusch_symbol_processing_stats);
   reset_meas(&gNB->rx_prach);
   reset_meas(&gNB->rx_i0_meas);
   gNB->rx_i0_skipped = 0;
@@ -971,6 +978,13 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->ul_indication_stats, "UL Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_pusch_stats, "PUSCH inner-receiver", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->ulsch_channel_estimation_stats, "  PUSCH chest (total)", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_channel_estimation_antenna_processing_stats, "   chest pool round", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_chest_post_stats, "   chest serial post", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_pusch_init_stats, "  PUSCH init", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_scr_init_stats, "   scrambling init", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->pusch_extraction_stats, "   init extraction", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_pusch_symbol_processing_stats, "  PUSCH symbol proc", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_prach, "PRACH RX", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_i0_meas, "I0 measurements", NULL, NULL, output, end - output);
   output += snprintf(output, end - output, "   I0 measurements skipped:  %lu UL slots (busy: PUSCH/PUCCH)\n", gNB->rx_i0_skipped);
