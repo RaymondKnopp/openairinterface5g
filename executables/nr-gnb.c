@@ -223,6 +223,7 @@ static void tx_func(processingData_L1tx_t *info)
   }
 
   clear_slot_beamid(gNB, slot_tx);
+  gNB->last_tx_abs_slot = frame_tx * gNB->frame_parms.slots_per_frame + slot_tx;
 
   /* Wait for a free scheduler response.  Never blocks serially (tx_gen() holds at most
    * two); split, it blocks only if tx_gen() has fallen TX_SCHED_RING - 2 slots behind,
@@ -912,6 +913,19 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                        (unsigned long long)gNB->rx_lag_over[0], 100.0 * gNB->rx_lag_over[0] / gNB->rx_dispatch_lag.trials,
                        (unsigned long long)gNB->rx_lag_over[1], 100.0 * gNB->rx_lag_over[1] / gNB->rx_dispatch_lag.trials,
                        (unsigned long long)gNB->rx_lag_over[2], 100.0 * gNB->rx_lag_over[2] / gNB->rx_dispatch_lag.trials);
+  {
+    uint64_t tot = 0;
+    for (int i = 0; i < 24; i++)
+      tot += gNB->early_ind_lag_hist[i];
+    if (tot && output < end) {
+      output += snprintf(output, end - output, "%25s: (%llu)", "early UL ind: tx - rx slots", (unsigned long long)tot);
+      for (int i = 0; i < 24 && output < end; i++)
+        if (gNB->early_ind_lag_hist[i])
+          output += snprintf(output, end - output, " %d%s:%.1f%%", i, i == 23 ? "+" : "", 100.0 * gNB->early_ind_lag_hist[i] / tot);
+      if (output < end)
+        output += snprintf(output, end - output, "\n");
+    }
+  }
   if (gNB->dmrs_drift_n > 0 && output < end) {
     output += snprintf(output, end - output, "%25s:  n %llu, avg |phase| %.1f deg, max %.1f deg (first to last DMRS symbol)\n",
                        "PUSCH DMRS drift", (unsigned long long)gNB->dmrs_drift_n, gNB->dmrs_drift_abs_sum / gNB->dmrs_drift_n,

@@ -694,6 +694,10 @@ typedef struct PHY_VARS_gNB_s {
   double dmrs_pwr_db_sum[8];
   double dmrs_phase_abs_sum[8]; // |phase| first->last DMRS symbol, degrees
   uint64_t dmrs_ant_n;
+  /* Diagnostic: slot most recently given to tx_func() (stage A), and, at the early UL
+   * indication, slots between that and the RX job's own slot (normally about sl_ahead) */
+  _Atomic int last_tx_abs_slot;
+  uint64_t early_ind_lag_hist[24];
   /* per RX antenna and 25-PRB sub-band (absolute PRB / 25), over PUSCHs of >= 200 PRBs:
    * coherence between the first and last DMRS symbol, and DMRS power (dB) */
   double dmrs_sb_coh_sum[8][11];

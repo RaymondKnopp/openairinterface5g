@@ -1547,8 +1547,13 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
       && (UL_INFO->rach_ind.number_of_pdus > 0 || UL_INFO->uci_ind.num_ucis > 0
           || UL_INFO->srs_ind.number_of_pdus > 0
           || UL_INFO->srs_toa_vendor_ext_ind.num_ta > 0)) {
+    {
+      const int spf = gNB->frame_parms.slots_per_frame, span = 1024 * spf;
+      const int d = ((gNB->last_tx_abs_slot - (frame_rx * spf + slot_rx)) % span + span) % span;
+      gNB->early_ind_lag_hist[d < 23 ? d : 23]++;
+    }
     gNB->if_inst->NR_UL_indication(UL_INFO);
-    UL_INFO->rach_ind.number_of_pdus = 0;
+    UL_INFO->uci_ind.num_ucis = 0;
     UL_INFO->uci_ind.num_ucis = 0;
     UL_INFO->srs_ind.number_of_pdus = 0;
     UL_INFO->srs_toa_vendor_ext_ind.num_ta = 0;
