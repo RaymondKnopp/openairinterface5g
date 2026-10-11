@@ -620,6 +620,13 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         e->drift_x10 = pusch->dmrs_drift_x10;
         e->pwr_ratio_x10 = pusch->dmrs_pwr_ratio_x10;
         e->dsym = pusch->dmrs_drift_dsym;
+        e->dmrs_pos = pusch_pdu->ul_dmrs_symb_pos;
+        e->cdm = pusch_pdu->num_dmrs_cdm_grps_no_data;
+        e->dmrs_type = pusch_pdu->dmrs_config_type;
+        e->tp = pusch_pdu->transform_precoding;
+        e->start_sym = pusch_pdu->start_symbol_index;
+        e->nsym = pusch_pdu->nr_of_symbols;
+        e->scid = pusch_pdu->scid;
         e->pid = pusch_pdu->pusch_data.harq_process_id;
         e->round = ulsch_harq->round;
         e->rv = pusch_pdu->pusch_data.rv_index;

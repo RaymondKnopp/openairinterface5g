@@ -401,7 +401,9 @@ typedef struct {
   uint16_t rnti, rb_start, rb_size;
   int16_t snr_x10, delay;
   int16_t drift_x10, pwr_ratio_x10;
+  uint16_t dmrs_pos;
   uint8_t pid, round, rv, mcs, qm, layers, delay_valid, dsym;
+  uint8_t cdm, dmrs_type, tp, start_sym, nsym, scid;
 } ul_fail_rec_t;
 
 typedef struct {
