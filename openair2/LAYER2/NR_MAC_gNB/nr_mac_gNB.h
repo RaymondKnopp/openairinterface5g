@@ -1370,6 +1370,12 @@ typedef struct {
 typedef struct gNB_MAC_INST_s {
   /// per-slot-of-frame UL reception outcome, see nr_ul_slot_stat_t
   nr_ul_slot_stat_t ul_slot_stats[NR_MAX_SLOTS_PER_FRAME];
+  /* Diagnostic: slots between the PUCCH carrying a DL HARQ-ACK and the slot the scheduler is
+   * planning when the ACK reaches the MAC (bucket 15 = 15 or more).  The scheduler plans
+   * sl_ahead slots before the air, so this is the HARQ feedback delay seen by the DL scheduler. */
+  int last_sched_frame;
+  int last_sched_slot;
+  uint64_t harq_fb_lat_hist[16];
   /// F1-C/U network configuration (addresses and ports)
   f1ap_net_config_t net_config;
   /// Nvipc parameters for FAPI interface with Aerial

@@ -939,6 +939,12 @@ void handle_nr_uci_pucch_0_1(module_id_t mod_id, int cell_id, frame_t frame, slo
     }
   }
   NR_UE_sched_ctrl_t *sched_ctrl = &UE->UE_sched_ctrl;
+  if (((uci_01->pduBitmap >> 1) & 0x01) && uci_01->harq.num_harq > 0) {
+    const int spf = cell->frame_structure.numb_slots_frame;
+    const int span = 1024 * spf;
+    const int d = (((nrmac->last_sched_frame * spf + nrmac->last_sched_slot) - (frame * spf + slot)) % span + span) % span;
+    nrmac->harq_fb_lat_hist[d < 15 ? d : 15]++;
+  }
   if (((uci_01->pduBitmap >> 1) & 0x01)) {
     // iterate over received harq bits
     for (int harq_bit = 0; harq_bit < uci_01->harq.num_harq; harq_bit++) {

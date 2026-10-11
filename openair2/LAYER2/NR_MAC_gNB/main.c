@@ -233,6 +233,19 @@ void *nrmac_stats_thread(void *arg) {
         }
       }
     }
+    /* HARQ-ACK feedback delay as seen by the DL scheduler; see gNB_MAC_INST::harq_fb_lat_hist */
+    {
+      uint64_t tot = 0;
+      for (int i = 0; i < 16; i++)
+        tot += gNB->harq_fb_lat_hist[i];
+      if (tot) {
+        p += snprintf(p, end - p, "PUCCH HARQ-ACK to scheduler, slots (%llu):", (unsigned long long)tot);
+        for (int i = 0; i < 16 && p < end; i++)
+          if (gNB->harq_fb_lat_hist[i])
+            p += snprintf(p, end - p, " %d%s:%.1f%%", i, i == 15 ? "+" : "", 100.0 * gNB->harq_fb_lat_hist[i] / tot);
+        p += snprintf(p, end - p, "\n");
+      }
+    }
     /* Per-slot-of-frame UL outcome.  Only slots that actually carry PUSCH appear, so the
        table doubles as a map of where the scheduler puts UL in the TDD pattern.  Printed
        once rather than inside the per-cell loop above: ul_slot_stats lives on the MAC

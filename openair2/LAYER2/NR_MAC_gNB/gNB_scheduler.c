@@ -140,6 +140,8 @@ void gNB_dlsch_ulsch_scheduler(module_id_t module_idP, const int cell_id, frame_
   NR_ServingCellConfigCommon_t *scc = cc->ServingCellConfigCommon;
 
   NR_SCHED_LOCK(&gNB->sched_lock);
+  gNB->last_sched_frame = frame;
+  gNB->last_sched_slot = slot;
   int slots_frame = cell->frame_structure.numb_slots_frame;
   clear_beam_information(&cell->beam_info, frame, slot, slots_frame);
 
