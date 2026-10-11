@@ -627,6 +627,26 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         e->start_sym = pusch_pdu->start_symbol_index;
         e->nsym = pusch_pdu->nr_of_symbols;
         e->scid = pusch_pdu->scid;
+        /* which symbols look like type-1 DMRS with no data in the other CDM group: energy on
+           the even subcarriers only. Shows where the UE actually put its DMRS. */
+        e->comb_mask = 0;
+        {
+          const NR_DL_FRAME_PARMS *fp = &gNB->frame_parms;
+          const int sc0 = (pusch_pdu->bwp_start + pusch_pdu->rb_start) * NR_NB_SC_PER_RB;
+          const int nsc = pusch_pdu->rb_size * NR_NB_SC_PER_RB;
+          for (int sy = pusch_pdu->start_symbol_index; sy < pusch_pdu->start_symbol_index + pusch_pdu->nr_of_symbols && sy < 16; sy++) {
+            int64_t ev = 0, od = 0;
+            for (int aa = 0; aa < fp->nb_antennas_rx; aa++) {
+              const c16_t *x = (const c16_t *)&gNB->common_vars.rxdataF[aa][((ulsch->slot % RU_RX_SLOT_DEPTH) * fp->symbols_per_slot + sy) * fp->ofdm_symbol_size + sc0];
+              for (int k = 0; k < nsc; k += 2) {
+                ev += (int64_t)x[k].r * x[k].r + (int64_t)x[k].i * x[k].i;
+                od += (int64_t)x[k + 1].r * x[k + 1].r + (int64_t)x[k + 1].i * x[k + 1].i;
+              }
+            }
+            if (od * 8 < ev)
+              e->comb_mask |= 1 << sy;
+          }
+        }
         e->pid = pusch_pdu->pusch_data.harq_process_id;
         e->round = ulsch_harq->round;
         e->rv = pusch_pdu->pusch_data.rv_index;

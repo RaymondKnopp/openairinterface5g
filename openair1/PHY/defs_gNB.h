@@ -404,6 +404,7 @@ typedef struct {
   uint16_t dmrs_pos;
   uint8_t pid, round, rv, mcs, qm, layers, delay_valid, dsym;
   uint8_t cdm, dmrs_type, tp, start_sym, nsym, scid;
+  uint16_t comb_mask; // symbols whose odd subcarriers are empty (DMRS with 2 CDM groups) in the received signal
 } ul_fail_rec_t;
 
 typedef struct {
