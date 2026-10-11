@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#include <math.h>
 #include "PHY/defs_gNB.h"
 #include "PHY/phy_extern.h"
 #include "nfapi_nr_interface_scf.h"
@@ -737,6 +738,46 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
 
   if (dmrs_symb_idx > 0)
     nvar /= (dmrs_symb_idx * total_layers);
+
+  /* Diagnostic: how far the channel estimate rotates between the first and last DMRS
+     symbol (layer 0, every RX antenna, every 4th subcarrier).  A residual frequency offset
+     or phase noise shows here as a phase that grows with the symbol distance; QPSK
+     tolerates tens of degrees, 16QAM about ten. */
+  joint_pv->dmrs_drift_dsym = 0;
+  {
+    int s0 = -1, s1 = -1;
+    for (int s = rel15_ul_ref->start_symbol_index; s < end_symbol; s++)
+      if ((rel15_ul_ref->ul_dmrs_symb_pos >> s) & 1) {
+        if (s0 < 0)
+          s0 = s;
+        s1 = s;
+      }
+    if (s0 >= 0 && s1 > s0) {
+      const int sz = frame_parms->ofdm_symbol_size;
+      const int nsc = 12 * rel15_ul_ref->rb_size;
+      int64_t re = 0, im = 0, p0 = 0, p1 = 0;
+      for (int aa = 0; aa < frame_parms->nb_antennas_rx; aa++) {
+        const c16_t *h0 = (const c16_t *)&joint_pv->ul_ch_estimates[aa][s0 * sz];
+        const c16_t *h1 = (const c16_t *)&joint_pv->ul_ch_estimates[aa][s1 * sz];
+        for (int k = 0; k < nsc; k += 4) {
+          re += (int64_t)h0[k].r * h1[k].r + (int64_t)h0[k].i * h1[k].i;
+          im += (int64_t)h0[k].r * h1[k].i - (int64_t)h0[k].i * h1[k].r;
+          p0 += (int64_t)h0[k].r * h0[k].r + (int64_t)h0[k].i * h0[k].i;
+          p1 += (int64_t)h1[k].r * h1[k].r + (int64_t)h1[k].i * h1[k].i;
+        }
+      }
+      if (p0 > 0 && p1 > 0) {
+        const double deg = atan2((double)im, (double)re) * 180.0 / M_PI;
+        joint_pv->dmrs_drift_x10 = (int16_t)lround(deg * 10);
+        joint_pv->dmrs_pwr_ratio_x10 = (int16_t)lround(100.0 * log10((double)p1 / (double)p0));
+        joint_pv->dmrs_drift_dsym = s1 - s0;
+        gNB->dmrs_drift_n++;
+        gNB->dmrs_drift_abs_sum += fabs(deg);
+        if (abs(joint_pv->dmrs_drift_x10) > gNB->dmrs_drift_max_x10)
+          gNB->dmrs_drift_max_x10 = abs(joint_pv->dmrs_drift_x10);
+      }
+    }
+  }
 
   // averaging time domain channel estimates
   // Change to joint processing

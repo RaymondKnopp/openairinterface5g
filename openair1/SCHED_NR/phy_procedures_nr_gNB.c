@@ -617,6 +617,9 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         e->snr_x10 = dB_fixed_x10(pusch->ulsch_power_tot) - dB_fixed_x10(pusch->ulsch_noise_power_tot);
         e->delay = pusch->delay.est_delay;
         e->delay_valid = pusch->delay.valid;
+        e->drift_x10 = pusch->dmrs_drift_x10;
+        e->pwr_ratio_x10 = pusch->dmrs_pwr_ratio_x10;
+        e->dsym = pusch->dmrs_drift_dsym;
         e->pid = pusch_pdu->pusch_data.harq_process_id;
         e->round = ulsch_harq->round;
         e->rv = pusch_pdu->pusch_data.rv_index;

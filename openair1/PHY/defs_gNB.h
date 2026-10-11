@@ -251,6 +251,11 @@ typedef struct {
   uint32_t ulsch_power[8];
   /// total signal over antennas
   uint32_t ulsch_power_tot;
+  /* diagnostic: phase (0.1 deg) and power ratio (0.1 dB) between the channel estimates of
+   * the first and last DMRS symbol of this PUSCH (layer 0, all RX); dsym = symbols apart */
+  int16_t dmrs_drift_x10;
+  int16_t dmrs_pwr_ratio_x10;
+  uint8_t dmrs_drift_dsym;
   /// measured RX noise power
   uint32_t ulsch_noise_power[8];
   /// total noise over antennas
@@ -395,7 +400,8 @@ typedef struct {
   uint32_t tbs, C, tbslbrm;
   uint16_t rnti, rb_start, rb_size;
   int16_t snr_x10, delay;
-  uint8_t pid, round, rv, mcs, qm, layers, delay_valid;
+  int16_t drift_x10, pwr_ratio_x10;
+  uint8_t pid, round, rv, mcs, qm, layers, delay_valid, dsym;
 } ul_fail_rec_t;
 
 typedef struct {
@@ -676,6 +682,10 @@ typedef struct PHY_VARS_gNB_s {
   l1_alarm_ring_t tx_alarms;
   l1_alarm_ring_t rx_alarms;
   ul_fail_ring_t ul_fails;
+  /* PUSCH DMRS phase drift over every PUSCH with >= 2 DMRS symbols (see NR_gNB_PUSCH) */
+  uint64_t dmrs_drift_n;
+  double dmrs_drift_abs_sum; // degrees
+  int dmrs_drift_max_x10;
   int rx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t rx_overrun_count;
   uint64_t rx_overrun_logged;
