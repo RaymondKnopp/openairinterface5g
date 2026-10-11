@@ -526,8 +526,11 @@ static int collect_dl_candidates(nr_cell_sched_t *cell,
       };
     } else {
       /* new transmission candidate */
-      if (sched_ctrl->available_dl_harq.head < 0)
+      if (sched_ctrl->available_dl_harq.head < 0) {
+        if (sched_ctrl->num_total_bytes > 0) // as of the last buffer update
+          UE->mac_stats.dl_no_harq++;
         continue;
+      }
 
       update_dlsch_buffer(frame, slot, UE);
 

@@ -788,6 +788,8 @@ typedef struct NR_mac_stats {
   NR_mac_dir_stats_t ul;
   uint32_t ulsch_DTX;
   uint64_t ulsch_total_bytes_scheduled;
+  /* DL slots in which the UE had data queued but no free HARQ process for a new TB */
+  uint64_t dl_no_harq;
   uint32_t pucch0_DTX;
   int cumul_rsrp;
   uint32_t num_rsrp_meas;

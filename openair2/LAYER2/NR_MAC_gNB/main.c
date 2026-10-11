@@ -412,6 +412,12 @@ size_t dump_mac_stats(gNB_MAC_INST *gNB, const nr_cell_sched_t *cell, char *outp
     float dl_thr = UE->dl_thr_ue_display / 1e6;
     float ul_thr = UE->ul_thr_ue_display / 1e6;
     output = st_append(output, end, " goodput DL %7.2f UL %7.2f Mbps\n",  dl_thr, ul_thr);
+    /* the UL goodput above counts whole TBs, padding included; this separates the data */
+    const NR_mac_dir_stats_t *u = &UE->mac_stats.ul;
+    output = st_append(output, end, "UE %04x: UL bytes TB %" PRIu64 " SDU %" PRIu64 " (padding %.1f%%), DL slots with data but no free HARQ %" PRIu64 "\n",
+                       UE->rnti, u->total_bytes, u->total_sdu_bytes,
+                       u->total_bytes ? 100.0 * (1.0 - (double)u->total_sdu_bytes / (double)u->total_bytes) : 0.0,
+                       UE->mac_stats.dl_no_harq);
   }
   DevAssert(output <= end);
   return output - begin;
