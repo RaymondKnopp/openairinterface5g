@@ -921,8 +921,9 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   if (gNB->dmrs_ant_n > 0 && output < end) {
     output += snprintf(output, end - output, "%25s:", "PUSCH DMRS per RX ant");
     for (int aa = 0; aa < min(gNB->frame_parms.nb_antennas_rx, 8) && output < end; aa++)
-      output += snprintf(output, end - output, "  ant%d coh %.3f pwr %.1f dB", aa, gNB->dmrs_coh_sum[aa] / gNB->dmrs_ant_n,
-                         gNB->dmrs_pwr_db_sum[aa] / gNB->dmrs_ant_n);
+      output += snprintf(output, end - output, "  ant%d coh %.3f pwr %.1f dB |dphi| %.1f deg", aa,
+                         gNB->dmrs_coh_sum[aa] / gNB->dmrs_ant_n, gNB->dmrs_pwr_db_sum[aa] / gNB->dmrs_ant_n,
+                         gNB->dmrs_phase_abs_sum[aa] / gNB->dmrs_ant_n);
     if (output < end)
       output += snprintf(output, end - output, "\n");
   }

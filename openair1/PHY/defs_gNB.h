@@ -692,6 +692,7 @@ typedef struct PHY_VARS_gNB_s {
    * symbol, and DMRS channel power (dB), summed for averaging (see the L1 stats) */
   double dmrs_coh_sum[8];
   double dmrs_pwr_db_sum[8];
+  double dmrs_phase_abs_sum[8]; // |phase| first->last DMRS symbol, degrees
   uint64_t dmrs_ant_n;
   int rx_overrun_us; /* threshold in us; 0 disables the alarm */
   uint64_t rx_overrun_count;

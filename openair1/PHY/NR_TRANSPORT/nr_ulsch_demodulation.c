@@ -774,6 +774,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
         if (aa < nant && ap0 > 0 && ap1 > 0) {
           gNB->dmrs_coh_sum[aa] += sqrt((double)are * are + (double)aim * aim) / sqrt((double)ap0 * (double)ap1);
           gNB->dmrs_pwr_db_sum[aa] += 10.0 * log10((double)ap0 / (nsc / 4));
+          gNB->dmrs_phase_abs_sum[aa] += fabs(atan2((double)aim, (double)are) * 180.0 / M_PI);
         }
       }
       gNB->dmrs_ant_n++;
