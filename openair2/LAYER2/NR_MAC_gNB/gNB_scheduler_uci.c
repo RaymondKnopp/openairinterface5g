@@ -944,6 +944,12 @@ void handle_nr_uci_pucch_0_1(module_id_t mod_id, int cell_id, frame_t frame, slo
     const int span = 1024 * spf;
     const int d = (((nrmac->last_sched_frame * spf + nrmac->last_sched_slot) - (frame * spf + slot)) % span + span) % span;
     nrmac->harq_fb_lat_hist[d < 15 ? d : 15]++;
+    static int logged = 0;
+    if (d >= 15 && logged < 20) {
+      logged++;
+      LOG_W(NR_MAC, "HARQ-ACK delay sample: PUCCH %d.%d, scheduler at %d.%d, d %d slots, %d HARQ bits, rnti %04x\n", frame, slot,
+            nrmac->last_sched_frame, nrmac->last_sched_slot, d, uci_01->harq.num_harq, uci_01->rnti);
+    }
   }
   if (((uci_01->pduBitmap >> 1) & 0x01)) {
     // iterate over received harq bits
