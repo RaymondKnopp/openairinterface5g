@@ -79,9 +79,9 @@ static void ul_fail_drain(ul_fail_ring_t *r)
     const double dt_ms = r->last_t_ns ? (double)(e->t_ns - r->last_t_ns) / 1e6 : 0;
     r->last_t_ns = e->t_ns;
     LOG_W(NR_PHY,
-          "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u SNR %.1f dB delay %d%s, +%.1f ms\n",
+          "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u tbslbrm %u SNR %.1f dB delay %d%s, +%.1f ms\n",
           e->frame, e->slot, (unsigned long long)r->drained + 1, e->rnti, e->pid, e->round, e->rv, e->mcs, e->qm, e->layers,
-          e->rb_start, e->rb_size, e->tbs, e->C, e->snr_x10 / 10.0, e->delay, e->delay_valid ? "" : " (invalid)", dt_ms);
+          e->rb_start, e->rb_size, e->tbs, e->C, e->tbslbrm, e->snr_x10 / 10.0, e->delay, e->delay_valid ? "" : " (invalid)", dt_ms);
     r->drained++;
   }
 }

@@ -392,7 +392,7 @@ typedef struct {
   _Atomic uint64_t tag; /* claim index + 1 once the record is complete */
   uint64_t t_ns;
   uint32_t frame, slot;
-  uint32_t tbs, C;
+  uint32_t tbs, C, tbslbrm;
   uint16_t rnti, rb_start, rb_size;
   int16_t snr_x10, delay;
   uint8_t pid, round, rv, mcs, qm, layers, delay_valid;

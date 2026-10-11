@@ -610,6 +610,7 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         e->slot = ulsch->slot;
         e->tbs = pusch_pdu->pusch_data.tb_size;
         e->C = ulsch_harq->C;
+        e->tbslbrm = pusch_pdu->maintenance_parms_v3.tbSizeLbrmBytes;
         e->rnti = pusch_pdu->rnti;
         e->rb_start = pusch_pdu->rb_start;
         e->rb_size = pusch_pdu->rb_size;

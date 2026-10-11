@@ -1147,6 +1147,20 @@ static void free_mempools(struct active_device *ad)
   rte_mempool_free(ad->harq_out_mbuf_pool);
 }
 
+/* Circular buffer size for decoding, 38.212 5.4.2.1: Ncb = min(N, Nref) with limited-buffer
+ * rate matching (tbslbrm != 0), as the encode paths below and the CPU decoder
+ * (nr_ldpc_soft_buffer_geometry) compute it.  The decode paths used N unconditionally, which
+ * disagrees with a UE that applies LBRM as soon as Nref < N. */
+static uint32_t dec_n_cb(const nrLDPC_TB_decoding_parameters_t *p)
+{
+  uint32_t n_cb = (p->BG == 1) ? (66 * p->Z) : (50 * p->Z);
+  if (p->tbslbrm != 0 && p->C != 0) {
+    const uint32_t Nref = 3 * p->tbslbrm / (2 * p->C);
+    n_cb = min(n_cb, Nref);
+  }
+  return n_cb;
+}
+
 // based on DPDK BBDEV copy_reference_ldpc_dec_op
 static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
                             struct rte_bbdev_op_data *inputs,
@@ -1165,7 +1179,7 @@ static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
       d->z_c = p->Z;
       d->q_m = p->Qm;
       d->n_filler = p->F;
-      d->n_cb = (p->BG == 1) ? (66 * p->Z) : (50 * p->Z);
+      d->n_cb = dec_n_cb(p);
       d->iter_max = p->max_ldpc_iterations;
       d->rv_index = p->rv_index;
       d->op_flags = RTE_BBDEV_LDPC_ITERATION_STOP_ENABLE;
@@ -1216,7 +1230,7 @@ static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
       ops[j]->ldpc_dec.z_c = p->Z;
       ops[j]->ldpc_dec.q_m = p->Qm;
       ops[j]->ldpc_dec.n_filler = p->F;
-      ops[j]->ldpc_dec.n_cb = (p->BG == 1) ? (66 * p->Z) : (50 * p->Z);
+      ops[j]->ldpc_dec.n_cb = dec_n_cb(p);
       ops[j]->ldpc_dec.iter_max = p->max_ldpc_iterations;
       ops[j]->ldpc_dec.rv_index = p->rv_index;
       ops[j]->ldpc_dec.op_flags = RTE_BBDEV_LDPC_ITERATION_STOP_ENABLE | RTE_BBDEV_LDPC_HQ_COMBINE_OUT_ENABLE;
