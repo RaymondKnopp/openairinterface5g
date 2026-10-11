@@ -853,12 +853,15 @@ NR_pusch_dmrs_t get_ul_dmrs_params(const NR_ServingCellConfigCommon_t *scc,
     }
   }
 
-  dmrs.dmrs_config_type = NR_DMRS_UplinkConfig && NR_DMRS_UplinkConfig->dmrs_Type ? 1 : 0;
+  /* TS 38.214 6.2.2: a PUSCH scheduled by DCI format 0_0 uses type 1, single-symbol DMRS with
+     dmrs-AdditionalPosition pos2 whatever DMRS-UplinkConfig says, so only DCI 0_1 follows it */
+  const NR_DMRS_UplinkConfig_t *dmrs_cfg = ul_bwp->dci_format == NR_UL_DCI_FORMAT_0_0 ? NULL : NR_DMRS_UplinkConfig;
+  dmrs.dmrs_config_type = dmrs_cfg && dmrs_cfg->dmrs_Type ? 1 : 0;
   pusch_dmrs_AdditionalPosition_t additional_pos = pusch_dmrs_pos2;
-  if (NR_DMRS_UplinkConfig)
-    additional_pos = get_pusch_dmrs_pos(NR_DMRS_UplinkConfig->dmrs_AdditionalPosition);
+  if (dmrs_cfg)
+    additional_pos = get_pusch_dmrs_pos(dmrs_cfg->dmrs_AdditionalPosition);
 
-  const pusch_maxLength_t pusch_maxLength = NR_DMRS_UplinkConfig ? (NR_DMRS_UplinkConfig->maxLength == NULL ? 1 : 2) : 1;
+  const pusch_maxLength_t pusch_maxLength = dmrs_cfg ? (dmrs_cfg->maxLength == NULL ? 1 : 2) : 1;
   dmrs.ul_dmrs_symb_pos = get_l_prime(tda_info->nrOfSymbols,
                                        tda_info->mapping_type,
                                        additional_pos,
