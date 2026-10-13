@@ -58,10 +58,10 @@ static __thread nr_rlc_sdu_segment_t *deferred_seg_and_sdu, *deferred_seg_and_sd
  * STATUS PDU at high DL rate -- leave the caller's thread too, not only the lock.  The
  * caller is L1_rx_thread (via NR_UL_indication), where they cost up to ~2 ms per UL slot.
  * Many producers push whole chains with one CAS; the one consumer takes a whole stack with
- * an exchange, so there is no ABA.  Without the thread (never started), end() frees inline. */
+ * an exchange, so there is no ABA. */
 static _Atomic(nr_rlc_sdu_segment_t *) bg_seg, bg_seg_and_sdu;
 static sem_t bg_sem;
-static bool bg_running;
+static pthread_once_t bg_once = PTHREAD_ONCE_INIT;
 
 static void free_chains(nr_rlc_sdu_segment_t *seg_and_sdu, nr_rlc_sdu_segment_t *seg)
 {
@@ -99,14 +99,18 @@ static void *rlc_free_thread(void *arg)
   return NULL;
 }
 
-void nr_rlc_free_thread_start(void)
+static void bg_start(void)
 {
-  if (bg_running)
-    return;
   AssertFatal(sem_init(&bg_sem, 0, 0) == 0, "sem_init: %s\n", strerror(errno));
   pthread_t t;
   threadCreate(&t, rlc_free_thread, NULL, "rlc_free", -1, OAI_PRIORITY_RT_LOW);
-  bg_running = true;
+}
+
+/* Called from nr_rlc_module_init(), so that the thread is created from the init path and not
+ * from a real-time caller; end() calls it too, for users that never init the module. */
+void nr_rlc_free_thread_start(void)
+{
+  pthread_once(&bg_once, bg_start);
 }
 
 void nr_rlc_defer_free_begin(void)
@@ -119,15 +123,12 @@ void nr_rlc_defer_free_end(void)
   defer_free = false;
   if (deferred_seg == NULL && deferred_seg_and_sdu == NULL)
     return;
-  if (!bg_running) {
-    free_chains(deferred_seg_and_sdu, deferred_seg);
-  } else {
-    if (deferred_seg_and_sdu != NULL)
-      push_chain(&bg_seg_and_sdu, deferred_seg_and_sdu, deferred_seg_and_sdu_tail);
-    if (deferred_seg != NULL)
-      push_chain(&bg_seg, deferred_seg, deferred_seg_tail);
-    sem_post(&bg_sem);
-  }
+  nr_rlc_free_thread_start();
+  if (deferred_seg_and_sdu != NULL)
+    push_chain(&bg_seg_and_sdu, deferred_seg_and_sdu, deferred_seg_and_sdu_tail);
+  if (deferred_seg != NULL)
+    push_chain(&bg_seg, deferred_seg, deferred_seg_tail);
+  sem_post(&bg_sem);
   deferred_seg = deferred_seg_and_sdu = NULL;
   deferred_seg_tail = deferred_seg_and_sdu_tail = NULL;
 }
