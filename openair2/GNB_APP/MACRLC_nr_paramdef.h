@@ -34,6 +34,8 @@
 #define MACRLC_UL_PRBBLACK_SNR_THRESHOLD     "ul_prbblack_SNR_threshold"
 #define MACRLC_PUCCHFAILURETHRES             "pucch_FailureThres"
 #define MACRLC_PUSCHFAILURETHRES             "pusch_FailureThres"
+#define MACRLC_UL_HARQ_RV0_ONLY              "ul_harq_rv0_only"
+#define HLP_MACRLC_UL_HARQ_RV0_ONLY          "retransmit PUSCH with RV 0 instead of 2, 3, 1 (for decoders without HARQ combining)"
 #define MACRLC_DL_BLER_TARGET_UPPER          "dl_bler_target_upper"
 #define MACRLC_DL_BLER_TARGET_LOWER          "dl_bler_target_lower"
 #define MACRLC_DL_MIN_MCS                    "dl_min_mcs"
@@ -127,6 +129,7 @@
   {MACRLC_STATS_MAX_UE,                HLP_MACRLC_STATS_MAX_UE,  0, .iptr=NULL,   .defintval=8,               TYPE_INT,     0}, \
   {MACRLC_SPATIAL_STREAM_IDX,          HLP_MACRLC_SPATIAL_STREAM_INDEX, \
                                                                                0, .uptr=NULL,   .defintarrayval=0,          TYPE_INTARRAY,0}, \
+  {MACRLC_UL_HARQ_RV0_ONLY,            HLP_MACRLC_UL_HARQ_RV0_ONLY, PARAMFLAG_BOOL, .iptr=NULL, .defintval=0,      TYPE_INT,     0}, \
 }
 // clang-format off
 
@@ -174,6 +177,7 @@
   { .s2 =  { config_check_intrange, {-1280, 0}} }, /* PUCCH RSSI threshold range */ \
   { .s5 = { NULL } }, \
   { .s2 = { NULL } }, /* Spatial stream index */ \
+  { .s5 = { NULL } }, \
 }
 
 /*---------------------------------------------------------------------------------------------------------------------------------------------------------*/

@@ -231,6 +231,8 @@ typedef struct nr_mac_config_s {
   int pusch_dmrs_addpos;
   bool disable_harq;
   nr_power_config_t pusch;
+  /// retransmit PUSCH with RV 0 only (decoder without HARQ combining)
+  bool ul_harq_rv0_only;
   /// SNR threshold needed to put or not a PRB in the black list
   int ul_prbblack_SNR_threshold;
   nr_power_config_t pucch;

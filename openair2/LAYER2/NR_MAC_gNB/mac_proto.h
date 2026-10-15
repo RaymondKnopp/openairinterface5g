@@ -333,6 +333,7 @@ nfapi_nr_pusch_pdu_t *prepare_pusch_pdu(nfapi_nr_ul_tti_request_t *future_ul_tti
                                         int transform_precoding,
                                         int harq_id,
                                         int harq_round,
+                                        uint8_t rv_index,
                                         int fh,
                                         int rnti,
                                         nr_beam_mode_t beam_mode);
