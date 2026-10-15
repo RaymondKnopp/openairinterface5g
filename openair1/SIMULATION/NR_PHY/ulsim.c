@@ -1220,6 +1220,15 @@ int main(int argc, char *argv[])
 
         round_trials[round]++;
         rv_index = nr_get_rv(round % 4);
+        /* OAI_ULSIM_RV=<0..3> forces the RV of the first transmission, to check that a decoder
+           handles a standalone non-zero RV (e.g. without HARQ combining) */
+        static int force_rv = -2;
+        if (force_rv == -2) {
+          const char *e = getenv("OAI_ULSIM_RV");
+          force_rv = e ? atoi(e) : -1;
+        }
+        if (round == 0 && force_rv >= 0)
+          rv_index = force_rv;
 
         /// gNB UL PDUs
 
