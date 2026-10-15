@@ -507,6 +507,37 @@ void phy_procedures_gNB_TX(PHY_VARS_gNB *gNB,
   phy_procedures_gNB_TX_generate(gNB, DL_req, UL_dci_req, frame, slot, enc);
 }
 
+
+/* Received power of a PUSCH per antenna (up to 4) and symbol, over its PRBs, in dB relative to
+ * the mean of that antenna over the PUSCH symbols. step > 1 subsamples the REs. */
+static void pusch_sym_power_db(const PHY_VARS_gNB *gNB, const nfapi_nr_pusch_pdu_t *p, int slot, int step, double out[4][14])
+{
+  const NR_DL_FRAME_PARMS *fp = &gNB->frame_parms;
+  const int sc0 = (p->bwp_start + p->rb_start) * NR_NB_SC_PER_RB;
+  const int nsc = p->rb_size * NR_NB_SC_PER_RB;
+  const int nant = min(fp->nb_antennas_rx, 4);
+  for (int aa = 0; aa < 4; aa++)
+    for (int sy = 0; sy < 14; sy++)
+      out[aa][sy] = 0;
+  for (int aa = 0; aa < nant; aa++) {
+    double mean = 0;
+    int ns = 0;
+    for (int sy = p->start_symbol_index; sy < p->start_symbol_index + p->nr_of_symbols && sy < 14; sy++) {
+      const c16_t *x = (const c16_t *)&gNB->common_vars.rxdataF[aa][((slot % RU_RX_SLOT_DEPTH) * fp->symbols_per_slot + sy) * fp->ofdm_symbol_size + sc0];
+      int64_t e = 0;
+      for (int k = 0; k < nsc; k += step)
+        e += (int64_t)x[k].r * x[k].r + (int64_t)x[k].i * x[k].i;
+      out[aa][sy] = 10 * log10((double)e / (nsc / step) + 1);
+      mean += out[aa][sy];
+      ns++;
+    }
+    if (ns)
+      mean /= ns;
+    for (int sy = p->start_symbol_index; sy < p->start_symbol_index + p->nr_of_symbols && sy < 14; sy++)
+      out[aa][sy] -= mean;
+  }
+}
+
 static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int *ulsch_to_decode, int nb_pusch, NR_UL_IND_t *UL_INFO)
 {
   DevAssert(nb_pusch > 0);
@@ -570,6 +601,14 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
       const int w = pusch->co_pucch_fmt != 0xff;
       gNB->pusch1_n[w]++;
       gNB->pusch1_fail[w] += !ok;
+      if (ok) {
+        double db[4][14];
+        pusch_sym_power_db(gNB, pusch_pdu, ulsch->slot, 8, db);
+        for (int aa = 0; aa < 4; aa++)
+          for (int sy = 0; sy < 14; sy++)
+            gNB->pusch1_ok_sym_db[aa][sy] += db[aa][sy];
+        gNB->pusch1_ok_sym_n++;
+      }
       if (w && pusch->co_pucch_fmt < 5) {
         gNB->pusch1_fmt_n[pusch->co_pucch_fmt]++;
         gNB->pusch1_fmt_fail[pusch->co_pucch_fmt] += !ok;
@@ -670,6 +709,15 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         e->co_pucch_nsym = pusch->co_pucch_nsym;
         e->co_pucch_harq = pusch->co_pucch_harq;
         e->co_pucch_sr = pusch->co_pucch_sr;
+        {
+          double db[4][14];
+          pusch_sym_power_db(gNB, pusch_pdu, ulsch->slot, 1, db);
+          for (int aa = 0; aa < 4; aa++)
+            for (int sy = 0; sy < 14; sy++) {
+              const double v = 2 * db[aa][sy];
+              e->sym_pwr_x2[aa][sy] = (int8_t)(v > 127 ? 127 : v < -127 ? -127 : lround(v));
+            }
+        }
         e->rv = pusch_pdu->pusch_data.rv_index;
         e->mcs = pusch_pdu->mcs_index;
         e->qm = pusch_pdu->qam_mod_order;

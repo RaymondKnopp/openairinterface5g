@@ -88,6 +88,16 @@ static void ul_fail_drain(ul_fail_ring_t *r)
           "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u tbslbrm %u SNR %.1f dB delay %d%s DMRS drift %.1f deg / %.1f dB over %u symb, symb %u+%u dmrs 0x%04x (rx comb 0x%04x) type %u cdm %u tp %u scid %u, PUCCH %s, +%.1f ms\n",
           e->frame, e->slot, (unsigned long long)r->drained + 1, e->rnti, e->pid, e->round, e->rv, e->mcs, e->qm, e->layers,
           e->rb_start, e->rb_size, e->tbs, e->C, e->tbslbrm, e->snr_x10 / 10.0, e->delay, e->delay_valid ? "" : " (invalid)", e->drift_x10 / 10.0, e->pwr_ratio_x10 / 10.0, e->dsym, e->start_sym, e->nsym, e->dmrs_pos, e->comb_mask, e->dmrs_type, e->cdm, e->tp, e->scid, pucch_s, dt_ms);
+    {
+      /* per-antenna, per-symbol received power of this PUSCH, dB relative to the antenna mean */
+      char sp[4 * 14 * 6 + 32], *q = sp;
+      for (int aa = 0; aa < 4; aa++) {
+        q += sprintf(q, " a%d:", aa);
+        for (int sy = e->start_sym; sy < e->start_sym + e->nsym && sy < 14; sy++)
+          q += sprintf(q, " %+.0f", e->sym_pwr_x2[aa][sy] / 2.0);
+      }
+      LOG_W(NR_PHY, "    fail #%llu symbol power (dB):%s\n", (unsigned long long)r->drained + 1, sp);
+    }
     r->drained++;
   }
 }
@@ -997,6 +1007,14 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
       if (gNB->pusch1_fmt_n[k])
         output += snprintf(output, end - output, " F%d %llu/%llu", k, (unsigned long long)gNB->pusch1_fmt_fail[k],
                            (unsigned long long)gNB->pusch1_fmt_n[k]);
+    if (gNB->pusch1_ok_sym_n) {
+      output += snprintf(output, end - output, "\n  passing 1st tx symbol power vs antenna mean (dB, n %llu):", (unsigned long long)gNB->pusch1_ok_sym_n);
+      for (int aa = 0; aa < 4; aa++) {
+        output += snprintf(output, end - output, " a%d:", aa);
+        for (int sy = 0; sy < 14; sy++)
+          output += snprintf(output, end - output, " %+.1f", gNB->pusch1_ok_sym_db[aa][sy] / gNB->pusch1_ok_sym_n);
+      }
+    }
     output += snprintf(output, end - output, "\n  PUSCH 1st tx with same-UE F0, fail/n by ack bits:");
     for (int h = 0; h < 3; h++)
       for (int s = 0; s < 2; s++)
