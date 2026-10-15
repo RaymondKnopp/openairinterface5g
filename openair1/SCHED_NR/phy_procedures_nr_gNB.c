@@ -564,6 +564,17 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
 
     nfapi_nr_crc_t *crc = &UL_INFO->crc_ind.crc_list[UL_INFO->crc_ind.number_crcs++];
     nfapi_nr_rx_data_pdu_t *pdu = &UL_INFO->rx_ind.pdu_list[UL_INFO->rx_ind.number_of_pdus++];
+    if (pusch_pdu->pusch_data.new_data_indicator && !pusch->DTX) {
+      /* first transmission: split pass/fail by whether the UE also had a PUCCH in this slot */
+      const bool ok = crc_valid && !check_abort(&ulsch_harq->abort_decode);
+      const int w = pusch->co_pucch_fmt != 0xff;
+      gNB->pusch1_n[w]++;
+      gNB->pusch1_fail[w] += !ok;
+      if (w && pusch->co_pucch_fmt < 5) {
+        gNB->pusch1_fmt_n[pusch->co_pucch_fmt]++;
+        gNB->pusch1_fmt_fail[pusch->co_pucch_fmt] += !ok;
+      }
+    }
     if (crc_valid && !check_abort(&ulsch_harq->abort_decode) && !pusch->DTX) {
       LOG_D(NR_PHY,
             "[gNB %d] ULSCH %d: Setting ACK for SFN/SF %d.%d (rnti %x, pid %d, ndi %d, status %d, round %d, TBS %d, Max interation "
@@ -649,6 +660,9 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         }
         e->pid = pusch_pdu->pusch_data.harq_process_id;
         e->round = ulsch_harq->round;
+        e->co_pucch_fmt = pusch->co_pucch_fmt;
+        e->co_pucch_sym = pusch->co_pucch_sym;
+        e->co_pucch_nsym = pusch->co_pucch_nsym;
         e->rv = pusch_pdu->pusch_data.rv_index;
         e->mcs = pusch_pdu->mcs_index;
         e->qm = pusch_pdu->qam_mod_order;
@@ -1613,6 +1627,15 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
       NR_gNB_PUSCH *pusch_vars = &gNB->pusch_vars[ULSCH_id];
       NR_gNB_ULSCH_t *ulsch = &gNB->ulsch[ULSCH_id];
 
+      pusch_vars->co_pucch_fmt = 0xff;
+      pusch_vars->co_pucch_sym = pusch_vars->co_pucch_nsym = 0;
+      for (int k = 0; k < n_pucch; k++)
+        if (pucch[k].pucch_pdu.rnti == ulsch->rnti) {
+          pusch_vars->co_pucch_fmt = pucch[k].pucch_pdu.format_type;
+          pusch_vars->co_pucch_sym = pucch[k].pucch_pdu.start_symbol_index;
+          pusch_vars->co_pucch_nsym = pucch[k].pucch_pdu.nr_of_symbols;
+          break;
+        }
       if (pusch_signal_detected(gNB, pusch_vars, ulsch) || get_softmodem_params()->phy_test) {
         ulsch_idx_to_decode[num_pusch++] = ULSCH_id;
       } else {

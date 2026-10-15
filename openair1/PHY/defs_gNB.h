@@ -256,6 +256,8 @@ typedef struct {
   int16_t dmrs_drift_x10;
   int16_t dmrs_pwr_ratio_x10;
   uint8_t dmrs_drift_dsym;
+  /* PUCCH of the same RNTI in this PUSCH slot: format (0xff = none), first symbol, symbols */
+  uint8_t co_pucch_fmt, co_pucch_sym, co_pucch_nsym;
   /// measured RX noise power
   uint32_t ulsch_noise_power[8];
   /// total noise over antennas
@@ -405,6 +407,7 @@ typedef struct {
   uint8_t pid, round, rv, mcs, qm, layers, delay_valid, dsym;
   uint8_t cdm, dmrs_type, tp, start_sym, nsym, scid;
   uint16_t comb_mask; // symbols whose odd subcarriers are empty (DMRS with 2 CDM groups) in the received signal
+  uint8_t co_pucch_fmt, co_pucch_sym, co_pucch_nsym; // same-RNTI PUCCH in the slot, fmt 0xff = none
 } ul_fail_rec_t;
 
 typedef struct {
@@ -704,6 +707,10 @@ typedef struct PHY_VARS_gNB_s {
    * indication, slots between that and the RX job's own slot (normally about sl_ahead) */
   _Atomic int last_tx_abs_slot;
   uint64_t early_ind_lag_hist[24];
+  /* first-transmission PUSCH outcome, [0] without / [1] with a PUCCH of the same RNTI in the slot */
+  uint64_t pusch1_n[2], pusch1_fail[2];
+  /* first transmissions with a same-RNTI PUCCH, by PUCCH format 0..4 */
+  uint64_t pusch1_fmt_n[5], pusch1_fmt_fail[5];
   /* per RX antenna and 25-PRB sub-band (absolute PRB / 25), over PUSCHs of >= 200 PRBs:
    * coherence between the first and last DMRS symbol, and DMRS power (dB) */
   double dmrs_sb_coh_sum[8][11];

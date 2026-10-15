@@ -78,10 +78,15 @@ static void ul_fail_drain(ul_fail_ring_t *r)
       break; // still being written; next call
     const double dt_ms = r->last_t_ns ? (double)(e->t_ns - r->last_t_ns) / 1e6 : 0;
     r->last_t_ns = e->t_ns;
+    char pucch_s[24];
+    if (e->co_pucch_fmt == 0xff)
+      snprintf(pucch_s, sizeof(pucch_s), "none");
+    else
+      snprintf(pucch_s, sizeof(pucch_s), "F%u sym %u+%u", e->co_pucch_fmt, e->co_pucch_sym, e->co_pucch_nsym);
     LOG_W(NR_PHY,
-          "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u tbslbrm %u SNR %.1f dB delay %d%s DMRS drift %.1f deg / %.1f dB over %u symb, symb %u+%u dmrs 0x%04x (rx comb 0x%04x) type %u cdm %u tp %u scid %u, +%.1f ms\n",
+          "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u tbslbrm %u SNR %.1f dB delay %d%s DMRS drift %.1f deg / %.1f dB over %u symb, symb %u+%u dmrs 0x%04x (rx comb 0x%04x) type %u cdm %u tp %u scid %u, PUCCH %s, +%.1f ms\n",
           e->frame, e->slot, (unsigned long long)r->drained + 1, e->rnti, e->pid, e->round, e->rv, e->mcs, e->qm, e->layers,
-          e->rb_start, e->rb_size, e->tbs, e->C, e->tbslbrm, e->snr_x10 / 10.0, e->delay, e->delay_valid ? "" : " (invalid)", e->drift_x10 / 10.0, e->pwr_ratio_x10 / 10.0, e->dsym, e->start_sym, e->nsym, e->dmrs_pos, e->comb_mask, e->dmrs_type, e->cdm, e->tp, e->scid, dt_ms);
+          e->rb_start, e->rb_size, e->tbs, e->C, e->tbslbrm, e->snr_x10 / 10.0, e->delay, e->delay_valid ? "" : " (invalid)", e->drift_x10 / 10.0, e->pwr_ratio_x10 / 10.0, e->dsym, e->start_sym, e->nsym, e->dmrs_pos, e->comb_mask, e->dmrs_type, e->cdm, e->tp, e->scid, pucch_s, dt_ms);
     r->drained++;
   }
 }
@@ -981,6 +986,18 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->ul_indication_stats, "UL Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_pusch_stats, "PUSCH inner-receiver", NULL, NULL, output, end - output);
+  {
+    const uint64_t *n = gNB->pusch1_n, *f = gNB->pusch1_fail;
+    output += snprintf(output, end - output,
+                       "  PUSCH 1st tx vs same-UE PUCCH: without %llu fail %llu (%.2f%%) | with %llu fail %llu (%.2f%%) | by fmt",
+                       (unsigned long long)n[0], (unsigned long long)f[0], n[0] ? 100.0 * f[0] / n[0] : 0.0,
+                       (unsigned long long)n[1], (unsigned long long)f[1], n[1] ? 100.0 * f[1] / n[1] : 0.0);
+    for (int k = 0; k < 5; k++)
+      if (gNB->pusch1_fmt_n[k])
+        output += snprintf(output, end - output, " F%d %llu/%llu", k, (unsigned long long)gNB->pusch1_fmt_fail[k],
+                           (unsigned long long)gNB->pusch1_fmt_n[k]);
+    output += snprintf(output, end - output, "\n");
+  }
   output += print_meas_log(&gNB->ulsch_channel_estimation_stats, "  PUSCH chest (total)", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->pusch_channel_estimation_antenna_processing_stats, "   chest pool round", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->pusch_chest_post_stats, "   chest serial post", NULL, NULL, output, end - output);
