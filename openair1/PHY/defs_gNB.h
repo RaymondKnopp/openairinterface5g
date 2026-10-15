@@ -258,6 +258,7 @@ typedef struct {
   uint8_t dmrs_drift_dsym;
   /* PUCCH of the same RNTI in this PUSCH slot: format (0xff = none), first symbol, symbols */
   uint8_t co_pucch_fmt, co_pucch_sym, co_pucch_nsym;
+  uint8_t co_pucch_harq, co_pucch_sr; // its HARQ-ACK bit count and SR flag
   /// measured RX noise power
   uint32_t ulsch_noise_power[8];
   /// total noise over antennas
@@ -408,6 +409,7 @@ typedef struct {
   uint8_t cdm, dmrs_type, tp, start_sym, nsym, scid;
   uint16_t comb_mask; // symbols whose odd subcarriers are empty (DMRS with 2 CDM groups) in the received signal
   uint8_t co_pucch_fmt, co_pucch_sym, co_pucch_nsym; // same-RNTI PUCCH in the slot, fmt 0xff = none
+  uint8_t co_pucch_harq, co_pucch_sr;
 } ul_fail_rec_t;
 
 typedef struct {
@@ -711,6 +713,8 @@ typedef struct PHY_VARS_gNB_s {
   uint64_t pusch1_n[2], pusch1_fail[2];
   /* first transmissions with a same-RNTI PUCCH, by PUCCH format 0..4 */
   uint64_t pusch1_fmt_n[5], pusch1_fmt_fail[5];
+  /* first transmissions with a same-RNTI PUCCH F0, by its HARQ-ACK bits (0, 1, 2) and SR flag */
+  uint64_t pusch1_f0_n[3][2], pusch1_f0_fail[3][2];
   /* per RX antenna and 25-PRB sub-band (absolute PRB / 25), over PUSCHs of >= 200 PRBs:
    * coherence between the first and last DMRS symbol, and DMRS power (dB) */
   double dmrs_sb_coh_sum[8][11];

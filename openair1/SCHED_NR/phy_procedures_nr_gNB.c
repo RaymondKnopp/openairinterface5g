@@ -573,6 +573,11 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
       if (w && pusch->co_pucch_fmt < 5) {
         gNB->pusch1_fmt_n[pusch->co_pucch_fmt]++;
         gNB->pusch1_fmt_fail[pusch->co_pucch_fmt] += !ok;
+        if (pusch->co_pucch_fmt == 0) {
+          const int h = pusch->co_pucch_harq < 3 ? pusch->co_pucch_harq : 2, s = pusch->co_pucch_sr != 0;
+          gNB->pusch1_f0_n[h][s]++;
+          gNB->pusch1_f0_fail[h][s] += !ok;
+        }
       }
     }
     if (crc_valid && !check_abort(&ulsch_harq->abort_decode) && !pusch->DTX) {
@@ -663,6 +668,8 @@ static int nr_ulsch_procedures(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, int
         e->co_pucch_fmt = pusch->co_pucch_fmt;
         e->co_pucch_sym = pusch->co_pucch_sym;
         e->co_pucch_nsym = pusch->co_pucch_nsym;
+        e->co_pucch_harq = pusch->co_pucch_harq;
+        e->co_pucch_sr = pusch->co_pucch_sr;
         e->rv = pusch_pdu->pusch_data.rv_index;
         e->mcs = pusch_pdu->mcs_index;
         e->qm = pusch_pdu->qam_mod_order;
@@ -1629,11 +1636,14 @@ int phy_procedures_gNB_uespec_RX(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, N
 
       pusch_vars->co_pucch_fmt = 0xff;
       pusch_vars->co_pucch_sym = pusch_vars->co_pucch_nsym = 0;
+      pusch_vars->co_pucch_harq = pusch_vars->co_pucch_sr = 0;
       for (int k = 0; k < n_pucch; k++)
         if (pucch[k].pucch_pdu.rnti == ulsch->rnti) {
           pusch_vars->co_pucch_fmt = pucch[k].pucch_pdu.format_type;
           pusch_vars->co_pucch_sym = pucch[k].pucch_pdu.start_symbol_index;
           pusch_vars->co_pucch_nsym = pucch[k].pucch_pdu.nr_of_symbols;
+          pusch_vars->co_pucch_harq = pucch[k].pucch_pdu.bit_len_harq;
+          pusch_vars->co_pucch_sr = pucch[k].pucch_pdu.sr_flag;
           break;
         }
       if (pusch_signal_detected(gNB, pusch_vars, ulsch) || get_softmodem_params()->phy_test) {

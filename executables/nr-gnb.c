@@ -78,11 +78,12 @@ static void ul_fail_drain(ul_fail_ring_t *r)
       break; // still being written; next call
     const double dt_ms = r->last_t_ns ? (double)(e->t_ns - r->last_t_ns) / 1e6 : 0;
     r->last_t_ns = e->t_ns;
-    char pucch_s[24];
+    char pucch_s[40];
     if (e->co_pucch_fmt == 0xff)
       snprintf(pucch_s, sizeof(pucch_s), "none");
     else
-      snprintf(pucch_s, sizeof(pucch_s), "F%u sym %u+%u", e->co_pucch_fmt, e->co_pucch_sym, e->co_pucch_nsym);
+      snprintf(pucch_s, sizeof(pucch_s), "F%u sym %u+%u ack %u sr %u", e->co_pucch_fmt, e->co_pucch_sym, e->co_pucch_nsym,
+               e->co_pucch_harq, e->co_pucch_sr);
     LOG_W(NR_PHY,
           "%4u.%2u UL CRC fail #%llu: rnti %04x pid %u round %u rv %u mcs %u Qm %u L %u rb %u+%u TBS %u C %u tbslbrm %u SNR %.1f dB delay %d%s DMRS drift %.1f deg / %.1f dB over %u symb, symb %u+%u dmrs 0x%04x (rx comb 0x%04x) type %u cdm %u tp %u scid %u, PUCCH %s, +%.1f ms\n",
           e->frame, e->slot, (unsigned long long)r->drained + 1, e->rnti, e->pid, e->round, e->rv, e->mcs, e->qm, e->layers,
@@ -996,6 +997,12 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
       if (gNB->pusch1_fmt_n[k])
         output += snprintf(output, end - output, " F%d %llu/%llu", k, (unsigned long long)gNB->pusch1_fmt_fail[k],
                            (unsigned long long)gNB->pusch1_fmt_n[k]);
+    output += snprintf(output, end - output, "\n  PUSCH 1st tx with same-UE F0, fail/n by ack bits:");
+    for (int h = 0; h < 3; h++)
+      for (int s = 0; s < 2; s++)
+        if (gNB->pusch1_f0_n[h][s])
+          output += snprintf(output, end - output, " ack%d%s %llu/%llu", h, s ? "+sr" : "", (unsigned long long)gNB->pusch1_f0_fail[h][s],
+                             (unsigned long long)gNB->pusch1_f0_n[h][s]);
     output += snprintf(output, end - output, "\n");
   }
   output += print_meas_log(&gNB->ulsch_channel_estimation_stats, "  PUSCH chest (total)", NULL, NULL, output, end - output);
