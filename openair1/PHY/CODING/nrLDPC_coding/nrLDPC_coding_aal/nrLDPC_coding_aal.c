@@ -1973,7 +1973,7 @@ static int normalize_dpdk_dev(const char *input, char *output, size_t out_len)
  * fallback in nrLDPC_coding_cuda.c). */
 static nrLDPC_coding_interface_t redec_cpu;
 static bool redec_on;
-static uint64_t redec_n, redec_cpu_ok;
+static uint64_t redec_n, redec_cpu_ok, redec_skipped;
 
 static void redecode_open(int max_num_pxsch)
 {
@@ -2001,6 +2001,18 @@ static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
     const nrLDPC_TB_decoding_parameters_t *p = &sp->TBs[h];
     if (p->C < 2 || *p->processedSegments >= p->C)
       continue;
+    /* Sample, do not re-decode every failure: this runs on the RX thread and a CPU decode
+       takes a few ms, so a burst of failures would make it fall behind, overwrite unread
+       slots and feed itself. At most one every 20 ms, first transmissions at MCS >= 6. */
+    static uint64_t last_ns;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+    if (p->rv_index != 0 || p->mcs < 6 || now - last_ns < 20000000ULL) {
+      redec_skipped++;
+      continue;
+    }
+    last_ns = now;
     nrLDPC_TB_decoding_parameters_t q = *p;
     uint32_t processed = 0;
     decode_abort_t ab;
@@ -2019,9 +2031,9 @@ static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
     redec_n++;
     redec_cpu_ok += ok;
     LOG_I(NR_PHY,
-          "%d.%d AAL CRC fail, CPU re-decode %s (%u/%u CBs): A %u C %u Qm %u mcs %u rb %u rv %u (%llu re-decoded, %llu CPU OK)\n",
+          "%d.%d AAL CRC fail, CPU re-decode %s (%u/%u CBs): A %u C %u Qm %u mcs %u rb %u rv %u (%llu re-decoded, %llu CPU OK, %llu not sampled)\n",
           sp->frame, sp->slot, ok ? "OK" : "FAIL", processed, q.C, q.A, q.C, q.Qm, q.mcs, q.nb_rb, q.rv_index,
-          (unsigned long long)redec_n, (unsigned long long)redec_cpu_ok);
+          (unsigned long long)redec_n, (unsigned long long)redec_cpu_ok, (unsigned long long)redec_skipped);
   }
 }
 
