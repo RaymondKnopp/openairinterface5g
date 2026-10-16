@@ -679,6 +679,7 @@ typedef struct {
   int16_t df, ds, tf, ts; // frame.slot the DCI was sent in, frame.slot of the PUSCH
   rnti_t rnti;
   uint8_t pid, mcs, ndi, rv, round;
+  char outcome; // '?' pending, 'O' decoded, 'C' CRC fail with energy, 'D' DTX
   uint16_t rb_start, rb_size;
   uint32_t tbs;
 } ul_dci_rec_t;
@@ -699,7 +700,19 @@ static void ul_dci_record(int df, int ds, int tf, int ts, rnti_t rnti, const nfa
   ul_dci_rec_t *r = &ul_dci_ring[ul_dci_n++ % UL_DCI_RING];
   *r = (ul_dci_rec_t){.df = df, .ds = ds, .tf = tf, .ts = ts, .rnti = rnti, .pid = pdu->pusch_data.harq_process_id,
                       .mcs = pdu->mcs_index, .ndi = ndi, .rv = pdu->pusch_data.rv_index, .round = round,
-                      .rb_start = pdu->rb_start, .rb_size = pdu->rb_size, .tbs = pdu->pusch_data.tb_size};
+                      .rb_start = pdu->rb_start, .rb_size = pdu->rb_size, .tbs = pdu->pusch_data.tb_size, .outcome = '?'};
+}
+
+/* Note the outcome of the PUSCH a DCI scheduled */
+static void ul_dci_outcome(int f, int s, rnti_t rnti, char o)
+{
+  for (unsigned i = 1; i <= 64 && i <= ul_dci_n; i++) {
+    ul_dci_rec_t *r = &ul_dci_ring[(ul_dci_n - i) % UL_DCI_RING];
+    if (r->rnti == rnti && r->tf == f && r->ts == s) {
+      r->outcome = o;
+      return;
+    }
+  }
 }
 
 /* On a UL CRC failure: the DCIs that targeted this PUSCH, and the last ones of the same HARQ pid */
@@ -712,9 +725,9 @@ static void ul_dci_dump(int f, int s, rnti_t rnti, int pid)
     const ul_dci_rec_t *o = &ul_dci_ring[(ul_dci_n - i) % UL_DCI_RING];
     if (o->rnti != rnti || !((o->tf == f && o->ts == s) || o->pid == pid))
       continue;
-    n += snprintf(b + n, sizeof(b) - n, " [%s%d.%d->%d.%d pid %d mcs %d ndi %d rv %d rnd %d rb %d+%d tbs %u]",
+    n += snprintf(b + n, sizeof(b) - n, " [%s%d.%d->%d.%d pid %d mcs %d ndi %d rv %d rnd %d rb %d+%d tbs %u %c]",
                   (o->tf == f && o->ts == s) ? "THIS " : "", o->df, o->ds, o->tf, o->ts, o->pid, o->mcs, o->ndi, o->rv, o->round,
-                  o->rb_start, o->rb_size, o->tbs);
+                  o->rb_start, o->rb_size, o->tbs, o->outcome);
     shown++;
   }
   LOG_W(NR_MAC, "%s\n", b);
@@ -1061,15 +1074,18 @@ static void _nr_rx_sdu(gNB_MAC_INST *gNB_mac,
         UE_scheduling_control->sched_ul_bytes = 0;
 
       *rlc_rnti = UE->rnti;
+      ul_dci_outcome(frameP, slotP, UE->rnti, 'O');
       nr_process_mac_pdu(gNB_mac, cell, UE, frameP, slotP, sduP, sdu_lenP, harq_pid, data_ind, num_data_ind);
     } else {
       if (ul_cqi == 0xff || ul_cqi <= 128) {
         UE->UE_sched_ctrl.pusch_consecutive_dtx_cnt++;
         UE->mac_stats.ulsch_DTX++;
         uss->dtx++;
+        ul_dci_outcome(frameP, slotP, UE->rnti, 'D');
         nr_mac_signal_dtx(&UE_scheduling_control->pusch_pc);
       } else {
         uss->crc++; /* energy was present, it just did not decode */
+        ul_dci_outcome(frameP, slotP, UE->rnti, 'C');
         ul_dci_dump(frameP, slotP, UE->rnti, harq_pid);
       }
 
