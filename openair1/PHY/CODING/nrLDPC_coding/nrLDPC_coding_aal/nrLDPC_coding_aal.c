@@ -122,6 +122,18 @@ static size_t tb_enc_out_cap[LDPC_AAL_TB_MAX_TBS];
 
 static unsigned tb_buf_allocs; /* TEST 2: must stop growing after slot 1 */
 
+/* TB-mode HARQ soft buffers, one pair per HARQ process; see tb_harq_attach() */
+typedef struct {
+  uint8_t *buf[2];
+  size_t cap;
+  uint8_t cur;      // buf[cur] holds the soft bits of the last decode
+  bool valid;
+  uint32_t C, Z, ncb; // TB the soft bits belong to
+} tb_harq_t;
+static tb_harq_t *tb_harq;
+static int tb_harq_n;
+static uint64_t tb_harq_combined, tb_harq_fresh;
+
 static uint8_t *tb_buf(uint8_t **slot, size_t *cap, size_t need)
 {
   if (*cap < need) {
@@ -1177,6 +1189,71 @@ static uint32_t dec_n_cb(const nrLDPC_TB_decoding_parameters_t *p)
 }
 
 // based on DPDK BBDEV copy_reference_ldpc_dec_op
+
+/* HARQ combining in TB mode (LDPC_AAL_TB_HARQ=1).
+ *
+ * Without HQ_COMBINE_IN the LA12xx de-rate-matches every redundancy version from k0 = 0
+ * (calc_int_start_ofst(.., !harq_en, ..) in the PMD), so a retransmission with RV 2, 3 or 1
+ * is read from the wrong position and never decodes, and RV 0 retransmissions bring no
+ * combining gain. Here each HARQ process gets a soft buffer covering its C code blocks, as
+ * the PMD lays it out: C slots of 128 * ceil(ncb_eff / 128) bytes, ncb_eff = N_cb minus the
+ * filler bits. It depends only on the TB (Z, BG, K, F, N_cb), not on E, so it is valid for
+ * all rounds. The first transmission writes it (HQ_COMBINE_OUT); a retransmission of the
+ * same TB reads it back and writes the combined one (HQ_COMBINE_IN | OUT). Two buffers per
+ * process, ping-ponged, so the device never reads and writes the same one. */
+/* (tb_harq_t and its globals are declared with the TB-mode buffers above) */
+
+static uint32_t tb_harq_ncb_eff(const nrLDPC_TB_decoding_parameters_t *p, uint32_t n_cb)
+{
+  const uint32_t K = (p->BG == 1 ? 22 : 10) * p->Z;
+  const uint32_t filler_end = K - 2 * p->Z;
+  const uint32_t filler_start = filler_end - p->F;
+  return n_cb > filler_end ? n_cb - p->F : n_cb > filler_start ? filler_start : n_cb;
+}
+
+static void tb_harq_attach(const nrLDPC_TB_decoding_parameters_t *p, struct rte_bbdev_op_ldpc_dec *d)
+{
+  if (!tb_harq || (int)p->harq_unique_pid >= tb_harq_n)
+    return;
+  tb_harq_t *h = &tb_harq[p->harq_unique_pid];
+  const uint32_t ncb_eff = tb_harq_ncb_eff(p, d->n_cb);
+  const size_t len = (size_t)p->C * 128 * ((ncb_eff + 127) / 128);
+  if (h->cap < len) {
+    for (int i = 0; i < 2; i++) {
+      rte_free(h->buf[i]);
+      h->buf[i] = rte_malloc(NULL, len, RTE_CACHE_LINE_SIZE);
+      AssertFatal(h->buf[i] != NULL, "rte_malloc(%zu) failed for a TB-mode HARQ buffer", len);
+    }
+    h->cap = len;
+    h->valid = false;
+  }
+  const bool same_tb = h->valid && h->C == p->C && h->Z == p->Z && h->ncb == d->n_cb;
+  if (!p->d_to_be_cleared && same_tb) {
+    d->op_flags |= RTE_BBDEV_LDPC_HQ_COMBINE_IN_ENABLE;
+    d->harq_combined_input = (struct rte_bbdev_op_data){.is_direct_mem = 1, .mem = h->buf[h->cur], .offset = 0, .length = len};
+    tb_harq_combined++;
+  } else {
+    tb_harq_fresh++;
+  }
+  d->op_flags |= RTE_BBDEV_LDPC_HQ_COMBINE_OUT_ENABLE;
+  d->harq_combined_output = (struct rte_bbdev_op_data){.is_direct_mem = 1, .mem = h->buf[h->cur ^ 1], .offset = 0, .length = 0};
+  h->cur ^= 1;
+  h->valid = true;
+  h->C = p->C;
+  h->Z = p->Z;
+  h->ncb = d->n_cb;
+}
+
+static void tb_harq_init(int max_num_pxsch)
+{
+  if (!tb_mode() || !getenv("LDPC_AAL_TB_HARQ") || getenv("LDPC_AAL_NO_HARQ"))
+    return;
+  tb_harq_n = max_num_pxsch;
+  tb_harq = calloc(tb_harq_n, sizeof(*tb_harq));
+  AssertFatal(tb_harq != NULL, "calloc failed\n");
+  LOG_I(NR_PHY, "LDPC_AAL_TB_HARQ: HARQ combining in TB mode for %d HARQ processes\n", tb_harq_n);
+}
+
 static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
                             struct rte_bbdev_op_data *inputs,
                             struct rte_bbdev_op_data *outputs,
@@ -1216,6 +1293,7 @@ static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
       /* Both already carry is_direct_mem and the persistent pointer. */
       d->input = inputs[h];
       d->hard_output = outputs[h];
+      tb_harq_attach(p, d);
     }
     return;
   }
@@ -2182,6 +2260,7 @@ static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
   redecode_open(max_num_pxsch);
+  tb_harq_init(max_num_pxsch);
   pthread_mutex_init(&encode_mutex, NULL);
   pthread_mutex_init(&decode_mutex, NULL);
 
@@ -2550,6 +2629,9 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
       if ((n_tb[q] % 500) == 0) {
         LOG_I(NR_PHY, "AAL LLR Qm %d: %llu TBs, max |LLR| %d (after shift %d), %.2f%% clipped to int8\n", q,
               (unsigned long long)n_tb[q], max_abs[q], active_dev.llr_shift, 100.0 * n_clip[q] / (double)n_llr[q]);
+        if (tb_harq)
+          LOG_I(NR_PHY, "AAL TB HARQ: %llu decodes combined with a stored soft buffer, %llu fresh\n",
+                (unsigned long long)tb_harq_combined, (unsigned long long)tb_harq_fresh);
         max_abs[q] = 0;
       }
     }
