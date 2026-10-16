@@ -10,3 +10,4 @@ services:
       - /build/dev/lib/libldpc_aal.so:/usr/local/lib/libldpc_aal.so:ro
       - /build/dev/lib/libldpc_orig.so:/usr/local/lib/libldpc_orig.so:ro
       - /build/dev/lib/libparams_yaml.so:/usr/local/lib/libparams_yaml.so:ro
+      - /build/dev/gnb-du-4x4-split.conf:/opt/oai-gnb/etc/gnb.conf:ro
