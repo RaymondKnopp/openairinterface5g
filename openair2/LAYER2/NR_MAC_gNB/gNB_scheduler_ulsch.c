@@ -671,6 +671,55 @@ static void abort_nr_ul_harq(NR_UE_info_t *UE, int8_t harq_pid)
     sched_ctrl->sched_ul_bytes = 0;
 }
 
+
+/* Diagnostic ring of the UL DCIs sent, to compare, for a PUSCH that fails CRC, the grant(s)
+ * the UE was given with the PUSCH PDU the PHY decoded with. Written and read under
+ * sched_lock. A second DCI for the same UE and target slot is reported when it is sent. */
+typedef struct {
+  int16_t df, ds, tf, ts; // frame.slot the DCI was sent in, frame.slot of the PUSCH
+  rnti_t rnti;
+  uint8_t pid, mcs, ndi, rv, round;
+  uint16_t rb_start, rb_size;
+  uint32_t tbs;
+} ul_dci_rec_t;
+#define UL_DCI_RING 512
+static ul_dci_rec_t ul_dci_ring[UL_DCI_RING];
+static unsigned ul_dci_n;
+
+static void ul_dci_record(int df, int ds, int tf, int ts, rnti_t rnti, const nfapi_nr_pusch_pdu_t *pdu, int ndi, int round)
+{
+  for (unsigned i = 1; i <= 64 && i <= ul_dci_n; i++) {
+    const ul_dci_rec_t *o = &ul_dci_ring[(ul_dci_n - i) % UL_DCI_RING];
+    if (o->rnti == rnti && o->tf == tf && o->ts == ts)
+      LOG_W(NR_MAC,
+            "UE %04x: second UL DCI for PUSCH %d.%d: now sent %d.%d pid %d mcs %d ndi %d round %d rb %d+%d, earlier sent %d.%d pid %d mcs %d ndi %d round %d rb %d+%d\n",
+            rnti, tf, ts, df, ds, pdu->pusch_data.harq_process_id, pdu->mcs_index, ndi, round, pdu->rb_start, pdu->rb_size,
+            o->df, o->ds, o->pid, o->mcs, o->ndi, o->round, o->rb_start, o->rb_size);
+  }
+  ul_dci_rec_t *r = &ul_dci_ring[ul_dci_n++ % UL_DCI_RING];
+  *r = (ul_dci_rec_t){.df = df, .ds = ds, .tf = tf, .ts = ts, .rnti = rnti, .pid = pdu->pusch_data.harq_process_id,
+                      .mcs = pdu->mcs_index, .ndi = ndi, .rv = pdu->pusch_data.rv_index, .round = round,
+                      .rb_start = pdu->rb_start, .rb_size = pdu->rb_size, .tbs = pdu->pusch_data.tb_size};
+}
+
+/* On a UL CRC failure: the DCIs that targeted this PUSCH, and the last ones of the same HARQ pid */
+static void ul_dci_dump(int f, int s, rnti_t rnti, int pid)
+{
+  char b[640];
+  int n = snprintf(b, sizeof(b), "UE %04x: UL CRC fail %d.%d pid %d, DCIs:", rnti, f, s, pid);
+  int shown = 0;
+  for (unsigned i = 1; i <= UL_DCI_RING && i <= ul_dci_n && shown < 5 && n < (int)sizeof(b) - 80; i++) {
+    const ul_dci_rec_t *o = &ul_dci_ring[(ul_dci_n - i) % UL_DCI_RING];
+    if (o->rnti != rnti || !((o->tf == f && o->ts == s) || o->pid == pid))
+      continue;
+    n += snprintf(b + n, sizeof(b) - n, " [%s%d.%d->%d.%d pid %d mcs %d ndi %d rv %d rnd %d rb %d+%d tbs %u]",
+                  (o->tf == f && o->ts == s) ? "THIS " : "", o->df, o->ds, o->tf, o->ts, o->pid, o->mcs, o->ndi, o->rv, o->round,
+                  o->rb_start, o->rb_size, o->tbs);
+    shown++;
+  }
+  LOG_W(NR_MAC, "%s\n", b);
+}
+
 static void handle_nr_ul_harq(nr_cell_sched_t *cell, NR_UE_info_t *UE, rnti_t rnti, int crc_harq_id, bool crc_status)
 {
   if (cell->radio_config.disable_harq) {
@@ -1021,6 +1070,7 @@ static void _nr_rx_sdu(gNB_MAC_INST *gNB_mac,
         nr_mac_signal_dtx(&UE_scheduling_control->pusch_pc);
       } else {
         uss->crc++; /* energy was present, it just did not decode */
+        ul_dci_dump(frameP, slotP, UE->rnti, harq_pid);
       }
 
       if (!get_softmodem_params()->phy_test && UE->UE_sched_ctrl.pusch_consecutive_dtx_cnt >= pusch_failure_thres) {
@@ -2604,6 +2654,7 @@ void post_process_ulsch(gNB_MAC_INST *nr_mac,
                ss->searchSpaceType->present);
 
   cur_harq->sched_pusch.tpc_pusch = tpc;
+  ul_dci_record(frame, slot, sched_pusch->frame, sched_pusch->slot, UE->rnti, pusch_pdu, cur_harq->ndi, cur_harq->round);
 
   if (sched_srs > 0) {
     if (!nr_schedule_aperiodic_srs(nr_mac, cell, UE, sched_pusch->frame, sched_pusch->slot, sched_pusch->tda_info.k2, sched_srs))
