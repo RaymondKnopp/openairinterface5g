@@ -24,6 +24,9 @@
 
 #include <math.h>
 #include <dlfcn.h>
+#include <semaphore.h>
+#include <stdatomic.h>
+#include <pthread.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -1964,13 +1967,17 @@ static int normalize_dpdk_dev(const char *input, char *output, size_t out_len)
 
 // OAI CODE
 
-/* LDPC_AAL_CPU_REDECODE=1: diagnostic. Every transport block (C > 1) the device reports as
- * failed is decoded again by the CPU library (libldpc.so) from the same PHY LLRs, and the two
- * outcomes are counted. CPU OK where the device failed means the device returned a wrong
- * result; CPU fail too means the LLRs were already bad. The device result is left untouched:
- * the CPU decoder works on a copy of the TB parameters with its own output buffer. Opened
- * with RTLD_DEEPBIND so that its LDPCdecoder() resolves inside libldpc.so (see the same
- * fallback in nrLDPC_coding_cuda.c). */
+/* LDPC_AAL_CPU_REDECODE=1: diagnostic. A sample of the transport blocks (C > 1) the device
+ * reports as failed is decoded again by the CPU library (libldpc.so) from the same LLRs, on a
+ * background thread so the RX thread only pays for copying them. CPU OK where the device
+ * failed means the device returned a wrong result; when the CPU passes no code block either,
+ * the LLRs carry no information as interpreted, and other readings of the grant are tried
+ * (RV 1-3, MCS +-1/+-2 at the same modulation order) to find what the UE actually sent. The
+ * device result is left untouched. libldpc.so is opened with RTLD_DEEPBIND so that its
+ * LDPCdecoder() resolves inside it (see the same fallback in nrLDPC_coding_cuda.c).
+ * LDPC_AAL_REDEC_MS sets the sampling interval (default 50 ms); a failure that arrives while
+ * the worker is still busy is only counted. */
+
 /* PHY/MAC helpers, resolved from nr-softmodem (linked with -rdynamic), used to re-derive a TB
    for another MCS exactly as nr_ulsch_decoding() does */
 extern uint32_t nr_compute_tbs(uint16_t Qm, uint16_t R, uint16_t nb_rb, uint16_t nb_symb_sch, uint16_t nb_dmrs_prb,
@@ -1983,28 +1990,21 @@ extern int32_t nr_segmentation(unsigned char *input_buffer, unsigned char **outp
 extern int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
 extern int nr_get_R_ldpc_decoder(int rvidx, int E, int BG, int Z, int *llrLen, int round);
 
+#define REDEC_MAX_LLR (4 * 1024 * 1024)
 static nrLDPC_coding_interface_t redec_cpu;
 static bool redec_on;
-static uint64_t redec_n, redec_cpu_ok, redec_skipped;
-
-static void redecode_open(int max_num_pxsch)
-{
-  if (!getenv("LDPC_AAL_CPU_REDECODE"))
-    return;
-  void *h = dlopen("libldpc.so", RTLD_NOW | RTLD_DEEPBIND);
-  if (!h) {
-    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot open libldpc.so: %s\n", dlerror());
-    return;
-  }
-  redec_cpu.nrLDPC_coding_init = dlsym(h, "nrLDPC_coding_init");
-  redec_cpu.nrLDPC_coding_decoder = dlsym(h, "nrLDPC_coding_decoder");
-  if (!redec_cpu.nrLDPC_coding_init || !redec_cpu.nrLDPC_coding_decoder || redec_cpu.nrLDPC_coding_init(max_num_pxsch) != 0) {
-    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot initialise libldpc.so\n");
-    return;
-  }
-  redec_on = true;
-  LOG_I(NR_PHY, "LDPC_AAL_CPU_REDECODE: failed TBs are re-decoded on the CPU for diagnosis\n");
-}
+static uint64_t redec_n, redec_cpu_ok, redec_skipped, redec_busy;
+static tpool_t redec_pool; // "n": every task runs inline on the worker
+static sem_t redec_sem;
+static _Atomic int redec_full; // 1 while the mailbox holds a TB for the worker
+static struct {
+  int frame, slot;
+  nrLDPC_TB_decoding_parameters_t tb;
+  uint32_t dev_cbs;
+  short llr[REDEC_MAX_LLR] __attribute__((aligned(64)));
+} redec_box;
+static int16_t redec_d[NR_LDPC_MAX_NUM_CB * 66 * 384] __attribute__((aligned(64)));
+static uint8_t redec_c[NR_LDPC_MAX_NUM_CB * 1056 + 64] __attribute__((aligned(64)));
 
 /* Fill E/E2/first_rE2/R/R2 for the TB in q (rv_index, C, BG, Z, G, Qm, nb_layers set) */
 static void redec_fill_e(nrLDPC_TB_decoding_parameters_t *q)
@@ -2025,99 +2025,157 @@ static void redec_fill_e(nrLDPC_TB_decoding_parameters_t *q)
   }
 }
 
-/* CPU-decode q; returns the number of code blocks that passed */
-static uint32_t redec_try(const nrLDPC_slot_decoding_parameters_t *sp, nrLDPC_TB_decoding_parameters_t *q)
+/* CPU-decode q on the worker; returns the number of code blocks that passed */
+static uint32_t redec_try(int frame, int slot, nrLDPC_TB_decoding_parameters_t *q)
 {
-  static uint8_t scratch[NR_LDPC_MAX_NUM_CB * 1056 + 64] __attribute__((aligned(64)));
   uint32_t processed = 0;
   decode_abort_t ab;
   init_abort(&ab);
   set_abort(&ab, false);
   q->processedSegments = &processed;
   q->abort_decode = &ab;
-  q->c = scratch;
+  q->llr = redec_box.llr;
+  q->c = redec_c;
+  q->d = redec_d;
   q->d_to_be_cleared = true;
   q->backend_desegmented = false;
   for (int r = 0; r < NR_LDPC_MAX_NUM_CB; r++)
     q->decodeSuccess[r] = false;
-  nrLDPC_slot_decoding_parameters_t qs = *sp;
-  qs.nb_TBs = 1;
-  qs.TBs = q;
+  nrLDPC_slot_decoding_parameters_t qs = {.frame = frame, .slot = slot, .nb_TBs = 1, .threadPool = &redec_pool, .TBs = q};
   redec_cpu.nrLDPC_coding_decoder(&qs);
   return processed;
 }
 
-static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
+static void redec_analyse(void)
 {
   static int mcs_table = -1;
   if (mcs_table < 0) {
     const char *e = getenv("LDPC_AAL_REDEC_MCS_TABLE");
     mcs_table = e ? atoi(e) : 1; /* this DU runs the 256QAM table */
   }
+  const nrLDPC_TB_decoding_parameters_t *p = &redec_box.tb;
+  const int frame = redec_box.frame, slot = redec_box.slot;
+  nrLDPC_TB_decoding_parameters_t q = *p;
+  const uint32_t cpu_cbs = redec_try(frame, slot, &q);
+  const bool ok = cpu_cbs >= p->C;
+  redec_n++;
+  redec_cpu_ok += ok;
+  char alt[96] = "";
+  if (cpu_cbs == 0) {
+    bool found = false;
+    for (int rv = 1; rv < 4 && !found; rv++) {
+      q = *p;
+      q.rv_index = rv;
+      redec_fill_e(&q);
+      const uint32_t n = redec_try(frame, slot, &q);
+      if (n >= q.C || n * 2 > q.C) {
+        snprintf(alt, sizeof(alt), " | alt rv %d: %u/%u CBs", rv, n, q.C);
+        found = true;
+      }
+    }
+    const int dm[4] = {-1, 1, -2, 2};
+    const uint32_t nre = p->G / (p->Qm * p->nb_layers * p->nb_rb);
+    for (int i = 0; i < 4 && !found; i++) {
+      const int m = p->mcs + dm[i];
+      if (m < 0 || m > 27 || nr_get_Qm_ul(m, mcs_table) != p->Qm || nre > 156)
+        continue;
+      const uint16_t R = nr_get_code_rate_ul(m, mcs_table);
+      q = *p;
+      q.mcs = m;
+      q.A = nr_compute_tbs(p->Qm, R, p->nb_rb, 13, 156 - nre, 0, 0, p->nb_layers);
+      q.BG = get_BG(q.A, R);
+      nr_segmentation(NULL, NULL, lenWithCrc(1, q.A), &q.C, &q.K, &q.Z, &q.F, q.BG);
+      if (q.C > NR_LDPC_MAX_NUM_CB)
+        continue;
+      redec_fill_e(&q);
+      const uint32_t n = redec_try(frame, slot, &q);
+      if (n >= q.C || n * 2 > q.C) {
+        snprintf(alt, sizeof(alt), " | alt mcs %d (A %u C %u): %u/%u CBs", m, q.A, q.C, n, q.C);
+        found = true;
+      }
+    }
+    if (!found)
+      snprintf(alt, sizeof(alt), " | no alt (rv 1-3, mcs +-1/2) decodes");
+  }
+  LOG_I(NR_PHY,
+        "%d.%d AAL CRC fail (device %u/%u CBs), CPU re-decode %s (%u/%u CBs): A %u Qm %u mcs %u rb %u rv %u%s (%llu re-decoded, %llu CPU OK, %llu not sampled, %llu worker busy)\n",
+        frame, slot, redec_box.dev_cbs, p->C, ok ? "OK" : "FAIL", cpu_cbs, p->C, p->A, p->Qm, p->mcs, p->nb_rb, p->rv_index, alt,
+        (unsigned long long)redec_n, (unsigned long long)redec_cpu_ok, (unsigned long long)redec_skipped,
+        (unsigned long long)redec_busy);
+}
+
+extern int pthread_setname_np(pthread_t thread, const char *name); // GNU, not declared here without _GNU_SOURCE
+
+static void *redec_thread(void *arg)
+{
+  (void)arg;
+  while (true) {
+    if (sem_wait(&redec_sem) != 0)
+      continue;
+    redec_analyse();
+    atomic_store(&redec_full, 0);
+  }
+  return NULL;
+}
+
+static void redecode_open(int max_num_pxsch)
+{
+  if (!getenv("LDPC_AAL_CPU_REDECODE"))
+    return;
+  void *h = dlopen("libldpc.so", RTLD_NOW | RTLD_DEEPBIND);
+  if (!h) {
+    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot open libldpc.so: %s\n", dlerror());
+    return;
+  }
+  redec_cpu.nrLDPC_coding_init = dlsym(h, "nrLDPC_coding_init");
+  redec_cpu.nrLDPC_coding_decoder = dlsym(h, "nrLDPC_coding_decoder");
+  if (!redec_cpu.nrLDPC_coding_init || !redec_cpu.nrLDPC_coding_decoder || redec_cpu.nrLDPC_coding_init(max_num_pxsch) != 0) {
+    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot initialise libldpc.so\n");
+    return;
+  }
+  initNamedTpool("n", &redec_pool, false, "redec");
+  sem_init(&redec_sem, 0, 0);
+  /* created from the init path at normal priority: on this board it then runs on the
+     housekeeping cores, never on an isolated RT core */
+  pthread_t t;
+  pthread_create(&t, NULL, redec_thread, NULL);
+  pthread_setname_np(t, "ldpc_redec");
+  redec_on = true;
+  LOG_I(NR_PHY, "LDPC_AAL_CPU_REDECODE: a sample of failed TBs is re-decoded on the CPU, in the background\n");
+}
+
+/* RX thread: hand a sampled failed TB to the worker, copying its LLRs */
+static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
+{
+  static int interval_ms = -1;
+  if (interval_ms < 0) {
+    const char *e = getenv("LDPC_AAL_REDEC_MS");
+    interval_ms = e ? atoi(e) : 50;
+  }
   for (int h = 0; h < sp->nb_TBs; h++) {
     const nrLDPC_TB_decoding_parameters_t *p = &sp->TBs[h];
     if (p->C < 2 || *p->processedSegments >= p->C)
       continue;
-    /* Sample, do not re-decode every failure: this runs on the RX thread and a CPU decode
-       takes a few ms, so a burst of failures would make it fall behind, overwrite unread
-       slots and feed itself. At most one every 20 ms, first transmissions at MCS >= 6. */
     static uint64_t last_ns;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-    if (p->rv_index != 0 || p->mcs < 6 || now - last_ns < 20000000ULL) {
+    if (p->mcs < 6 || p->G > REDEC_MAX_LLR || now - last_ns < (uint64_t)interval_ms * 1000000ULL) {
       redec_skipped++;
       continue;
     }
-    last_ns = now;
-    const uint32_t dev_cbs = *p->processedSegments;
-    nrLDPC_TB_decoding_parameters_t q = *p;
-    const uint32_t cpu_cbs = redec_try(sp, &q);
-    const bool ok = cpu_cbs >= p->C;
-    redec_n++;
-    redec_cpu_ok += ok;
-    char alt[96] = "";
-    if (cpu_cbs == 0) {
-      /* no information at all in the LLRs as interpreted: try other readings of the grant */
-      bool found = false;
-      for (int rv = 1; rv < 4 && !found; rv++) {
-        q = *p;
-        q.rv_index = rv;
-        redec_fill_e(&q);
-        const uint32_t n = redec_try(sp, &q);
-        if (n >= q.C || n * 2 > q.C) {
-          snprintf(alt, sizeof(alt), " | alt rv %d: %u/%u CBs", rv, n, q.C);
-          found = true;
-        }
-      }
-      const int dm[4] = {-1, 1, -2, 2};
-      const uint32_t nre = p->G / (p->Qm * p->nb_layers * p->nb_rb);
-      for (int i = 0; i < 4 && !found; i++) {
-        const int m = p->mcs + dm[i];
-        if (m < 0 || m > 27 || nr_get_Qm_ul(m, mcs_table) != p->Qm || nre > 156)
-          continue;
-        const uint16_t R = nr_get_code_rate_ul(m, mcs_table);
-        q = *p;
-        q.mcs = m;
-        q.A = nr_compute_tbs(p->Qm, R, p->nb_rb, 13, 156 - nre, 0, 0, p->nb_layers);
-        q.BG = get_BG(q.A, R);
-        nr_segmentation(NULL, NULL, lenWithCrc(1, q.A), &q.C, &q.K, &q.Z, &q.F, q.BG);
-        if (q.C > NR_LDPC_MAX_NUM_CB)
-          continue;
-        redec_fill_e(&q);
-        const uint32_t n = redec_try(sp, &q);
-        if (n >= q.C || n * 2 > q.C) {
-          snprintf(alt, sizeof(alt), " | alt mcs %d (A %u C %u): %u/%u CBs", m, q.A, q.C, n, q.C);
-          found = true;
-        }
-      }
-      if (!found)
-        snprintf(alt, sizeof(alt), " | no alt (rv 1-3, mcs +-1/2) decodes");
+    if (atomic_load(&redec_full)) {
+      redec_busy++;
+      continue;
     }
-    LOG_I(NR_PHY,
-          "%d.%d AAL CRC fail (device %u/%u CBs), CPU re-decode %s (%u/%u CBs): A %u Qm %u mcs %u rb %u rv %u%s (%llu re-decoded, %llu CPU OK, %llu not sampled)\n",
-          sp->frame, sp->slot, dev_cbs, p->C, ok ? "OK" : "FAIL", cpu_cbs, p->C, p->A, p->Qm, p->mcs, p->nb_rb, p->rv_index, alt,
-          (unsigned long long)redec_n, (unsigned long long)redec_cpu_ok, (unsigned long long)redec_skipped);
+    last_ns = now;
+    redec_box.frame = sp->frame;
+    redec_box.slot = sp->slot;
+    redec_box.tb = *p;
+    redec_box.dev_cbs = *p->processedSegments;
+    memcpy(redec_box.llr, p->llr, p->G * sizeof(*p->llr));
+    atomic_store(&redec_full, 1);
+    sem_post(&redec_sem);
   }
 }
 
