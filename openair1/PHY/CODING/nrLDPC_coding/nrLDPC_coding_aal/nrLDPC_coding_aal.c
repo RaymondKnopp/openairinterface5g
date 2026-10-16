@@ -23,6 +23,7 @@
 #include <regex.h>
 
 #include <math.h>
+#include <dlfcn.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -1962,8 +1963,71 @@ static int normalize_dpdk_dev(const char *input, char *output, size_t out_len)
 }
 
 // OAI CODE
+
+/* LDPC_AAL_CPU_REDECODE=1: diagnostic. Every transport block (C > 1) the device reports as
+ * failed is decoded again by the CPU library (libldpc.so) from the same PHY LLRs, and the two
+ * outcomes are counted. CPU OK where the device failed means the device returned a wrong
+ * result; CPU fail too means the LLRs were already bad. The device result is left untouched:
+ * the CPU decoder works on a copy of the TB parameters with its own output buffer. Opened
+ * with RTLD_DEEPBIND so that its LDPCdecoder() resolves inside libldpc.so (see the same
+ * fallback in nrLDPC_coding_cuda.c). */
+static nrLDPC_coding_interface_t redec_cpu;
+static bool redec_on;
+static uint64_t redec_n, redec_cpu_ok;
+
+static void redecode_open(int max_num_pxsch)
+{
+  if (!getenv("LDPC_AAL_CPU_REDECODE"))
+    return;
+  void *h = dlopen("libldpc.so", RTLD_NOW | RTLD_DEEPBIND);
+  if (!h) {
+    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot open libldpc.so: %s\n", dlerror());
+    return;
+  }
+  redec_cpu.nrLDPC_coding_init = dlsym(h, "nrLDPC_coding_init");
+  redec_cpu.nrLDPC_coding_decoder = dlsym(h, "nrLDPC_coding_decoder");
+  if (!redec_cpu.nrLDPC_coding_init || !redec_cpu.nrLDPC_coding_decoder || redec_cpu.nrLDPC_coding_init(max_num_pxsch) != 0) {
+    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot initialise libldpc.so\n");
+    return;
+  }
+  redec_on = true;
+  LOG_I(NR_PHY, "LDPC_AAL_CPU_REDECODE: failed TBs are re-decoded on the CPU for diagnosis\n");
+}
+
+static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
+{
+  static uint8_t scratch[NR_LDPC_MAX_NUM_CB * 1056 + 64] __attribute__((aligned(64)));
+  for (int h = 0; h < sp->nb_TBs; h++) {
+    const nrLDPC_TB_decoding_parameters_t *p = &sp->TBs[h];
+    if (p->C < 2 || *p->processedSegments >= p->C)
+      continue;
+    nrLDPC_TB_decoding_parameters_t q = *p;
+    uint32_t processed = 0;
+    decode_abort_t ab;
+    init_abort(&ab);
+    set_abort(&ab, false);
+    q.processedSegments = &processed;
+    q.abort_decode = &ab;
+    q.c = scratch;
+    q.d_to_be_cleared = true;
+    q.backend_desegmented = false;
+    nrLDPC_slot_decoding_parameters_t qs = *sp;
+    qs.nb_TBs = 1;
+    qs.TBs = &q;
+    redec_cpu.nrLDPC_coding_decoder(&qs);
+    const bool ok = processed >= q.C;
+    redec_n++;
+    redec_cpu_ok += ok;
+    LOG_I(NR_PHY,
+          "%d.%d AAL CRC fail, CPU re-decode %s (%u/%u CBs): A %u C %u Qm %u mcs %u rb %u rv %u (%llu re-decoded, %llu CPU OK)\n",
+          sp->frame, sp->slot, ok ? "OK" : "FAIL", processed, q.C, q.A, q.C, q.Qm, q.mcs, q.nb_rb, q.rv_index,
+          (unsigned long long)redec_n, (unsigned long long)redec_cpu_ok);
+  }
+}
+
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
+  redecode_open(max_num_pxsch);
   pthread_mutex_init(&encode_mutex, NULL);
   pthread_mutex_init(&decode_mutex, NULL);
 
@@ -2422,6 +2486,8 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
               (prof_total - prof_conv - prof_gather) / prof_n, prof_total / prof_n);
   }
   pthread_mutex_unlock(&decode_mutex);
+  if (redec_on)
+    redecode_failed(nrLDPC_slot_decoding_parameters);
   return 0;
 }
 
