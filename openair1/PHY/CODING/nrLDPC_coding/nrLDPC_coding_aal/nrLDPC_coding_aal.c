@@ -156,6 +156,8 @@ struct active_device {
   /* Saturate int16 LLRs to int8 instead of rescaling them. True for the T2 and
    * for the NXP LA12xx, whose FECA expects plain S8.0 two's-complement LLRs. */
   bool saturate_llrs;
+  /* LDPC_AAL_LLR_SHIFT: arithmetic right shift applied before the int8 saturation (0 = none) */
+  int llr_shift;
   /* Advertised LDPC enc/dec capability_flags, used to mask op_flags. */
   uint32_t enc_cap_flags;
   uint32_t dec_cap_flags;
@@ -811,6 +813,15 @@ static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
   active_dev.saturate_llrs = active_dev.is_t2 || dev_is_la12xx(&active_dev.info);
   if (active_dev.saturate_llrs && !active_dev.is_t2)
     LOG_I(NR_PHY, "%s: saturating LLRs to int8 instead of rescaling\n", active_dev.info.drv.driver_name);
+  {
+    const char *s = getenv("LDPC_AAL_LLR_SHIFT");
+    active_dev.llr_shift = s ? atoi(s) : 0;
+    if (active_dev.llr_shift < 0 || active_dev.llr_shift > 8)
+      active_dev.llr_shift = 0;
+    if (active_dev.llr_shift)
+      LOG_I(NR_PHY, "LDPC_AAL_LLR_SHIFT=%d: LLRs are shifted right by %d before the int8 saturation\n",
+            active_dev.llr_shift, active_dev.llr_shift);
+  }
 
   // device setup
   ret = rte_bbdev_setup_queues(dev_id, nb_queues, active_dev.info.socket_id);
@@ -2318,6 +2329,33 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
   for (int h = 0; h < nrLDPC_slot_decoding_parameters->nb_TBs; ++h) {
     nrLDPC_TB_decoding_parameters_t *p = &nrLDPC_slot_decoding_parameters->TBs[h];
     size_t data_off = 0;
+    {
+      /* Diagnostic: how much of the first code block the int8 saturation clips, per Qm.
+         QPSK only needs the sign; for 16QAM and up the magnitude carries the second bit. */
+      static uint64_t n_tb[9], n_llr[9], n_clip[9];
+      static int max_abs[9];
+      const int q = p->Qm <= 8 ? p->Qm : 0;
+      const uint32_t E0 = p->first_rE2 > 0 ? p->E : p->E2;
+      const int16_t *l = (const int16_t *)p->llr;
+      int mx = 0;
+      uint64_t clip = 0;
+      for (uint32_t k = 0; k < E0; k++) {
+        const int a = abs((int)l[k] >> active_dev.llr_shift);
+        if (a > mx)
+          mx = a;
+        clip += a > 127;
+      }
+      n_tb[q]++;
+      n_llr[q] += E0;
+      n_clip[q] += clip;
+      if (mx > max_abs[q])
+        max_abs[q] = mx;
+      if ((n_tb[q] % 500) == 0) {
+        LOG_I(NR_PHY, "AAL LLR Qm %d: %llu TBs, max |LLR| %d (after shift %d), %.2f%% clipped to int8\n", q,
+              (unsigned long long)n_tb[q], max_abs[q], active_dev.llr_shift, 100.0 * n_clip[q] / (double)n_llr[q]);
+        max_abs[q] = 0;
+      }
+    }
     /* Both LLR paths write with 16-byte SIMD stores, so the destination has to
      * stay 16-byte aligned. E is not always a multiple of 16 (e.g. 9414 at 273
      * PRB MCS 27), so code blocks CANNOT be converted straight into a packed
@@ -2342,6 +2380,10 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
         for (int j = 0; j < full; j++) {
           simde__m128i lo = simde_mm_loadu_si128((const simde__m128i *)(src + j * 16));
           simde__m128i hi = simde_mm_loadu_si128((const simde__m128i *)(src + j * 16 + 8));
+          if (active_dev.llr_shift) {
+            lo = simde_mm_srai_epi16(lo, active_dev.llr_shift);
+            hi = simde_mm_srai_epi16(hi, active_dev.llr_shift);
+          }
           simde_mm_storeu_si128(&pl_ol128[j], simde_mm_packs_epi16(lo, hi));
         }
         const int rem = E - (full << 4);
@@ -2350,6 +2392,10 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
           memcpy(tail, src + (full << 4), (size_t)rem * sizeof(int16_t));
           simde__m128i lo = simde_mm_loadu_si128((const simde__m128i *)tail);
           simde__m128i hi = simde_mm_loadu_si128((const simde__m128i *)(tail + 8));
+          if (active_dev.llr_shift) {
+            lo = simde_mm_srai_epi16(lo, active_dev.llr_shift);
+            hi = simde_mm_srai_epi16(hi, active_dev.llr_shift);
+          }
           simde_mm_storeu_si128(&pl_ol128[full], simde_mm_packs_epi16(lo, hi));
         }
       } else {
