@@ -1672,6 +1672,9 @@ void RCconfig_nr_macrlc(configmodule_interface_t *cfg, nr_cell_sched_t **out_cel
     config.ul_prbblack_SNR_threshold = *gpd(params, np, MACRLC_UL_PRBBLACK_SNR_THRESHOLD)->iptr;
     config.pucch.failure_thres = *gpd(params, np, MACRLC_PUCCHFAILURETHRES)->iptr;
     config.pusch.failure_thres = *gpd(params, np, MACRLC_PUSCHFAILURETHRES)->iptr;
+    config.ul_harq_rv0_only = *gpd(params, np, MACRLC_UL_HARQ_RV0_ONLY)->iptr != 0;
+    if (config.ul_harq_rv0_only)
+      LOG_I(GNB_APP, "PUSCH retransmissions use RV 0 only\n");
 
     LOG_I(NR_MAC,
           "PUSCH Target %d RSSI thresh %d Failure %d, PUCCH Target %d RSSI thresh %d Failure %d\n",

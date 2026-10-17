@@ -2285,6 +2285,7 @@ nfapi_nr_pusch_pdu_t *prepare_pusch_pdu(nfapi_nr_ul_tti_request_t *future_ul_tti
                                         int transform_precoding,
                                         int harq_id,
                                         int harq_round,
+                                        uint8_t rv_index,
                                         int fh,
                                         int rnti,
                                         nr_beam_mode_t beam_mode)
@@ -2328,7 +2329,7 @@ nfapi_nr_pusch_pdu_t *prepare_pusch_pdu(nfapi_nr_ul_tti_request_t *future_ul_tti
   pusch_pdu->start_symbol_index = sched_pusch->tda_info.startSymbolIndex;
   pusch_pdu->nr_of_symbols = sched_pusch->tda_info.nrOfSymbols;
   /* PUSCH PDU */
-  pusch_pdu->pusch_data.rv_index = nr_get_rv(harq_round % 4);
+  pusch_pdu->pusch_data.rv_index = rv_index;
   pusch_pdu->pusch_data.harq_process_id = harq_id;
   pusch_pdu->pusch_data.new_data_indicator = (harq_round == 0) ? 1 : 0; // not NDI but indicator for new transmission
   pusch_pdu->pusch_data.tb_size = sched_pusch->tb_size;
@@ -2477,6 +2478,7 @@ void post_process_ulsch(gNB_MAC_INST *nr_mac,
                                                       current_BWP->transform_precoding,
                                                       harq_id,
                                                       cur_harq->round,
+                                                      cell->radio_config.ul_harq_rv0_only ? 0 : nr_get_rv(cur_harq->round % 4),
                                                       current_BWP->pusch_Config && current_BWP->pusch_Config->frequencyHopping,
                                                       UE->rnti,
                                                       cell->beam_info.beam_mode);
@@ -2508,7 +2510,7 @@ void post_process_ulsch(gNB_MAC_INST *nr_mac,
         sched_pusch->tb_size,
         harq_id,
         cur_harq->round,
-        nr_get_rv(cur_harq->round % 4),
+        pusch_pdu->pusch_data.rv_index,
         cur_harq->ndi,
         sched_ctrl->estimated_ul_buffer,
         sched_ctrl->sched_ul_bytes,
