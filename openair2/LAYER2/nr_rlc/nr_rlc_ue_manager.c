@@ -2,15 +2,21 @@
  * SPDX-License-Identifier: LicenseRef-CSSL-1.0
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE // RUSAGE_THREAD, sched_getcpu()
+#endif
 #include "nr_rlc_ue_manager.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <sched.h>
+#include <sys/resource.h>
 
 #include "LOG/log.h"
 
@@ -55,6 +61,7 @@ typedef struct {
   const char *file;
   const char *func;
   int line;
+  bool watch; // stage-A site: getrusage() around the hold, see rl_slow[]
   _Atomic uint64_t n;
   _Atomic uint64_t wait_ns, wait_max_ns, wait_win_ns; // win: max since the last dump
   _Atomic uint64_t hold_ns, hold_max_ns, hold_win_ns;
@@ -64,6 +71,23 @@ static _Atomic int rl_nsites;
 static pthread_mutex_t rl_reg_lock = PTHREAD_MUTEX_INITIALIZER;
 static int rl_owner = -1; // written only by the lock holder
 static uint64_t rl_t_acq;
+
+/* Holds over RL_SLOW_NS at a watched site, with what the holding thread did meanwhile.
+ * cpu_us close to hold_us: it was running (user or kernel code). cpu_us far below: it was
+ * off the CPU, and nivcsw (preempted) or nvcsw / faults (blocked in the kernel) say why. */
+#define RL_SLOW_NS 1000000ULL
+#define RL_SLOW_N 16
+typedef struct {
+  int site;
+  int cpu;
+  uint32_t hold_us, cpu_us;
+  long minflt, majflt, nvcsw, nivcsw;
+} rl_slow_t;
+static rl_slow_t rl_slow[RL_SLOW_N];
+static _Atomic uint32_t rl_slow_n; // total recorded, ring index = n % RL_SLOW_N
+static struct rusage rl_ru_acq; // written only by the lock holder
+
+static const char *const rl_watch_funcs[] = {"nr_mac_rlc_status_ind", "nr_mac_rlc_multi_data_req"};
 
 static inline uint64_t rl_now(void)
 {
@@ -92,6 +116,9 @@ static int rl_register(const char *file, int line, const char *func)
     rl_sites[id].file = b ? b + 1 : file;
     rl_sites[id].func = func;
     rl_sites[id].line = line;
+    for (size_t i = 0; i < sizeof(rl_watch_funcs) / sizeof(rl_watch_funcs[0]); i++)
+      if (strcmp(func, rl_watch_funcs[i]) == 0)
+        rl_sites[id].watch = true;
     rl_nsites = id + 1;
   }
   pthread_mutex_unlock(&rl_reg_lock);
@@ -114,6 +141,8 @@ void nr_rlc_manager_lock_at(nr_rlc_ue_manager_t *_m, int *site, const char *file
   if (*site >= RLC_LOCK_MAX_SITES)
     return;
   rlc_lock_site_t *s = &rl_sites[*site];
+  if (s->watch)
+    getrusage(RUSAGE_THREAD, &rl_ru_acq);
   const uint64_t w = now - t_req;
   s->n++;
   s->wait_ns += w;
@@ -131,6 +160,20 @@ void nr_rlc_manager_unlock_at(nr_rlc_ue_manager_t *_m)
     s->hold_ns += h;
     rl_max(&s->hold_max_ns, h);
     rl_max(&s->hold_win_ns, h);
+    if (s->watch && h > RL_SLOW_NS) {
+      struct rusage ru;
+      getrusage(RUSAGE_THREAD, &ru);
+      const uint64_t cpu0 = rl_ru_acq.ru_utime.tv_sec * 1000000ULL + rl_ru_acq.ru_utime.tv_usec + rl_ru_acq.ru_stime.tv_sec * 1000000ULL + rl_ru_acq.ru_stime.tv_usec;
+      const uint64_t cpu1 = ru.ru_utime.tv_sec * 1000000ULL + ru.ru_utime.tv_usec + ru.ru_stime.tv_sec * 1000000ULL + ru.ru_stime.tv_usec;
+      rl_slow[atomic_fetch_add(&rl_slow_n, 1) % RL_SLOW_N] = (rl_slow_t){.site = site,
+                                                                         .cpu = sched_getcpu(),
+                                                                         .hold_us = h / 1000,
+                                                                         .cpu_us = cpu1 - cpu0,
+                                                                         .minflt = ru.ru_minflt - rl_ru_acq.ru_minflt,
+                                                                         .majflt = ru.ru_majflt - rl_ru_acq.ru_majflt,
+                                                                         .nvcsw = ru.ru_nvcsw - rl_ru_acq.ru_nvcsw,
+                                                                         .nivcsw = ru.ru_nivcsw - rl_ru_acq.ru_nivcsw};
+    }
   }
   rl_owner = -1;
   if (pthread_mutex_unlock(&m->lock)) {
@@ -157,6 +200,14 @@ size_t nr_rlc_lock_stats(char *buf, size_t len)
                   s->file, s->line, s->func, (unsigned long long)n,
                   s->wait_ns / 1e3 / n, s->wait_max_ns / 1e3, ww / 1e3,
                   s->hold_ns / 1e3 / n, s->hold_max_ns / 1e3, hw / 1e3);
+  }
+  const uint32_t ns_slow = rl_slow_n;
+  if (ns_slow && p < end) {
+    p += snprintf(p, end - p, "RLC lock holds > 1 ms at stage-A sites: %u (last %d: func hold_us cpu_us minflt majflt nvcsw nivcsw core)\n", ns_slow, ns_slow < RL_SLOW_N ? (int)ns_slow : RL_SLOW_N);
+    for (uint32_t k = ns_slow > RL_SLOW_N ? ns_slow - RL_SLOW_N : 0; k < ns_slow && p < end; k++) {
+      const rl_slow_t *e = &rl_slow[k % RL_SLOW_N];
+      p += snprintf(p, end - p, "  %-28s %6u %6u %5ld %3ld %4ld %4ld %3d\n", rl_sites[e->site].func, e->hold_us, e->cpu_us, e->minflt, e->majflt, e->nvcsw, e->nivcsw, e->cpu);
+    }
   }
   return p - buf;
 }
