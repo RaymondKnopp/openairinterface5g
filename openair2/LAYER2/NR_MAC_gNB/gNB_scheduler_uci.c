@@ -967,6 +967,15 @@ void handle_nr_uci_pucch_0_1(module_id_t mod_id, int cell_id, frame_t frame, slo
             nrmac->last_sched_frame, nrmac->last_sched_slot, d, uci_01->harq.num_harq, uci_01->rnti);
     }
   }
+  const int w_pusch = nr_ul_dci_targets(frame, slot, uci_01->rnti);
+  typeof(nrmac->harq_fb_pusch[0]) *hs = &nrmac->harq_fb_pusch[w_pusch];
+  if (((uci_01->pduBitmap >> 1) & 0x01) && uci_01->harq.num_harq > 0) {
+    hs->pdus++;
+    if (uci_01->ul_cqi != 0xff) {
+      hs->snrx10_sum += uci_01->ul_cqi * 5 - 640;
+      hs->snr_n++;
+    }
+  }
   if (((uci_01->pduBitmap >> 1) & 0x01)) {
     // iterate over received harq bits
     for (int harq_bit = 0; harq_bit < uci_01->harq.num_harq; harq_bit++) {
@@ -983,6 +992,21 @@ void handle_nr_uci_pucch_0_1(module_id_t mod_id, int cell_id, frame_t frame, slo
       LOG_D(NR_MAC,"%4d.%2d bit %d pid %d ack/nack %d\n",frame, slot, harq_bit,pid,harq_value);
       nr_mac_update_pdcch_closed_loop_adjust(sched_ctrl, harq_confidence != 0);
       bool success = harq_value == 0 && harq_confidence == 0;
+      const int fb_kind = harq_confidence != 0 ? 2 : (harq_value != 0 ? 1 : 0); // ACK, NACK, low confidence
+      hs->bits++;
+      hs->ack += fb_kind == 0;
+      hs->nack += fb_kind == 1;
+      hs->lowconf += fb_kind == 2;
+      if (harq->round == 0) {
+        harq->diag_nack = fb_kind ? 1 + w_pusch * 2 + (fb_kind - 1) : 0;
+      } else if (harq->round == 1 && harq->diag_nack) {
+        const int b = harq->diag_nack - 1;
+        nrmac->harq_fb_pusch[b / 2].retx_n[b % 2]++;
+        nrmac->harq_fb_pusch[b / 2].retx_ack[b % 2] += fb_kind == 0;
+        nrmac->harq_retx_n[b / 2][w_pusch]++;
+        nrmac->harq_retx_ack[b / 2][w_pusch] += fb_kind == 0;
+        harq->diag_nack = 0;
+      }
       // TCI state switch occurs at the first slot that is after slot n_+ T_HARQ + 3N_sf_slot (8.10.3 of 38.133)
       if (success && harq->start_tci_timer) {
         int slots = 3 * cell->frame_structure.numb_slots_frame / 10;

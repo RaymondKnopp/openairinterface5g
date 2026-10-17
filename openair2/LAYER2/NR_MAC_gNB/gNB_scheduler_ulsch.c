@@ -715,6 +715,17 @@ static void ul_dci_outcome(int f, int s, rnti_t rnti, char o)
   }
 }
 
+/* Was a PUSCH of this UE scheduled in frame.slot?  Under sched_lock. */
+bool nr_ul_dci_targets(int f, int s, rnti_t rnti)
+{
+  for (unsigned i = 1; i <= 64 && i <= ul_dci_n; i++) {
+    const ul_dci_rec_t *r = &ul_dci_ring[(ul_dci_n - i) % UL_DCI_RING];
+    if (r->rnti == rnti && r->tf == f && r->ts == s)
+      return true;
+  }
+  return false;
+}
+
 /* On a UL CRC failure: the DCIs that targeted this PUSCH, and the last ones of the same HARQ pid */
 static void ul_dci_dump(int f, int s, rnti_t rnti, int pid)
 {

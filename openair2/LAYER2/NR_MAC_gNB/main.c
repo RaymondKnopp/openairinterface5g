@@ -246,6 +246,28 @@ void *nrmac_stats_thread(void *arg) {
         p += snprintf(p, end - p, "\n");
       }
     }
+    /* PUCCH F0/F1 HARQ-ACK outcome with and without a PUSCH of the same UE in the slot */
+    for (int w = 0; w < 2 && p < end; w++) {
+      const typeof(gNB->harq_fb_pusch[0]) *h = &gNB->harq_fb_pusch[w];
+      if (!h->bits)
+        continue;
+      p += snprintf(p, end - p,
+                    "PUCCH F0/1 HARQ %s PUSCH: pdus %llu bits %llu ACK %.2f%% NACK %.2f%% lowconf %.2f%% SNR %.1f dB | "
+                    "round-0 NACK -> retx ACK %llu/%llu, lowconf -> retx ACK %llu/%llu\n",
+                    w ? "with   " : "without", (unsigned long long)h->pdus, (unsigned long long)h->bits,
+                    100.0 * h->ack / h->bits, 100.0 * h->nack / h->bits, 100.0 * h->lowconf / h->bits,
+                    h->snr_n ? h->snrx10_sum / 10.0 / h->snr_n : 0.0,
+                    (unsigned long long)h->retx_ack[0], (unsigned long long)h->retx_n[0],
+                    (unsigned long long)h->retx_ack[1], (unsigned long long)h->retx_n[1]);
+    }
+    if (gNB->harq_retx_n[0][0] + gNB->harq_retx_n[0][1] + gNB->harq_retx_n[1][0] + gNB->harq_retx_n[1][1])
+      p += snprintf(p, end - p,
+                    "round-0 NACK -> retx ACK by PUSCH in [NACK slot][retx feedback slot]: "
+                    "[-][-] %llu/%llu  [-][P] %llu/%llu  [P][-] %llu/%llu  [P][P] %llu/%llu\n",
+                    (unsigned long long)gNB->harq_retx_ack[0][0], (unsigned long long)gNB->harq_retx_n[0][0],
+                    (unsigned long long)gNB->harq_retx_ack[0][1], (unsigned long long)gNB->harq_retx_n[0][1],
+                    (unsigned long long)gNB->harq_retx_ack[1][0], (unsigned long long)gNB->harq_retx_n[1][0],
+                    (unsigned long long)gNB->harq_retx_ack[1][1], (unsigned long long)gNB->harq_retx_n[1][1]);
     /* Per-slot-of-frame UL outcome.  Only slots that actually carry PUSCH appear, so the
        table doubles as a map of where the scheduler puts UL in the TDD pattern.  Printed
        once rather than inside the per-cell loop above: ul_slot_stats lives on the MAC

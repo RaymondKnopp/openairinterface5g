@@ -578,6 +578,8 @@ typedef struct NR_UE_harq {
   byte_array_t transportBlock;
   uint32_t tb_size;  // size of currently stored TB
   bool start_tci_timer;
+  /// round-0 NACK seen on PUCCH F0/F1, for gNB_MAC_INST::harq_fb_pusch: 0 none, else 1 + w * 2 + low_confidence
+  uint8_t diag_nack;
   /// sched_pdsch keeps information on MCS etc used for the initial transmission
   NR_sched_pdsch_t sched_pdsch;
 } NR_UE_harq_t;
@@ -1380,6 +1382,18 @@ typedef struct gNB_MAC_INST_s {
   int last_sched_frame;
   int last_sched_slot;
   uint64_t harq_fb_lat_hist[16];
+  /* PUCCH format 0/1 HARQ-ACK outcome, [0] in slots without a PUSCH from the same UE, [1] with
+   * one.  A NACK whose first retransmission is then ACKed was likely an ACK the PUCCH decode
+   * lost: harq_retx_* follow round-0 NACKs ([w][0] real NACK, [w][1] low confidence). */
+  struct {
+    uint64_t pdus, bits, ack, nack, lowconf;
+    int64_t snrx10_sum; // over pdus with a valid ul_cqi
+    uint64_t snr_n;
+    uint64_t retx_n[2], retx_ack[2];
+  } harq_fb_pusch[2];
+  /* the same round-0 NACKs by [PUSCH in the NACK slot][PUSCH in the slot of the feedback for the
+   * retransmission]: failures only in the second column point at feedback, not at decoding */
+  uint64_t harq_retx_n[2][2], harq_retx_ack[2][2];
   /// F1-C/U network configuration (addresses and ports)
   f1ap_net_config_t net_config;
   /// Nvipc parameters for FAPI interface with Aerial
