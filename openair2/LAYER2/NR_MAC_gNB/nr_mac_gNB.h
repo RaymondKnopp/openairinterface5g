@@ -202,6 +202,8 @@ typedef struct nr_mac_config_s {
   bool force_UL256qam_off;
   bool use_deltaMCS;
   int maxMIMO_layers;
+  /// PUSCH dmrs-AdditionalPosition, -1 = not signalled (pos2)
+  int pusch_dmrs_addpos;
   bool disable_harq;
   nr_power_config_t pusch;
   /// SNR threshold needed to put or not a PRB in the black list
