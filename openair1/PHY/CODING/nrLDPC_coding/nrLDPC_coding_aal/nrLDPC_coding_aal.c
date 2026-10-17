@@ -158,6 +158,18 @@ static size_t tb_llr_bytes(const nrLDPC_TB_decoding_parameters_t *p)
 
 pthread_mutex_t encode_mutex;
 pthread_mutex_t decode_mutex;
+/* LDPC_AAL_SERIALIZE=1: never have encode and decode operations in flight on the device at
+   the same time (the enqueue/dequeue sections only; the host-side conversion and copies stay
+   concurrent). The LA1200 was seen to stop returning operations under heavy DL encoding with
+   UL decoding running, which ended in enc_timeout_fatal(). */
+static pthread_mutex_t dev_mutex = PTHREAD_MUTEX_INITIALIZER;
+static bool dev_serialize(void)
+{
+  static int v = -1;
+  if (v < 0)
+    v = getenv("LDPC_AAL_SERIALIZE") != NULL;
+  return v != 0;
+}
 
 /* we assume one active baseband device only */
 struct active_device {
@@ -1682,6 +1694,8 @@ static int pmd_lcore_ldpc_dec(void *arg)
   start_meas(&nrLDPC_slot_decoding_parameters->TBs[0].ts_ldpc_decode);
 
   uint16_t enq = 0, deq = 0;
+  if (dev_serialize())
+    pthread_mutex_lock(&dev_mutex);
   while (enq < num_segments) {
     uint16_t num_to_enq = num_segments - enq;
     /* Drop any op_flag the device does not advertise (see enc/dec_cap_flags). */
@@ -1699,6 +1713,8 @@ static int pmd_lcore_ldpc_dec(void *arg)
     time_out++;
     DevAssert(time_out <= TIME_OUT_POLL);
   }
+  if (dev_serialize())
+    pthread_mutex_unlock(&dev_mutex);
 
   // Stop timer
   // We report timing only once in (0,0) since the timers are merged at the end
@@ -1832,6 +1848,8 @@ static int pmd_lcore_ldpc_enc(void *arg)
   start_meas(&nrLDPC_slot_encoding_parameters->TBs[0].segments[0].ts_ldpc_encode);
 
   uint16_t enq = 0, deq = 0;
+  if (dev_serialize())
+    pthread_mutex_lock(&dev_mutex);
   while (enq < num_segments) {
     uint16_t num_to_enq = num_segments - enq;
     /* Drop any op_flag the device does not advertise (see enc/dec_cap_flags). */
@@ -1847,6 +1865,8 @@ static int pmd_lcore_ldpc_enc(void *arg)
     if (time_out > TIME_OUT_POLL)
       enc_timeout_fatal(nrLDPC_slot_encoding_parameters, num_segments, enq, deq);
   }
+  if (dev_serialize())
+    pthread_mutex_unlock(&dev_mutex);
   stop_meas(&nrLDPC_slot_encoding_parameters->TBs[0].segments[0].ts_ldpc_encode);
   ret = retrieve_ldpc_enc_op(ops_deq, nrLDPC_slot_encoding_parameters);
   AssertFatal(ret == 0, "Failed to retrieve LDPC encoding op!");
