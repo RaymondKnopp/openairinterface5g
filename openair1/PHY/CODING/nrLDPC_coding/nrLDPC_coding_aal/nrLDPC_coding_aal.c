@@ -431,6 +431,23 @@ static unsigned int optimal_mempool_size(unsigned int val)
   return rte_align32pow2(val + 1) - 1;
 }
 
+/* The la12xx bbdev is not a DPAA2 device: these mbufs are plain memory reached by
+ * IOVA, never hardware buffer-pool (BPID) buffers. But when xran brings up its
+ * net_dpaa2 port the fslmc bus sets the *platform default* mempool ops to
+ * "dpaa2", so rte_pktmbuf_pool_create() here allocates a DPBP per pool and tries
+ * to affine a QBMan portal on the (unpinned) calling thread:
+ *   DPAA2_BUS: Thread not affined to a single core
+ *   DPAA2_MEMPOOL: DPAA2 pool not available!
+ * - i.e. we silently eat the DPRC's DPBPs until one of these four pools fails.
+ * Ask for the software ring ops explicitly. Under the simulators there is no
+ * fslmc device, the default is already "ring_mp_mc", so this changes nothing
+ * there - which is why this only appeared once fronthaul was in the same
+ * process. */
+static struct rte_mempool *aal_pktmbuf_pool_create(const char *name, unsigned int n, uint16_t data_room_size, int socket_id)
+{
+  return rte_pktmbuf_pool_create_by_ops(name, n, 0, 0, data_room_size, socket_id, "ring_mp_mc");
+}
+
 // based on DPDK BBDEV create_mempools
 static int create_mempools(struct active_device *ad, int socket_id, uint16_t num_ops, int out_buff_sz, int in_max_sz)
 {
@@ -475,7 +492,7 @@ static int create_mempools(struct active_device *ad, int socket_id, uint16_t num
 #endif
   LOG_I(NR_PHY, "bbdev input pool: %u mbufs x %u B room (%u MiB)\n",
         mbuf_pool_size, data_room_size, (mbuf_pool_size * data_room_size) >> 20);
-  ad->in_mbuf_pool = rte_pktmbuf_pool_create("in_mbuf_pool", mbuf_pool_size, 0, 0, data_room_size, socket_id);
+  ad->in_mbuf_pool = aal_pktmbuf_pool_create("in_mbuf_pool", mbuf_pool_size, data_room_size, socket_id);
   AssertFatal(ad->in_mbuf_pool != NULL,
               "ERROR Failed to create %u items input pktmbuf pool for dev %u on socket %d.",
               mbuf_pool_size,
@@ -484,7 +501,7 @@ static int create_mempools(struct active_device *ad, int socket_id, uint16_t num
 
   /* Hard outputs */
   data_room_size = RTE_MAX(out_buff_sz + RTE_PKTMBUF_HEADROOM + FILLER_HEADROOM, (unsigned int)RTE_MBUF_DEFAULT_BUF_SIZE);
-  ad->hard_out_mbuf_pool = rte_pktmbuf_pool_create("hard_out_mbuf_pool", mbuf_pool_size, 0, 0, data_room_size, socket_id);
+  ad->hard_out_mbuf_pool = aal_pktmbuf_pool_create("hard_out_mbuf_pool", mbuf_pool_size, data_room_size, socket_id);
   AssertFatal(ad->hard_out_mbuf_pool != NULL,
               "ERROR Failed to create %u items hard output pktmbuf pool for dev %u on socket %d.",
               mbuf_pool_size,
@@ -493,7 +510,7 @@ static int create_mempools(struct active_device *ad, int socket_id, uint16_t num
 
   /* HARQ outputs */
   data_room_size = LDPC_MAX_CB_SIZE;
-  ad->harq_out_mbuf_pool = rte_pktmbuf_pool_create("harq_out_mbuf_pool", mbuf_pool_size, 0, 0, data_room_size, socket_id);
+  ad->harq_out_mbuf_pool = aal_pktmbuf_pool_create("harq_out_mbuf_pool", mbuf_pool_size, data_room_size, socket_id);
   AssertFatal(ad->harq_out_mbuf_pool != NULL,
               "ERROR Failed to create %u items harq output pktmbuf pool for dev %u on socket %d.",
               mbuf_pool_size,
@@ -504,7 +521,7 @@ static int create_mempools(struct active_device *ad, int socket_id, uint16_t num
   // Note: This is used as our harq buffer to store the combined outputs across iterations
   data_room_size = LDPC_MAX_CB_SIZE;
   ad->harq_in_mbuf_pool =
-      rte_pktmbuf_pool_create("harq_in_mbuf_pool", active_dev.num_harq_codeblock, 0, 0, data_room_size, socket_id);
+      aal_pktmbuf_pool_create("harq_in_mbuf_pool", active_dev.num_harq_codeblock, data_room_size, socket_id);
   AssertFatal(ad->harq_in_mbuf_pool != NULL,
               "ERROR Failed to create %u items harq input pktmbuf pool for dev %u on socket %d.",
               active_dev.num_harq_codeblock,
@@ -696,7 +713,18 @@ static int add_dev(uint8_t dev_id, bool is_t2, uint32_t num_harq_codeblock)
   active_dev.driver_name = active_dev.info.drv.driver_name;
   active_dev.dev_id = dev_id;
 
-  nb_queues = RTE_MIN(rte_lcore_count(), active_dev.info.drv.max_num_queues);
+  /* Set up exactly as many queues as we go on to configure: one LDPC encode
+   * and one LDPC decode. Sizing this from rte_lcore_count() is wrong - the
+   * la12xx PMD's la12xx_start() walks every queue in dev->data->queues[] and
+   * dereferences queue_private, which is NULL for a queue that was set up but
+   * never configured, so the extra queues segfault at rte_bbdev_start().
+   * This only showed up under nr-softmodem: there xran owns EAL and brings up
+   * 3 lcores, whereas the simulators initialise EAL themselves with 2, which
+   * happened to match the two queues and hid the bug. */
+  nb_queues = 2;
+  AssertFatal(active_dev.info.drv.max_num_queues >= nb_queues,
+              "bbdev %s advertises only %u queue(s), need %u (one encode, one decode)",
+              active_dev.info.dev_name, active_dev.info.drv.max_num_queues, nb_queues);
   nb_queues = RTE_MIN(nb_queues, (unsigned int)MAX_QUEUES);
 
   // debug device capabilities
