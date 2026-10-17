@@ -602,6 +602,8 @@ typedef struct PHY_VARS_gNB_s {
    * waits for a free grid (non-zero only when the RU stage is two slots behind) */
   time_stats_t tx_ru_qwait;
   time_stats_t tx_grid_wait;
+  /* slots between a TX slot and the last RX slot when its RU send finished; see tx_ru_path() */
+  uint64_t tx_send_margin_hist[8];
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;

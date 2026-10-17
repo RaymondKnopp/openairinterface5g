@@ -243,6 +243,17 @@ static void tx_ru_path(PHY_VARS_gNB *gNB, int frame, int slot, int slot_type, op
   if (ru->fh_south_out)
     ru->fh_south_out(ru, frame, slot, timestamp_tx);
   STOP_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, slot_type, NR_DOWNLINK_SLOT);
+  /* How far ahead of the fronthaul this slot was when its send finished: slots between it
+   * and the last RX slot ru_thread has seen.  TX targets tti_rx + sl_ahead, so a healthy
+   * slot finishes several slots ahead; one at 0 or 1 reached xran around or after its
+   * U-plane send time, and the O-RU then transmitted whatever the buffer held before. */
+  if (cpu_meas_enabled) {
+    const int spf = gNB->frame_parms.slots_per_frame;
+    const int wrap = 1024 * spf;
+    int d = (frame * spf + slot) - (ru->proc.frame_rx * spf + ru->proc.tti_rx);
+    d = ((d % wrap) + wrap + wrap / 2) % wrap - wrap / 2;
+    gNB->tx_send_margin_hist[d <= 0 ? 0 : (d >= 7 ? 7 : d)]++;
+  }
 }
 
 /* PDSCH summary of a slot for the overrun alarm */
@@ -1055,6 +1066,19 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
       for (int i = 0; i < 24 && output < end; i++)
         if (gNB->early_ind_lag_hist[i])
           output += snprintf(output, end - output, " %d%s:%.1f%%", i, i == 23 ? "+" : "", 100.0 * gNB->early_ind_lag_hist[i] / tot);
+      if (output < end)
+        output += snprintf(output, end - output, "\n");
+    }
+  }
+  {
+    uint64_t tot = 0;
+    for (int i = 0; i < 8; i++)
+      tot += gNB->tx_send_margin_hist[i];
+    if (tot && output < end) {
+      output += snprintf(output, end - output, "%25s: (%llu)", "TX send: tx - rx slots", (unsigned long long)tot);
+      for (int i = 0; i < 8 && output < end; i++)
+        if (gNB->tx_send_margin_hist[i])
+          output += snprintf(output, end - output, " %s%d%s:%.2f%%", i == 0 ? "<=" : "", i, i == 7 ? "+" : "", 100.0 * gNB->tx_send_margin_hist[i] / tot);
       if (output < end)
         output += snprintf(output, end - output, "\n");
     }
