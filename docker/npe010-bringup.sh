@@ -19,11 +19,13 @@
 #   5 compose    - plugin reinstalled from the eMMC (/usr/local is on the ramdisk)
 #   6 yami       - LA12xx modems, for the LDPC offload
 #   7 dpaa2      - eth2 (PTP) + dprc.2 -> vfio-fsl-mc (fronthaul)
+#   7b eth1      - management port: all RX on core 0, no TX pause (see do_eth1)
 #   8 ptp        - native ptp4l/phc2sys on eth2; also sets the clock (no RTC)
 #
 #   npe010-bringup.sh          everything
 #   npe010-bringup.sh status   report only, change nothing
 #   npe010-bringup.sh ptp      restart PTP only
+#   npe010-bringup.sh eth1     re-apply the eth1 steering only
 set -u
 
 EMMC=/dev/mmcblk1p3
@@ -140,6 +142,34 @@ do_dpaa2() {
     fi
 }
 
+# ----------------------------------------------------------- 7b eth1 (mgmt)
+# eth1 (dpni.0, management + F1 to the CU) hashes RX flows over 16 queues, one
+# per core, each serviced by that core's irq/NNN-dpio.N thread at FIFO 50
+# (PREEMPT_RT). On isolated cores 2-15 the DU runs RT 97/98 threads that never
+# yield, so a flow hashed to one of them is never serviced. Its queue fills, the
+# MAC then sends PAUSE frames (tx pause is on by default) and the switch stops
+# sending ANYTHING to the board: F1, ssh and even ping/ARP die until the DU stops.
+# Which core a flow lands on is luck of the hash, so it looked like random DU
+# crashes. Fix: steer all IPv4 RX to queue 0 (core 0, housekeeping) and turn TX
+# pause off so one stuck queue can never freeze the whole link again.
+# Busybox has no ethtool; the ptp image does.
+ETHTOOL="docker run --rm --net=host --privileged --entrypoint ethtool ptp:latest"
+do_eth1() {
+    step "7b/8 eth1 management port (RX on core 0, no TX pause)"
+    if ! docker image inspect ptp:latest >/dev/null 2>&1; then
+        warn "ptp:latest image missing - no ethtool, eth1 left at defaults (DU load can freeze it)"
+        return 0
+    fi
+    $ETHTOOL -A eth1 tx off rx on >/dev/null 2>&1
+    if ! $ETHTOOL -n eth1 2>/dev/null | grep -q "Direct to queue 0"; then
+        $ETHTOOL -N eth1 flow-type ip4 action 0 >/dev/null 2>&1
+    fi
+    tx=$($ETHTOOL -a eth1 2>/dev/null | sed -n 's/^TX:[[:space:]]*//p')
+    q0=$($ETHTOOL -n eth1 2>/dev/null | grep -c "Direct to queue 0")
+    say "  tx pause: ${tx:-?}   rules to queue 0: $q0"
+    [ "$tx" = "off" ] && [ "$q0" -ge 1 ] || warn "eth1 steering not applied - DU load can freeze the management port"
+}
+
 # ------------------------------------------------------------------ 8 ptp
 # Native linuxptp, not the container. Same settings the ptp-docker image used
 # (domain 24, L2, client-only, hardware timestamping) - that one locked to
@@ -233,6 +263,10 @@ summary() {
 case "${1:-all}" in
 status) summary ;;
 ptp)    do_ptp ;;
-all)    do_clock; do_storage; do_cpu; do_docker; do_compose; do_yami; do_dpaa2; do_ptp; summary ;;
-*)      echo "usage: $0 [all|status|ptp]" >&2; exit 1 ;;
+all)    do_clock; do_storage; do_cpu; do_docker; do_compose; do_yami; do_dpaa2; do_eth1; do_ptp; summary ;;
+eth1)   do_eth1 ;;
+*)      echo "usage: $0 [all|status|ptp|eth1]" >&2; exit 1 ;;
 esac
+
+# reinstall SSH keys (/root is on the initramfs)
+/mnt/backup/setup-keys.sh
