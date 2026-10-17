@@ -158,18 +158,13 @@ static size_t tb_llr_bytes(const nrLDPC_TB_decoding_parameters_t *p)
 
 pthread_mutex_t encode_mutex;
 pthread_mutex_t decode_mutex;
-/* LDPC_AAL_SERIALIZE=1: never have encode and decode operations in flight on the device at
-   the same time (the enqueue/dequeue sections only; the host-side conversion and copies stay
-   concurrent). The LA1200 was seen to stop returning operations under heavy DL encoding with
-   UL decoding running, which ended in enc_timeout_fatal(). */
+/* Never have encode and decode operations in flight on the device at the same time (the
+   enqueue/dequeue sections only; the host-side conversion and copies stay concurrent). The
+   LA1200 was seen to stop returning operations under heavy DL encoding with UL decoding
+   running, which ended in enc_timeout_fatal(); serialized it has not since, at no measurable
+   cost. Default on for the LA12xx; LDPC_AAL_SERIALIZE=0/1 overrides. See dev_serialize(). */
 static pthread_mutex_t dev_mutex = PTHREAD_MUTEX_INITIALIZER;
-static bool dev_serialize(void)
-{
-  static int v = -1;
-  if (v < 0)
-    v = getenv("LDPC_AAL_SERIALIZE") != NULL;
-  return v != 0;
-}
+static bool dev_serialize(void);
 
 /* we assume one active baseband device only */
 struct active_device {
@@ -426,6 +421,17 @@ static const struct rte_bbdev_op_cap *find_bbdev_cap(const struct rte_bbdev_info
 static bool dev_is_la12xx(const struct rte_bbdev_info *info)
 {
   return info->drv.driver_name && strcmp(info->drv.driver_name, "baseband_la12xx") == 0;
+}
+
+/* first called once the device is up, so active_dev is known */
+static bool dev_serialize(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("LDPC_AAL_SERIALIZE");
+    v = e ? atoi(e) != 0 : dev_is_la12xx(&active_dev.info);
+  }
+  return v != 0;
 }
 
 /* calculates optimal mempool size not smaller than the val */
@@ -1234,14 +1240,19 @@ static void tb_harq_attach(const nrLDPC_TB_decoding_parameters_t *p, struct rte_
   h->ncb = d->n_cb;
 }
 
+/* Default on in TB mode on the LA12xx (the only device whose PMD needs it); LDPC_AAL_TB_HARQ=0/1
+   overrides, LDPC_AAL_NO_HARQ disables. Called once the device is selected. */
 static void tb_harq_init(int max_num_pxsch)
 {
-  if (!tb_mode() || !getenv("LDPC_AAL_TB_HARQ") || getenv("LDPC_AAL_NO_HARQ"))
+  const char *e = getenv("LDPC_AAL_TB_HARQ");
+  const bool on = e ? atoi(e) != 0 : dev_is_la12xx(&active_dev.info);
+  if (!tb_mode() || !on || getenv("LDPC_AAL_NO_HARQ"))
     return;
   tb_harq_n = max_num_pxsch;
   tb_harq = calloc(tb_harq_n, sizeof(*tb_harq));
   AssertFatal(tb_harq != NULL, "calloc failed\n");
-  LOG_I(NR_PHY, "LDPC_AAL_TB_HARQ: HARQ combining in TB mode for %d HARQ processes\n", tb_harq_n);
+  LOG_I(NR_PHY, "AAL: HARQ combining in TB mode for %d HARQ processes, encode/decode %s on the device\n", tb_harq_n,
+        dev_serialize() ? "serialized" : "concurrent");
 }
 
 static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
@@ -2044,7 +2055,6 @@ static int normalize_dpdk_dev(const char *input, char *output, size_t out_len)
 // OAI CODE
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
-  tb_harq_init(max_num_pxsch);
   pthread_mutex_init(&encode_mutex, NULL);
   pthread_mutex_init(&decode_mutex, NULL);
 
@@ -2237,6 +2247,7 @@ int32_t nrLDPC_coding_init(int max_num_pxsch)
   init_op_data_objs_harq(active_dev.harq_buffers, active_dev.harq_in_mbuf_pool);
 
   op_params->num_lcores = 1;
+  tb_harq_init(max_num_pxsch);
   return 0;
 }
 
