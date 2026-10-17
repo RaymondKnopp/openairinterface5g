@@ -642,7 +642,16 @@ static int evaluate_ri_report(uint8_t *payload,
        count++;
      }
   }
-  AssertFatal(1==0, "Decoded ri %d does not correspond to any valid value in ri_restriction %d\n",ri_index,ri_restriction);
+  /* CSI on PUCCH format 2 carries no CRC up to 11 bits, so a report decoded from a bad
+   * PUCCH can hold any value: drop it rather than abort on air-interface input */
+  static uint64_t n_invalid;
+  if (n_invalid++ < 10 || n_invalid % 1000 == 0)
+    LOG_W(NR_MAC,
+          "Decoded ri %d does not correspond to any valid value in ri_restriction %d, dropping the CSI report (%llu so far)\n",
+          ri_index,
+          ri_restriction,
+          (unsigned long long)n_invalid);
+  return -1;
 }
 
 static void evaluate_cqi_report(nr_cell_sched_t *cell,
@@ -806,6 +815,8 @@ static void extract_pucch_csi_report(NR_CSI_MeasConfig_t *csi_MeasConfig,
             ri_bitlen = csi_report->csi_meas_bitlen.ri_bitlen;
             if (ri_bitlen)
               r_index = evaluate_ri_report(payload, ri_bitlen, csi_report->csi_meas_bitlen.ri_restriction, cumul_bits, sched_ctrl);
+            if (r_index < 0)
+              goto invalid_csi_payload; // the fields after RI are laid out by RI
             cumul_bits += ri_bitlen;
             if (ri_bitlen)
               skip_zero_padding(&cumul_bits, csi_report, r_index, bitlen);
@@ -820,6 +831,8 @@ static void extract_pucch_csi_report(NR_CSI_MeasConfig_t *csi_MeasConfig,
             ri_bitlen = csi_report->csi_meas_bitlen.ri_bitlen;
             if (ri_bitlen)
               r_index = evaluate_ri_report(payload, ri_bitlen, csi_report->csi_meas_bitlen.ri_restriction, cumul_bits, sched_ctrl);
+            if (r_index < 0)
+              goto invalid_csi_payload; // the fields after RI are laid out by RI
             cumul_bits += ri_bitlen;
             if (ri_bitlen) {
               skip_zero_padding(&cumul_bits, csi_report, r_index, bitlen);
@@ -838,6 +851,8 @@ static void extract_pucch_csi_report(NR_CSI_MeasConfig_t *csi_MeasConfig,
             ri_bitlen = csi_report->csi_meas_bitlen.ri_bitlen;
             if (ri_bitlen)
               r_index = evaluate_ri_report(payload, ri_bitlen, csi_report->csi_meas_bitlen.ri_restriction, cumul_bits, sched_ctrl);
+            if (r_index < 0)
+              goto invalid_csi_payload; // the fields after RI are laid out by RI
             cumul_bits += ri_bitlen;
             li_bitlen = evaluate_li_report(payload, csi_report, cumul_bits, r_index, sched_ctrl);
             cumul_bits += li_bitlen;
@@ -855,6 +870,7 @@ static void extract_pucch_csi_report(NR_CSI_MeasConfig_t *csi_MeasConfig,
       }
     }
   }
+invalid_csi_payload:
   if (new_bf_index != -1)
     // Trigger RRCReconfiguration. Need to be out of the for loop as it may modify csi_MeasConfig
     beam_switching_procedure(nrmac, cell, UE, new_bf_index);
