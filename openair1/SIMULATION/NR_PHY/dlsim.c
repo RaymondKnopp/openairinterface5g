@@ -439,6 +439,7 @@ int main(int argc, char **argv)
   uint8_t  max_ldpc_iterations = 5;
   // number of PDSCH symbols per thread = 0 means do not use thread pool
   int num_pdsch_symbols_per_thread = 0;
+  int phase_comp_opt = 1; // -C 0 turns off TX phase compensation (rotation) for timing; UE will not decode
   if ((uniqCfg = load_configmodule(argc, argv, CONFIG_ENABLECMDLINEONLY)) == 0) {
     exit_fun("[NR_DLSIM] Error, configuration module init failed\n");
   }
@@ -460,7 +461,7 @@ int main(int argc, char **argv)
   void *d_channel_coeffs_gpu = NULL;
 #endif
 
-  while ((c = getopt(argc, argv, "--:O:f:hA:p:g:i:n:s:S:t:v:x:y:z:o:H:M:N:F:GR:d:D:PI:L:a:b:e:m:w:T:U:q:X:Y:Z:Q:EK:")) != -1) {
+  while ((c = getopt(argc, argv, "--:O:f:hA:p:g:i:n:s:S:t:v:x:y:z:o:H:M:N:F:GR:d:D:PI:L:a:b:e:m:w:T:U:q:X:Y:Z:Q:C:EK:")) != -1) {
     /* ignore long options starting with '--', option '-O' and their arguments that are handled by configmodule */
     /* with this opstring getopt returns 1 for non-option arguments, refer to 'man 3 getopt' */
     if (c == 1 || c == '-' || c == 'O')
@@ -666,6 +667,9 @@ int main(int argc, char **argv)
       gNBthreads[sizeof(gNBthreads)-1]=0;
       break;
 
+    case 'C':
+      phase_comp_opt = atoi(optarg);
+      break;
     case 'Y':
       num_pdsch_symbols_per_thread = atoi(optarg);
       break;
@@ -781,7 +785,7 @@ int main(int argc, char **argv)
 
   gNB = RC.gNB[0];
   gNB->ofdm_offset_divisor = UINT_MAX;
-  gNB->phase_comp = true; // we need to perform phase compensation, otherwise everything will fail
+  gNB->phase_comp = phase_comp_opt; // -C 0 disables TX phase compensation for DU-representative timing (UE will not decode)
   gNB->TX_AMP = (int16_t)(32767.0 / pow(10.0, .05 * (double)(tx_amp)));
   frame_parms = &gNB->frame_parms; //to be initialized I suppose (maybe not necessary for PBCH)
   frame_parms->nb_antennas_tx = n_tx;
@@ -985,7 +989,16 @@ int main(int argc, char **argv)
   memcpy(&UE->frame_parms, frame_parms, sizeof(*frame_parms));
   UE->frame_parms.nb_antennas_rx = n_rx;
   UE->frame_parms.nb_antenna_ports_gNB = n_tx;
-  UE->nrLDPC_coding_interface = gNB->nrLDPC_coding_interface;
+  if (getenv("DLSIM_UE_LDPC_CPU")) {
+    /* Correctness isolation: gNB encodes on the LA1200 offload, UE decodes on
+       the CPU reference (libldpc.so). Explicit version "" overrides the
+       --loader.ldpc.shlibversion=_aal that selects the offload for the gNB. */
+    int rc_ue_ldpc = load_nrLDPC_coding_interface("", &UE->nrLDPC_coding_interface, 16);
+    AssertFatal(rc_ue_ldpc == 0, "failed to load CPU LDPC interface for UE decode\n");
+    printf("[dlsim] UE decode = CPU (libldpc.so); gNB encode = offload\n");
+  } else {
+    UE->nrLDPC_coding_interface = gNB->nrLDPC_coding_interface;
+  }
   UE->max_ldpc_iterations = max_ldpc_iterations;
   UE->do_ml = do_ml;
   init_nr_ue_phy_cpu_stats(&UE->phy_cpu_stats);
