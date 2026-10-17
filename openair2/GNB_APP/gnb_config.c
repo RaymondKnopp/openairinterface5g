@@ -1583,6 +1583,12 @@ static nr_mac_config_t get_mac_config(configmodule_interface_t *cfg,
   config.force_UL256qam_off = *gnb_p[GNB_FORCEUL256QAMOFF_IDX].iptr;
   config.use_deltaMCS = *gnb_p[GNB_USE_DELTA_MCS_IDX].iptr != 0;
   config.maxMIMO_layers = *gnb_p[GNB_MAXMIMOLAYERS_IDX].iptr;
+  config.pusch_dmrs_addpos = *gnb_p[GNB_PUSCH_DMRS_ADDPOS_IDX].iptr;
+  AssertFatal(config.pusch_dmrs_addpos >= -1 && config.pusch_dmrs_addpos <= 3,
+              "Invalid pusch_dmrs_AdditionalPosition %d (-1..3)\n",
+              config.pusch_dmrs_addpos);
+  if (config.pusch_dmrs_addpos >= 0)
+    LOG_I(GNB_APP, "PUSCH DMRS additional position pos%d\n", config.pusch_dmrs_addpos);
   config.disable_harq = *gnb_p[GNB_DISABLE_HARQ_IDX].iptr;
   config.num_dlharq = *gnb_p[GNB_NUM_DL_HARQ_IDX].iptr;
   config.num_ulharq =  *gnb_p[GNB_NUM_UL_HARQ_IDX].iptr;
