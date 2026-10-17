@@ -211,6 +211,120 @@ static void lag_acc(time_stats_t *ts, uint64_t t0, uint64_t t1)
 
 static void run_tx_gen(const tx_gen_job_t *job);
 
+/* One generated slot handed from tx_gen() to L1_tx_ru_thread (L1_tx_ru_split).  It
+ * carries the PDSCH summary for the overrun alarm because the scheduler response it came
+ * from is returned to the ring before the RU stage runs. */
+typedef struct {
+  PHY_VARS_gNB *gNB;
+  int frame;
+  int slot;
+  int slot_type;
+  openair0_timestamp_t timestamp_tx;
+  c16_t **grid; // the txdataF this slot was generated into
+  uint64_t t_gen_start;
+  uint64_t t_gen_end;
+  int n_pdsch;
+  l1_alarm_pdsch_t pdsch[L1_ALARM_MAX_PDSCH];
+} tx_ru_job_t;
+
+/* The RU path for one generated slot: split 7.2 precoding, split 8 precoding and IDFT, then
+ * the fronthaul.  Inline at the end of tx_gen(), or on L1_tx_ru_thread with L1_tx_ru_split. */
+static void tx_ru_path(PHY_VARS_gNB *gNB, int frame, int slot, int slot_type, openair0_timestamp_t timestamp_tx)
+{
+  RU_t *ru = gNB->RU_list[0];
+  LOG_D(PHY, "gNB: %d.%d : RU TX (pipelined)\n", frame, slot);
+  START_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, slot_type, NR_DOWNLINK_SLOT);
+  // split 7.2 precoding
+  if (ru->feptx_prec)
+    ru->feptx_prec(ru, frame, slot);
+  // split 8 precoding and IDFT
+  if (ru->feptx_ofdm)
+    ru->feptx_ofdm(ru, frame, slot);
+  if (ru->fh_south_out)
+    ru->fh_south_out(ru, frame, slot, timestamp_tx);
+  STOP_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, slot_type, NR_DOWNLINK_SLOT);
+}
+
+/* PDSCH summary of a slot for the overrun alarm */
+static int tx_pdsch_summary(const nfapi_nr_dl_tti_request_body_t *b, l1_alarm_pdsch_t *pdsch)
+{
+  int n = 0;
+  for (int i = 0; i < b->nPDUs && n < L1_ALARM_MAX_PDSCH; i++) {
+    if (b->dl_tti_pdu_list[i].PDUType != NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
+      continue;
+    const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *p = &b->dl_tti_pdu_list[i].pdsch_pdu.pdsch_pdu_rel15;
+    pdsch[n++] = (l1_alarm_pdsch_t){.rnti = p->rnti,
+                                    .rb_start = p->rbStart,
+                                    .rb_size = p->rbSize,
+                                    .tbs = p->TBSize[0],
+                                    .mcs = p->mcsIndex[0],
+                                    .layers = p->nrOfLayers,
+                                    .symb_start = p->StartSymbolIndex,
+                                    .nr_symb = p->NrOfSymbols};
+  }
+  return n;
+}
+
+/* Per-slot TX stats and the L1 TX overrun alarm for one generated slot.  tot_us is the
+ * whole TX of that slot: phy_proc_tx inline, generation start to RU end with
+ * L1_tx_ru_split (so it includes the wait for L1_tx_ru). */
+static void tx_slot_account(PHY_VARS_gNB *gNB,
+                            int frame,
+                            int slot,
+                            double tot_us,
+                            uint64_t t_gen_start,
+                            uint64_t t_gen_end,
+                            uint64_t t_ru_start,
+                            uint64_t t_ru_end,
+                            int n_pdsch,
+                            const l1_alarm_pdsch_t *pdsch)
+{
+  const double ghz = 1000.0 * get_cpu_freq_GHz();
+  const double gen_us = (double)(t_gen_end - t_gen_start) / ghz;
+  const double ru_us = (double)(t_ru_end - t_ru_start) / ghz;
+  AssertFatal(slot < NR_MAX_SLOTS_PER_FRAME, "slot %d out of range\n", slot);
+  typeof(gNB->tx_slot_stats[0]) *st = &gNB->tx_slot_stats[slot];
+  st->n++;
+  st->tot_us += (uint64_t)tot_us;
+  st->gen_us += (uint64_t)gen_us;
+  st->ru_us += (uint64_t)ru_us;
+  if ((uint32_t)tot_us > st->max_us)
+    st->max_us = (uint32_t)tot_us;
+  if ((uint32_t)gen_us > st->max_gen_us)
+    st->max_gen_us = (uint32_t)gen_us;
+
+  if (gNB->tx_overrun_us <= 0 || tot_us <= gNB->tx_overrun_us)
+    return;
+  gNB->tx_overrun_count++;
+  /* Rate limit: the first 10, then one in 101.  An overrun storm must not add logging
+   * to a thread that is already behind.
+   *
+   * The modulus is prime on purpose.  With one-in-100 and a TDD pattern giving 16 TX
+   * slots per frame, gcd(100,16)=4, so the sampled slot phase-locks: a run at a 100 us
+   * threshold logged 16600 lines that were ALL slots 3/8/13/18 and never once visited
+   * the other twelve.  Anything read off these lines is then a property of the
+   * aliasing, not of the DU.  A prime cannot share a factor with the frame structure.
+   * For per-slot statistics use tx_slot_stats[] above, which counts every slot. */
+  if (gNB->tx_overrun_count > 10 && (gNB->tx_overrun_count % 101) != 0)
+    return;
+  gNB->tx_overrun_logged++;
+  /* Record only.  Formatting and the write(2) happen on the stats thread: doing
+     them here put an unbounded blocking syscall on L1_tx_thread. */
+  const RU_t *ru = gNB->RU_list[0];
+  l1_alarm_rec_t *e = l1_alarm_claim(&gNB->tx_alarms);
+  e->frame = frame;
+  e->slot = slot;
+  e->count = gNB->tx_overrun_count;
+  e->a = tot_us;
+  e->b = gen_us;
+  e->c = ru_us;
+  e->d = (double)ru->precoding_stats.p_time / ghz;
+  e->e = (double)ru->tx_fhaul.p_time / ghz;
+  e->n_pdsch = n_pdsch;
+  memcpy(e->pdsch, pdsch, n_pdsch * sizeof(*pdsch));
+  l1_alarm_publish(&gNB->tx_alarms);
+}
+
 /* Stage A of L1 TX: MAC scheduler, then the RX trigger, then hand the slot to tx_gen().
  *
  * With L1_tx_split, tx_gen() runs on its own thread (L1_tx_gen_thread), so a slot whose
@@ -361,6 +475,18 @@ static void tx_gen(const tx_gen_job_t *job)
     if (do_generate) {
       const int gen_slot_type = nr_slot_select(cfg, gen_frame, gen_slot);
       START_MEAS_FULL_SLOT(&gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+      /* L1_tx_ru_split: fill a grid L1_tx_ru is not sending.  Blocks only when the RU stage
+       * still holds both, i.e. it is two slots behind. */
+      c16_t **grid = NULL;
+      if (gNB->tx_ru_split) {
+        const uint64_t t_wait = cpu_meas_enabled ? (uint64_t)clock_gettime_oai() : 0;
+        while (sem_wait(&gNB->tx_grid_free) != 0)
+          AssertFatal(errno == EINTR, "sem_wait: %s\n", strerror(errno));
+        if (cpu_meas_enabled)
+          lag_acc(&gNB->tx_grid_wait, t_wait, (uint64_t)clock_gettime_oai());
+        grid = gNB->tx_grid[gNB->tx_grid_seq++ & 1];
+        gNB->common_vars.txdataF = grid;
+      }
       if (gNB->tx_pipeline)
         phy_procedures_gNB_TX_generate(gNB,
                                        &gen_sched->DL_req,
@@ -374,21 +500,26 @@ static void tx_gen(const tx_gen_job_t *job)
       STOP_MEAS_FULL_SLOT(&gNB->gnb_tx_procedures_stats, gen_slot_type, NR_DOWNLINK_SLOT);
 
       /* develop's 5ee8de9fd0 removed ru_tx_func() and processingData_RU_t, inlining the
-         three stages at the call site.  Same three stages here, on the pipelined slot
-         rather than the current one. */
-      RU_t *ru_gen = gNB->RU_list[0];
-      LOG_D(PHY, "gNB: %d.%d : RU TX (pipelined)\n", gen_frame, gen_slot);
-      START_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
-      // split 7.2 precoding
-      if (ru_gen->feptx_prec)
-        ru_gen->feptx_prec(ru_gen, gen_frame, gen_slot);
-      // split 8 precoding and IDFT
-      if (ru_gen->feptx_ofdm)
-        ru_gen->feptx_ofdm(ru_gen, gen_frame, gen_slot);
-      if (ru_gen->fh_south_out)
-        ru_gen->fh_south_out(ru_gen, gen_frame, gen_slot, gen_ts);
-      t_ru_end = (uint64_t)clock_gettime_oai();
-      STOP_MEAS_FULL_SLOT(&gNB->ru_tx_func_stats, gen_slot_type, NR_DOWNLINK_SLOT);
+         three stages at the call site.  Same three stages here (tx_ru_path()), on the
+         pipelined slot rather than the current one. */
+      if (gNB->tx_ru_split) {
+        notifiedFIFO_elt_t *r = newNotifiedFIFO_elt(sizeof(tx_ru_job_t), gen_slot, &gNB->L1_tx_ru, NULL);
+        tx_ru_job_t *rj = (tx_ru_job_t *)NotifiedFifoData(r);
+        *rj = (tx_ru_job_t){.gNB = gNB,
+                            .frame = gen_frame,
+                            .slot = gen_slot,
+                            .slot_type = gen_slot_type,
+                            .timestamp_tx = gen_ts,
+                            .grid = grid,
+                            .t_gen_start = t_gen_start,
+                            .t_gen_end = t_gen_end};
+        if (cpu_meas_enabled && gNB->tx_overrun_us > 0)
+          rj->n_pdsch = tx_pdsch_summary(&gen_sched->DL_req.dl_tti_request_body, rj->pdsch);
+        pushNotifiedFIFO(&gNB->L1_tx_ru, r);
+      } else {
+        tx_ru_path(gNB, gen_frame, gen_slot, gen_slot_type, gen_ts);
+        t_ru_end = (uint64_t)clock_gettime_oai();
+      }
     }
 
     if (encoding)
@@ -401,68 +532,11 @@ static void tx_gen(const tx_gen_job_t *job)
      * time_stats cannot show this: it reports a mean plus a max that start_meas() zeroes
      * every 16384 trials, so an outlier is visible but its cause is not.  Report the
      * configuration that produced the overrun instead. */
-    if (do_generate && cpu_meas_enabled) {
-      const double ghz_ = 1000.0 * get_cpu_freq_GHz();
-      const double tot_ = (double)gNB->phy_proc_tx.p_time / ghz_;
-      const double gen_ = (double)(t_gen_end - t_gen_start) / ghz_;
-      AssertFatal(gen_slot < NR_MAX_SLOTS_PER_FRAME, "gen_slot %d out of range\n", gen_slot);
-      typeof(gNB->tx_slot_stats[0]) *st = &gNB->tx_slot_stats[gen_slot];
-      st->n++;
-      st->tot_us += (uint64_t)tot_;
-      st->gen_us += (uint64_t)gen_;
-      st->ru_us += (uint64_t)((double)(t_ru_end - t_gen_end) / ghz_);
-      if ((uint32_t)tot_ > st->max_us)
-        st->max_us = (uint32_t)tot_;
-      if ((uint32_t)gen_ > st->max_gen_us)
-        st->max_gen_us = (uint32_t)gen_;
-    }
-
-    if (do_generate && gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
-      const double us = (double)gNB->phy_proc_tx.p_time / (1000.0 * get_cpu_freq_GHz());
-      if (us > gNB->tx_overrun_us) {
-        gNB->tx_overrun_count++;
-        /* Rate limit: the first 10, then one in 101.  An overrun storm must not add logging
-         * to a thread that is already behind.
-         *
-         * The modulus is prime on purpose.  With one-in-100 and a TDD pattern giving 16 TX
-         * slots per frame, gcd(100,16)=4, so the sampled slot phase-locks: a run at a 100 us
-         * threshold logged 16600 lines that were ALL slots 3/8/13/18 and never once visited
-         * the other twelve.  Anything read off these lines is then a property of the
-         * aliasing, not of the DU.  A prime cannot share a factor with the frame structure.
-         * For per-slot statistics use tx_slot_stats[] below, which counts every slot. */
-        if (gNB->tx_overrun_count <= 10 || (gNB->tx_overrun_count % 101) == 0) {
-          gNB->tx_overrun_logged++;
-          /* Record only.  Formatting and the write(2) happen on the stats thread: doing
-             them here put an unbounded blocking syscall on L1_tx_thread. */
-          const double ghz = 1000.0 * get_cpu_freq_GHz();
-          const RU_t *ru = gNB->RU_list[0];
-          const nfapi_nr_dl_tti_request_body_t *b = &gen_sched->DL_req.dl_tti_request_body;
-          l1_alarm_rec_t *e = l1_alarm_claim(&gNB->tx_alarms);
-          e->frame = gen_frame;
-          e->slot = gen_slot;
-          e->count = gNB->tx_overrun_count;
-          e->a = us;
-          e->b = (double)(t_gen_end - t_gen_start) / ghz;
-          e->c = (double)(t_ru_end - t_gen_end) / ghz;
-          e->d = (double)ru->precoding_stats.p_time / ghz;
-          e->e = (double)ru->tx_fhaul.p_time / ghz;
-          e->n_pdsch = 0;
-          for (int i = 0; i < b->nPDUs && e->n_pdsch < L1_ALARM_MAX_PDSCH; i++) {
-            if (b->dl_tti_pdu_list[i].PDUType != NFAPI_NR_DL_TTI_PDSCH_PDU_TYPE)
-              continue;
-            const nfapi_nr_dl_tti_pdsch_pdu_rel15_t *p = &b->dl_tti_pdu_list[i].pdsch_pdu.pdsch_pdu_rel15;
-            e->pdsch[e->n_pdsch++] = (l1_alarm_pdsch_t){.rnti = p->rnti,
-                                                        .rb_start = p->rbStart,
-                                                        .rb_size = p->rbSize,
-                                                        .tbs = p->TBSize[0],
-                                                        .mcs = p->mcsIndex[0],
-                                                        .layers = p->nrOfLayers,
-                                                        .symb_start = p->StartSymbolIndex,
-                                                        .nr_symb = p->NrOfSymbols};
-          }
-          l1_alarm_publish(&gNB->tx_alarms);
-        }
-      }
+    if (do_generate && cpu_meas_enabled && !gNB->tx_ru_split) {
+      const double tot_us = (double)gNB->phy_proc_tx.p_time / (1000.0 * get_cpu_freq_GHz());
+      l1_alarm_pdsch_t pdsch[L1_ALARM_MAX_PDSCH];
+      const int n_pdsch = gNB->tx_overrun_us > 0 ? tx_pdsch_summary(&gen_sched->DL_req.dl_tti_request_body, pdsch) : 0;
+      tx_slot_account(gNB, gen_frame, gen_slot, tot_us, t_gen_start, t_gen_end, t_gen_end, t_ru_end, n_pdsch, pdsch);
     }
   }
 
@@ -516,6 +590,37 @@ static void *L1_tx_gen_thread(void *arg)
     if (res == NULL)
       break;
     run_tx_gen((const tx_gen_job_t *)NotifiedFifoData(res));
+    delNotifiedFIFO_elt(res);
+  }
+  return NULL;
+}
+
+/* L1_tx_ru_split: stage C of L1 TX, the RU path of each generated grid, fed by tx_gen()
+ * through L1_tx_ru.  The fronthaul compression of slot N then overlaps the grid fill of
+ * slot N+1 instead of following it on L1_tx_gen. */
+static void *L1_tx_ru_thread(void *arg)
+{
+  PHY_VARS_gNB *gNB = (PHY_VARS_gNB *)arg;
+  while (oai_exit == 0) {
+    notifiedFIFO_elt_t *res = pullNotifiedFIFO(&gNB->L1_tx_ru);
+    if (res == NULL)
+      break;
+    const tx_ru_job_t *job = (const tx_ru_job_t *)NotifiedFifoData(res);
+    RU_t *ru = gNB->RU_list[0];
+    /* the precoding and OFDM stages read common_vars.txdataF, which tx_gen() has already
+     * moved on to the other grid; only the 7.2 path takes its grid from txdataF_tx */
+    AssertFatal(ru->feptx_prec == NULL && ru->feptx_ofdm == NULL, "L1_tx_ru_split needs a 7.2 RU (no RU precoding or OFDM)\n");
+    const uint64_t t_ru_start = (uint64_t)clock_gettime_oai();
+    if (cpu_meas_enabled)
+      lag_acc(&gNB->tx_ru_qwait, job->t_gen_end, t_ru_start);
+    ru->txdataF_tx = job->grid;
+    tx_ru_path(gNB, job->frame, job->slot, job->slot_type, job->timestamp_tx);
+    const uint64_t t_ru_end = (uint64_t)clock_gettime_oai();
+    sem_post(&gNB->tx_grid_free);
+    if (cpu_meas_enabled) {
+      const double tot_us = (double)(t_ru_end - job->t_gen_start) / (1000.0 * get_cpu_freq_GHz());
+      tx_slot_account(gNB, job->frame, job->slot, tot_us, job->t_gen_start, job->t_gen_end, t_ru_start, t_ru_end, job->n_pdsch, job->pdsch);
+    }
     delNotifiedFIFO_elt(res);
   }
   return NULL;
@@ -849,6 +954,8 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   gNB->rx_lag_txq_over500 = 0;
   reset_meas(&gNB->tx_call_all);
   reset_meas(&gNB->tx_gen_qwait);
+  reset_meas(&gNB->tx_ru_qwait);
+  reset_meas(&gNB->tx_grid_wait);
   gNB->tx_call_over[0] = gNB->tx_call_over[1] = 0;
   reset_meas(&gNB->pucch01_proc_rx);
   reset_meas(&gNB->pucch23_proc_rx);
@@ -988,6 +1095,10 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
                        100.0 * gNB->rx_lag_txq_over500 / gNB->rx_lag_txq.trials);
   output += print_meas_log(&gNB->tx_call_all, "tx_func call (all slots)", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->tx_gen_qwait, "TX gen queue wait", NULL, NULL, output, end - output);
+  if (gNB->tx_ru_split) {
+    output += print_meas_log(&gNB->tx_ru_qwait, "TX RU queue wait", NULL, NULL, output, end - output);
+    output += print_meas_log(&gNB->tx_grid_wait, "TX free grid wait", NULL, NULL, output, end - output);
+  }
   if (gNB->tx_call_all.trials > 0 && output < end)
     output += snprintf(output, end - output, "%25s:  >500us %llu (%.3f%%), >1ms %llu (%.3f%%), window max at slot %d\n",
                        "tx_func call tail", (unsigned long long)gNB->tx_call_over[0],
@@ -1253,6 +1364,19 @@ void init_gNB_Tpool(int inst)
   AssertFatal(sem_init(&tx_sched_free, 0, TX_SCHED_RING) == 0, "sem_init: %s\n", strerror(errno));
   if (gNB->tx_split)
     initNotifiedFIFO(&gNB->L1_tx_gen);
+  if (gNB->tx_ru_split) {
+    /* Without L1_tx_split, tx_gen() runs on L1_tx_thread and a full TX backlog would still
+     * hold up the scheduler and the RX trigger behind it */
+    AssertFatal(gNB->tx_split, "L1_tx_ru_split needs L1_tx_split\n");
+    const int Ptx = gNB->gNB_config.carrier_config.num_tx_ant.value;
+    gNB->tx_grid[0] = gNB->common_vars.txdataF;
+    gNB->tx_grid[1] = (c16_t **)malloc16_clear(Ptx * sizeof(*gNB->tx_grid[1]));
+    for (int j = 0; j < Ptx; j++)
+      gNB->tx_grid[1][j] = (c16_t *)malloc16_clear(gNB->frame_parms.samples_per_slot_wCP * sizeof(**gNB->tx_grid[1]));
+    gNB->tx_grid_seq = 0;
+    AssertFatal(sem_init(&gNB->tx_grid_free, 0, 2) == 0, "sem_init: %s\n", strerror(errno));
+    initNotifiedFIFO(&gNB->L1_tx_ru);
+  }
   initNotifiedFIFO(&gNB->L1_rx_out);
 
   // create the RX thread responsible for RX processing start event (resp_L1 msg queue), then launch rx_func()
@@ -1263,6 +1387,14 @@ void init_gNB_Tpool(int inst)
     LOG_I(NR_PHY, "L1 TX split: grid fill and RU path on L1_tx_gen (core %d), scheduler and RX trigger on L1_tx_thread\n",
           gNB->L1_tx_gen_thread_core);
     threadCreate(&gNB->L1_tx_gen_thread, L1_tx_gen_thread, (void *)gNB, "L1_tx_gen", gNB->L1_tx_gen_thread_core, OAI_PRIORITY_RT_MAX);
+  }
+  if (gNB->tx_ru_split) {
+    LOG_I(NR_PHY, "L1 TX RU split: fronthaul on L1_tx_ru (core %d), overlapping the next grid fill, two grids\n",
+          gNB->L1_tx_ru_thread_core);
+    /* One step below the other L1 threads: on a core it shares with ru_thread (the natural
+     * place, ru_thread mostly sleeps) the slot start must preempt a fronthaul send in progress,
+     * not wait up to its ~130 us behind it at equal FIFO priority. */
+    threadCreate(&gNB->L1_tx_ru_thread, L1_tx_ru_thread, (void *)gNB, "L1_tx_ru", gNB->L1_tx_ru_thread_core, OAI_PRIORITY_RT_MAX - 1);
   }
 
   if (!IS_SOFTMODEM_NOSTATS)
@@ -1277,9 +1409,22 @@ void term_gNB_Tpool(int inst) {
   for (int i = 0; i < TX_SCHED_RING; i++) // tx_func() may wait for a ring entry tx_gen() will not free
     sem_post(&tx_sched_free);
   pthread_join(gNB->L1_tx_thread, NULL);
+  if (gNB->tx_ru_split) // tx_gen() may wait for a grid L1_tx_ru will not return
+    for (int i = 0; i < 2; i++)
+      sem_post(&gNB->tx_grid_free);
   if (gNB->tx_split) {
     abortNotifiedFIFO(&gNB->L1_tx_gen);
     pthread_join(gNB->L1_tx_gen_thread, NULL);
+  }
+  if (gNB->tx_ru_split) {
+    abortNotifiedFIFO(&gNB->L1_tx_ru);
+    pthread_join(gNB->L1_tx_ru_thread, NULL);
+    /* phy_free_nr_gNB() frees common_vars.txdataF: give it back the grid it allocated */
+    gNB->common_vars.txdataF = gNB->tx_grid[0];
+    const int Ptx = gNB->gNB_config.carrier_config.num_tx_ant.value;
+    for (int j = 0; j < Ptx; j++)
+      free_and_zero(gNB->tx_grid[1][j]);
+    free_and_zero(gNB->tx_grid[1]);
   }
 
   if (gNB->threadPoolRx == &gNB->threadPoolRxOwn)

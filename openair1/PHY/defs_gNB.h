@@ -22,6 +22,7 @@
 #include "openair1/PHY/defs_RU.h"
 #include "common/utils/ds/spsc_q.h"
 #include <stdatomic.h>
+#include <semaphore.h>
 
 #define MAX_NUM_RU_PER_gNB 8
 #define MAX_PUCCH0_NID 8
@@ -597,6 +598,10 @@ typedef struct PHY_VARS_gNB_s {
   /* L1_tx_split: how long a slot waits between the scheduler and the start of its grid
    * fill on L1_tx_gen, i.e. how far behind the TX stage runs */
   time_stats_t tx_gen_qwait;
+  /* L1_tx_ru_split: how long a generated grid waits for L1_tx_ru, and how long tx_gen()
+   * waits for a free grid (non-zero only when the RU stage is two slots behind) */
+  time_stats_t tx_ru_qwait;
+  time_stats_t tx_grid_wait;
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
@@ -635,6 +640,17 @@ typedef struct PHY_VARS_gNB_s {
   int L1_tx_gen_thread_core;
   notifiedFIFO_t L1_tx_gen;
   pthread_t L1_tx_gen_thread;
+  /* L1_tx_ru_split: tx_gen() -> L1_tx_ru_thread (RU path: fronthaul compression and send).
+   * txdataF is one slot deep, so the generate and send halves alternate between two grids:
+   * tx_gen() points common_vars.txdataF at a free one before filling it, and L1_tx_ru
+   * returns it once fh_south_out() has compressed it.  See tx_gen(). */
+  int tx_ru_split;
+  int L1_tx_ru_thread_core;
+  notifiedFIFO_t L1_tx_ru;
+  pthread_t L1_tx_ru_thread;
+  c16_t **tx_grid[2];
+  sem_t tx_grid_free;
+  uint32_t tx_grid_seq; // tx_gen() only
   notifiedFIFO_t L1_rx_out;
   /* TX work (DLSCH encoding, PDSCH generation), and RX work too unless a separate RX pool
    * is configured.  Sized by --thread-pool. */

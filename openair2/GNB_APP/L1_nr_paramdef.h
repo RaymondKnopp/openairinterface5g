@@ -42,6 +42,9 @@
 #define L1_TX_SPLIT                          "L1_tx_split"
 #define HLP_L1_TX_SPLIT                      "1 to run the PDSCH grid fill and RU path on their own thread (L1_tx_gen), leaving the MAC scheduler and the RX trigger on L1_tx_thread. Otherwise a TX slot that runs long delays the RX processing of the slots behind it."
 #define L1_TX_GEN_THREAD_CORE                "L1_tx_gen_thread_core"
+#define L1_TX_RU_SPLIT                       "L1_tx_ru_split"
+#define HLP_L1_TX_RU_SPLIT                   "1 to send each generated grid to the RU from its own thread (L1_tx_ru), so the fronthaul compression of slot N overlaps the grid fill of slot N+1. Uses two grids alternately. Needs L1_tx_split and a 7.2 RU."
+#define L1_TX_RU_THREAD_CORE                 "L1_tx_ru_thread_core"
 #define L1_RX_OVERRUN_US                     "L1_rx_overrun_us"
 #define HLP_L1_RX_OVERRUN_US                 "log the split of the feprx->rx_func path whenever it exceeds this many us (0 = off). Exceeding the rxdataF ring budget is what destroys UL samples."
 #define HLP_L1_TX_OVERRUN_US                 "log the PDSCH configuration whenever L1 TX processing exceeds this many us (0 = off). Aggregate stats hide a rare tail; this reports the conditions of the outlier itself."
@@ -83,6 +86,8 @@
   {L1_TX_OVERRUN_US,                     HLP_L1_TX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_SPLIT,                          HLP_L1_TX_SPLIT, 0,            .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_GEN_THREAD_CORE,                NULL,       0,         .iptr=NULL,           .defintval=-1,              TYPE_INT,      0},         \
+  {L1_TX_RU_SPLIT,                       HLP_L1_TX_RU_SPLIT, 0,         .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
+  {L1_TX_RU_THREAD_CORE,                 NULL,       0,         .iptr=NULL,           .defintval=-1,              TYPE_INT,      0},         \
   {L1_RX_OVERRUN_US,                     HLP_L1_RX_OVERRUN_US, 0,       .iptr=NULL,   .defintval=0,               TYPE_INT,      0},         \
   {L1_TX_AMP_BACKOFF_dB,                 HLP_L1TX_BO,0,         .uptr=NULL,           .defintval=36,              TYPE_UINT,     0},         \
   {L1_PHASE_COMP,                        HLP_L1_PHASE_COMP,PARAMFLAG_BOOL, .uptr=NULL,.defintval=1,               TYPE_UINT,     0},         \
