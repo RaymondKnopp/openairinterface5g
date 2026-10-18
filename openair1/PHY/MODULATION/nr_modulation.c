@@ -388,10 +388,10 @@ void nr_layer_mapping(int nbCodes,
       simde__m512i perm2a = simde_mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
       simde__m512i perm2b = simde_mm512_set_epi32(31, 29, 27, 25, 23, 21, 19, 17, 15, 13, 11, 9, 7, 5, 3, 1);
       for (; i < (n_symbs & ~31); i += 32) {
-        simde__m512i a = *(simde__m512i *)(mod + i);
-        simde__m512i b = *(simde__m512i *)(mod + i + 16);
-        *(simde__m512i *)tx0 = simde_mm512_permutex2var_epi32(a, perm2a, b);
-        *(simde__m512i *)tx1 = simde_mm512_permutex2var_epi32(a, perm2b, b);
+        simde__m512i a = simde_mm512_loadu_si512((const void *)(mod + i));
+        simde__m512i b = simde_mm512_loadu_si512((const void *)(mod + i + 16));
+        simde_mm512_storeu_si512((void *)(tx0), simde_mm512_permutex2var_epi32(a, perm2a, b));
+        simde_mm512_storeu_si512((void *)(tx1), simde_mm512_permutex2var_epi32(a, perm2b, b));
         tx0 += 16;
         tx1 += 16;
       }
@@ -399,9 +399,9 @@ void nr_layer_mapping(int nbCodes,
 #ifdef __AVX2__
       simde__m256i perm2 = simde_mm256_set_epi32(7, 5, 3, 1, 6, 4, 2, 0);
       for (; i < (n_symbs & ~7); i += 8) {
-        simde__m256i d = simde_mm256_permutevar8x32_epi32(*(simde__m256i *)(mod + i), perm2);
-        *(simde__m128i *)tx0 = simde_mm256_extractf128_si256(d, 0);
-        *(simde__m128i *)tx1 = simde_mm256_extractf128_si256(d, 1);
+        simde__m256i d = simde_mm256_permutevar8x32_epi32(simde_mm256_loadu_si256((const void *)(mod + i)), perm2);
+        simde_mm_storeu_si128((void *)(tx0), simde_mm256_extractf128_si256(d, 0));
+        simde_mm_storeu_si128((void *)(tx1), simde_mm256_extractf128_si256(d, 1));
         tx0 += 4;
         tx1 += 4;
       }
@@ -478,17 +478,17 @@ void nr_layer_mapping(int nbCodes,
                                                    2);
       simde__m512i perm3_2b = simde_mm512_set_epi32(15 + 16, 12 + 16, 9 + 16, 6 + 16, 3 + 16, 0 + 16, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
       for (; i < (n_symbs & ~63); i += 48) {
-        simde__m512i i0 = *(simde__m512i *)(mod + i);
-        simde__m512i i1 = *(simde__m512i *)(mod + i + 16);
-        simde__m512i i2 = *(simde__m512i *)(mod + i + 32);
+        simde__m512i i0 = simde_mm512_loadu_si512((const void *)(mod + i));
+        simde__m512i i1 = simde_mm512_loadu_si512((const void *)(mod + i + 16));
+        simde__m512i i2 = simde_mm512_loadu_si512((const void *)(mod + i + 32));
         simde__m512i d0 = simde_mm512_permutex2var_epi32(i0, perm3_0, i1);
-        *(simde__m512i *)tx0 = simde_mm512_permutex2var_epi32(d0, perm3_0b, i2); // 11000000
+        simde_mm512_storeu_si512((void *)(tx0), simde_mm512_permutex2var_epi32(d0, perm3_0b, i2)); // 11000000
         tx0 += 16;
         d0 = simde_mm512_permutex2var_epi32(i0, perm3_1, i1);
-        *(simde__m512i *)tx1 = simde_mm512_permutex2var_epi32(d0, perm3_1b, i2); // 11000000
+        simde_mm512_storeu_si512((void *)(tx1), simde_mm512_permutex2var_epi32(d0, perm3_1b, i2)); // 11000000
         tx1 += 16;
         d0 = simde_mm512_permutex2var_epi32(i0, perm3_2, i1);
-        *(simde__m512i *)tx2 = simde_mm512_permutex2var_epi32(d0, perm3_2b, i2); // 11000000
+        simde_mm512_storeu_si512((void *)(tx2), simde_mm512_permutex2var_epi32(d0, perm3_2b, i2)); // 11000000
         tx2 += 16;
       }
 #endif
@@ -498,26 +498,26 @@ void nr_layer_mapping(int nbCodes,
         simde__m256i perm3_1 = simde_mm256_set_epi32(6, 3, 0, 5, 2, 7, 4, 1);
         simde__m256i perm3_2 = simde_mm256_set_epi32(7, 4, 1, 6, 3, 0, 5, 2);
         for (; i < (n_symbs & ~31); i += 24) {
-          simde__m256i i0 = *(simde__m256i *)(mod + i);
-          simde__m256i i1 = *(simde__m256i *)(mod + i + 8);
-          simde__m256i i2 = *(simde__m256i *)(mod + i + 16);
+          simde__m256i i0 = simde_mm256_loadu_si256((const void *)(mod + i));
+          simde__m256i i1 = simde_mm256_loadu_si256((const void *)(mod + i + 8));
+          simde__m256i i2 = simde_mm256_loadu_si256((const void *)(mod + i + 16));
           simde__m256i d0 = simde_mm256_permutevar8x32_epi32(i0, perm3_0);
           simde__m256i d1 = simde_mm256_permutevar8x32_epi32(i1, perm3_0);
           simde__m256i d2 = simde_mm256_permutevar8x32_epi32(i2, perm3_0);
           simde__m256i d3 = simde_mm256_blend_epi32(d0, d1, 0x38); // 00111000
-          *(simde__m256i *)tx0 = simde_mm256_blend_epi32(d3, d2, 0xc0); // 11000000
+          simde_mm256_storeu_si256((void *)(tx0), simde_mm256_blend_epi32(d3, d2, 0xc0)); // 11000000
           tx0 += 8;
           d0 = simde_mm256_permutevar8x32_epi32(i0, perm3_1);
           d1 = simde_mm256_permutevar8x32_epi32(i1, perm3_1);
           d2 = simde_mm256_permutevar8x32_epi32(i2, perm3_1);
           d3 = simde_mm256_blend_epi32(d0, d1, 0x18); // 00011000
-          *(simde__m256i *)tx1 = simde_mm256_blend_epi32(d3, d2, 0xe0); // 11100000
+          simde_mm256_storeu_si256((void *)(tx1), simde_mm256_blend_epi32(d3, d2, 0xe0)); // 11100000
           tx1 += 8;
           d0 = simde_mm256_permutevar8x32_epi32(i0, perm3_2);
           d1 = simde_mm256_permutevar8x32_epi32(i1, perm3_2);
           d2 = simde_mm256_permutevar8x32_epi32(i2, perm3_2);
           d3 = simde_mm256_blend_epi32(d0, d1, 0x1c); // 00011100
-          *(simde__m256i *)tx2 = simde_mm256_blend_epi32(d3, d2, 0xe0); // 11100000
+          simde_mm256_storeu_si256((void *)(tx2), simde_mm256_blend_epi32(d3, d2, 0xe0)); // 11100000
           tx2 += 8;
         }
       }
@@ -577,14 +577,14 @@ void nr_layer_mapping(int nbCodes,
 #if defined(__AVX512VBMI__)
       simde__m512i perm4 = simde_mm512_set_epi32(15, 11, 7, 3, 14, 10, 6, 2, 13, 9, 5, 1, 12, 8, 4, 0);
       for (; i < (n_symbs & ~15); i += 16) {
-        simde__m512i e = simde_mm512_permutexvar_epi32(perm4, *(simde__m512i *)(mod + i));
-        *(simde__m128i *)tx0 = simde_mm512_extracti64x2_epi64(e, 0);
+        simde__m512i e = simde_mm512_permutexvar_epi32(perm4, simde_mm512_loadu_si512((const void *)(mod + i)));
+        simde_mm_storeu_si128((void *)(tx0), simde_mm512_extracti64x2_epi64(e, 0));
         tx0 += 4;
-        *(simde__m128i *)tx1 = simde_mm512_extracti64x2_epi64(e, 1);
+        simde_mm_storeu_si128((void *)(tx1), simde_mm512_extracti64x2_epi64(e, 1));
         tx1 += 4;
-        *(simde__m128i *)tx2 = simde_mm512_extracti64x2_epi64(e, 2);
+        simde_mm_storeu_si128((void *)(tx2), simde_mm512_extracti64x2_epi64(e, 2));
         tx2 += 4;
-        *(simde__m128i *)tx3 = simde_mm512_extracti64x2_epi64(e, 3);
+        simde_mm_storeu_si128((void *)(tx3), simde_mm512_extracti64x2_epi64(e, 3));
         tx3 += 4;
       }
 #endif
@@ -592,7 +592,7 @@ void nr_layer_mapping(int nbCodes,
       {
         simde__m256i perm4 = simde_mm256_set_epi32(7, 3, 6, 2, 5, 1, 4, 0);
         for (; i < (n_symbs & ~7); i += 8) {
-          simde__m256i e = simde_mm256_permutevar8x32_epi32(*(simde__m256i *)(mod + i), perm4);
+          simde__m256i e = simde_mm256_permutevar8x32_epi32(simde_mm256_loadu_si256((const void *)(mod + i)), perm4);
           *(uint64_t *)tx0 = simde_mm256_extract_epi64(e, 0);
           tx0 += 2;
           *(uint64_t *)tx1 = simde_mm256_extract_epi64(e, 1);
