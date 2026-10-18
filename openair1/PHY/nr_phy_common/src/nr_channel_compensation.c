@@ -4,6 +4,8 @@
 
 #include "nr_channel_compensation.h"
 #include "nr_phy_common.h"
+#include "nr_compute_llr.h"
+#include "nr_layer_demapping.h"
 #include "bits.h"
 #include <complex.h>
 #include "PHY/sse_intrin.h"
