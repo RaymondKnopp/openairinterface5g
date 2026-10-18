@@ -38,6 +38,9 @@
 #include <rte_random.h>
 #include <rte_hexdump.h>
 #include <rte_interrupts.h>
+#include <dlfcn.h>
+#include <semaphore.h>
+#include <stdatomic.h>
 
 #ifdef LDPC_AAL_HAVE_LA12XX
 /* NXP LA12xx (FECA) vendor API: queue-to-e200-core binding. */
@@ -2097,6 +2100,165 @@ static int normalize_dpdk_dev(const char *input, char *output, size_t out_len)
 }
 
 // OAI CODE
+/* LDPC_AAL_ENC_XCHECK=1: diagnostic. A sample of the transport blocks the device encodes with
+ * rv_index != 0 (every rv with LDPC_AAL_ENC_XCHECK_ALL=1, which also validates the comparison on
+ * RV0) is encoded again by the CPU library (libldpc.so) from the same code blocks, on a
+ * background thread, and the two rate-matched outputs are compared bit by bit. Mismatches are
+ * reported per code block. LDPC_AAL_ENC_XCHECK_MS sets the sampling interval (default 20 ms).
+ * The worker runs at normal priority with an inline pool ("n"): it never competes with the
+ * real-time threads, and a sample that arrives while it is busy is only counted. */
+#define XCHK_MAX_OUT (256 * 1024)
+static nrLDPC_coding_interface_t xchk_cpu;
+static bool xchk_on, xchk_all;
+static uint64_t xchk_period_us;
+static uint64_t xchk_last_us, xchk_busy;
+static uint64_t xchk_n[4], xchk_bad[4];
+static tpool_t xchk_pool;
+static sem_t xchk_sem;
+static _Atomic int xchk_full;
+static struct {
+  int frame, slot;
+  uint32_t nbytes;
+  nrLDPC_TB_encoding_parameters_t tb;
+  int E[NR_LDPC_MAX_NUM_CB];
+  uint8_t c[NR_LDPC_MAX_NUM_CB][1056] __attribute__((aligned(64)));
+  uint8_t dev[XCHK_MAX_OUT] __attribute__((aligned(64)));
+} xchk_box;
+static uint8_t xchk_out[XCHK_MAX_OUT + 64] __attribute__((aligned(64)));
+
+/* real-time path, under encode_mutex: copy one sampled TB for the worker */
+static void xchk_offer(const nrLDPC_slot_encoding_parameters_t *sp)
+{
+  if (!xchk_on)
+    return;
+  const uint64_t now = enc_now_us();
+  if (now - xchk_last_us < xchk_period_us)
+    return;
+  for (int h = 0; h < sp->nb_TBs; ++h) {
+    const nrLDPC_TB_encoding_parameters_t *p = &sp->TBs[h];
+    if ((!xchk_all && p->rv_index == 0) || p->C > NR_LDPC_MAX_NUM_CB || p->C == 0)
+      continue;
+    if (atomic_load(&xchk_full)) {
+      xchk_busy++;
+      return;
+    }
+    uint32_t bits = 0;
+    for (uint32_t r = 0; r < p->C; ++r)
+      bits += p->segments[r].E;
+    const uint32_t nbytes = (bits + 7) / 8;
+    if (nbytes > XCHK_MAX_OUT || (p->K + 7) / 8 > 1056)
+      continue;
+    xchk_box.frame = sp->frame;
+    xchk_box.slot = sp->slot;
+    xchk_box.nbytes = nbytes;
+    xchk_box.tb = *p;
+    for (uint32_t r = 0; r < p->C; ++r) {
+      xchk_box.E[r] = p->segments[r].E;
+      memcpy(xchk_box.c[r], p->segments[r].c, (p->K + 7) / 8);
+    }
+    memcpy(xchk_box.dev, p->output, nbytes);
+    xchk_last_us = now;
+    atomic_store(&xchk_full, 1);
+    sem_post(&xchk_sem);
+    return;
+  }
+}
+
+static void xchk_compare(void)
+{
+  nrLDPC_TB_encoding_parameters_t q = xchk_box.tb;
+  nrLDPC_segment_encoding_parameters_t seg[NR_LDPC_MAX_NUM_CB];
+  memset(seg, 0, sizeof(seg));
+  for (uint32_t r = 0; r < q.C; ++r) {
+    seg[r].E = xchk_box.E[r];
+    seg[r].c = xchk_box.c[r];
+  }
+  q.segments = seg;
+  q.output = xchk_out;
+  q.c_dev = NULL;
+  memset(xchk_out, 0, xchk_box.nbytes + 64); // the CPU encoder ORs its segments into the output
+  nrLDPC_slot_encoding_parameters_t qs = {.frame = xchk_box.frame, .slot = xchk_box.slot, .nb_TBs = 1, .threadPool = &xchk_pool, .TBs = &q};
+  xchk_cpu.nrLDPC_coding_encoder(&qs);
+
+  uint32_t bad_cbs = 0, bad_bits = 0, first_bad = q.C, off = 0;
+  for (uint32_t r = 0; r < q.C; ++r) {
+    uint32_t nb = 0;
+    for (uint32_t b = off; b < off + (uint32_t)seg[r].E; ++b)
+      nb += ((xchk_box.dev[b >> 3] ^ xchk_out[b >> 3]) >> (b & 7)) & 1;
+    if (nb) {
+      bad_cbs++;
+      bad_bits += nb;
+      if (first_bad == q.C)
+        first_bad = r;
+    }
+    off += seg[r].E;
+  }
+  const int rv = q.rv_index & 3;
+  xchk_n[rv]++;
+  if (bad_cbs) {
+    xchk_bad[rv]++;
+    static int logged;
+    if (logged++ < 20 || (xchk_bad[rv] % 100) == 0)
+      LOG_W(NR_PHY,
+            "[enc-xchk] %d.%d rv %d: device output differs from CPU in %u/%u code blocks (%u bits, first CB %u) "
+            "BG %d Z %u K %u F %u E0 %d Qm %d layers %d tbslbrm %u\n",
+            xchk_box.frame, xchk_box.slot, rv, bad_cbs, q.C, bad_bits, first_bad, q.BG, q.Z, q.K, q.F, xchk_box.E[0], q.Qm,
+            q.nb_layers, q.tbslbrm);
+  }
+  const uint64_t tot = xchk_n[0] + xchk_n[1] + xchk_n[2] + xchk_n[3];
+  if (tot % 100 == 0)
+    LOG_I(NR_PHY, "[enc-xchk] checked rv0 %lu (bad %lu) rv1 %lu (%lu) rv2 %lu (%lu) rv3 %lu (%lu), busy %lu\n",
+          xchk_n[0], xchk_bad[0], xchk_n[1], xchk_bad[1], xchk_n[2], xchk_bad[2], xchk_n[3], xchk_bad[3], xchk_busy);
+}
+
+static void *xchk_thread(void *arg)
+{
+  (void)arg;
+  while (true) {
+    if (sem_wait(&xchk_sem) != 0)
+      continue;
+    xchk_compare();
+    atomic_store(&xchk_full, 0);
+  }
+  return NULL;
+}
+
+extern int pthread_setname_np(pthread_t thread, const char *name); // GNU, the file is not built with _GNU_SOURCE
+
+static void xchk_open(int max_num_pxsch)
+{
+  if (!getenv("LDPC_AAL_ENC_XCHECK"))
+    return;
+  void *h = dlopen("libldpc.so", RTLD_NOW | RTLD_DEEPBIND);
+  if (!h) {
+    LOG_E(NR_PHY, "LDPC_AAL_ENC_XCHECK: cannot open libldpc.so: %s\n", dlerror());
+    return;
+  }
+  xchk_cpu.nrLDPC_coding_init = dlsym(h, "nrLDPC_coding_init");
+  xchk_cpu.nrLDPC_coding_encoder = dlsym(h, "nrLDPC_coding_encoder");
+  if (!xchk_cpu.nrLDPC_coding_init || !xchk_cpu.nrLDPC_coding_encoder || xchk_cpu.nrLDPC_coding_init(max_num_pxsch) != 0) {
+    LOG_E(NR_PHY, "LDPC_AAL_ENC_XCHECK: cannot initialise libldpc.so\n");
+    return;
+  }
+  xchk_all = getenv("LDPC_AAL_ENC_XCHECK_ALL") != NULL;
+  const char *e = getenv("LDPC_AAL_ENC_XCHECK_MS");
+  xchk_period_us = 1000ULL * (e ? atoi(e) : 20);
+  initNamedTpool("n", &xchk_pool, false, "xchk");
+  sem_init(&xchk_sem, 0, 0);
+  pthread_attr_t attr;
+  pthread_attr_init(&attr);
+  pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+  pthread_attr_setschedpolicy(&attr, SCHED_OTHER);
+  struct sched_param sp = {.sched_priority = 0};
+  pthread_attr_setschedparam(&attr, &sp);
+  pthread_t t;
+  pthread_create(&t, &attr, xchk_thread, NULL);
+  pthread_setname_np(t, "ldpc_xchk");
+  xchk_on = true;
+  LOG_I(NR_PHY, "LDPC_AAL_ENC_XCHECK: comparing %s device encodes with libldpc.so every %lu ms\n",
+        xchk_all ? "all" : "retransmission", (unsigned long)(xchk_period_us / 1000));
+}
+
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
   pthread_mutex_init(&encode_mutex, NULL);
@@ -2292,6 +2454,7 @@ int32_t nrLDPC_coding_init(int max_num_pxsch)
 
   op_params->num_lcores = 1;
   tb_harq_init(max_num_pxsch);
+  xchk_open(max_num_pxsch);
   return 0;
 }
 
@@ -2621,6 +2784,7 @@ int32_t nrLDPC_coding_encoder(nrLDPC_slot_encoding_parameters_t *nrLDPC_slot_enc
            (unsigned long)(enc_t[6] - enc_t[5]),
            (unsigned long)(enc_t[6] - enc_t[0]));
 
+  xchk_offer(nrLDPC_slot_encoding_parameters);
   pthread_mutex_unlock(&encode_mutex);
   return ret;
 }
