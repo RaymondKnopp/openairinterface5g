@@ -221,6 +221,7 @@ typedef struct {
   int slot_type;
   openair0_timestamp_t timestamp_tx;
   c16_t **grid; // the txdataF this slot was generated into
+  uint64_t grid_hash; // OAI_DIAG_GRID_HASH: grid hash at the end of generation, 0 = not sampled
   uint64_t t_gen_start;
   uint64_t t_gen_end;
   int n_pdsch;
@@ -254,6 +255,28 @@ static void tx_ru_path(PHY_VARS_gNB *gNB, int frame, int slot, int slot_type, op
     d = ((d % wrap) + wrap + wrap / 2) % wrap - wrap / 2;
     gNB->tx_send_margin_hist[d <= 0 ? 0 : (d >= 7 ? 7 : d)]++;
   }
+}
+
+/* OAI_DIAG_GRID_HASH: hash of a whole TX grid, to catch writes into it between its generation
+ * and its RU send (rotate-xor-multiply over 8-byte words) */
+static uint64_t diag_grid_hash(c16_t **grid, int n_ant, size_t n_samples)
+{
+  uint64_t h = 0x9e3779b97f4a7c15ULL;
+  for (int a = 0; a < n_ant; a++) {
+    const uint64_t *w = (const uint64_t *)grid[a];
+    for (size_t i = 0; i < n_samples / 2; i++)
+      h = (((h << 7) | (h >> 57)) ^ w[i]) * 0x100000001b3ULL;
+  }
+  return h | 1; // never 0, which means "not sampled"
+}
+static int diag_grid_period(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("OAI_DIAG_GRID_HASH");
+    v = e ? (atoi(e) > 0 ? atoi(e) : 50) : 0;
+  }
+  return v;
 }
 
 /* PDSCH summary of a slot for the overrun alarm */
@@ -526,6 +549,9 @@ static void tx_gen(const tx_gen_job_t *job)
                             .t_gen_end = t_gen_end};
         if (cpu_meas_enabled && gNB->tx_overrun_us > 0)
           rj->n_pdsch = tx_pdsch_summary(&gen_sched->DL_req.dl_tti_request_body, rj->pdsch);
+        static unsigned grid_sample;
+        if (diag_grid_period() && (++grid_sample % diag_grid_period()) == 0)
+          rj->grid_hash = diag_grid_hash(grid, gNB->gNB_config.carrier_config.num_tx_ant.value, gNB->frame_parms.samples_per_slot_wCP);
         pushNotifiedFIFO(&gNB->L1_tx_ru, r);
       } else {
         tx_ru_path(gNB, gen_frame, gen_slot, gen_slot_type, gen_ts);
@@ -625,8 +651,20 @@ static void *L1_tx_ru_thread(void *arg)
     if (cpu_meas_enabled)
       lag_acc(&gNB->tx_ru_qwait, job->t_gen_end, t_ru_start);
     ru->txdataF_tx = job->grid;
+    const int n_ant = gNB->gNB_config.carrier_config.num_tx_ant.value;
+    const size_t n_samp = gNB->frame_parms.samples_per_slot_wCP;
+    const uint64_t h_before = job->grid_hash ? diag_grid_hash(job->grid, n_ant, n_samp) : 0;
     tx_ru_path(gNB, job->frame, job->slot, job->slot_type, job->timestamp_tx);
     const uint64_t t_ru_end = (uint64_t)clock_gettime_oai();
+    if (job->grid_hash) {
+      const uint64_t h_after = diag_grid_hash(job->grid, n_ant, n_samp);
+      gNB->diag_grid_n++;
+      gNB->diag_grid_wait_bad += h_before != job->grid_hash;
+      gNB->diag_grid_send_bad += h_after != h_before;
+      if ((h_before != job->grid_hash || h_after != h_before) && gNB->diag_grid_wait_bad + gNB->diag_grid_send_bad <= 20)
+        LOG_W(PHY, "%d.%d TX grid changed %s\n", job->frame, job->slot,
+              h_before != job->grid_hash ? "between generation and RU send" : "during the RU send");
+    }
     sem_post(&gNB->tx_grid_free);
     if (cpu_meas_enabled) {
       const double tot_us = (double)(t_ru_end - job->t_gen_start) / (1000.0 * get_cpu_freq_GHz());
@@ -1075,6 +1113,10 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
     for (int i = 0; i < 8; i++)
       tot += gNB->tx_send_margin_hist[i];
     if (tot && output < end) {
+      if (gNB->diag_grid_n)
+        output += snprintf(output, end - output, "%25s: sampled %llu, changed before send %llu, during send %llu\n", "TX grid integrity",
+                           (unsigned long long)gNB->diag_grid_n, (unsigned long long)gNB->diag_grid_wait_bad,
+                           (unsigned long long)gNB->diag_grid_send_bad);
       if (gNB->diag_tb_n + gNB->diag_tb_miss)
         output += snprintf(output, end - output, "%25s: checked %llu, changed %llu, no first-tx entry %llu\n", "DL retx payload (PHY)",
                            (unsigned long long)gNB->diag_tb_n, (unsigned long long)gNB->diag_tb_bad, (unsigned long long)gNB->diag_tb_miss);

@@ -607,6 +607,8 @@ typedef struct PHY_VARS_gNB_s {
   /* OAI_DIAG_TB_HASH: DL retransmissions whose payload reached the encoder, and those whose bytes
    * changed since the first transmission (keyed by the TB buffer, see nr_dlsch_encoding()) */
   uint64_t diag_tb_n, diag_tb_bad, diag_tb_miss;
+  /* OAI_DIAG_GRID_HASH: sampled TX grids, and those changed between generation and RU send / during it */
+  uint64_t diag_grid_n, diag_grid_wait_bad, diag_grid_send_bad;
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
