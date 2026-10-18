@@ -23,10 +23,6 @@
 #include <regex.h>
 
 #include <math.h>
-#include <dlfcn.h>
-#include <semaphore.h>
-#include <stdatomic.h>
-#include <pthread.h>
 
 #include <rte_eal.h>
 #include <rte_common.h>
@@ -110,15 +106,15 @@ static uint64_t enc_now_us(void)
  * LLR conversion write straight into them so the gather copy disappears too.
  * Never freed by design -- they live for the process.
  */
-static uint8_t *tb_llr_buf[LDPC_AAL_TB_MAX_TBS];
-static size_t tb_llr_cap[LDPC_AAL_TB_MAX_TBS];
-static uint8_t *tb_out_buf[LDPC_AAL_TB_MAX_TBS];
-static size_t tb_out_cap[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) uint8_t *tb_llr_buf[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) size_t tb_llr_cap[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) uint8_t *tb_out_buf[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) size_t tb_out_cap[LDPC_AAL_TB_MAX_TBS];
 
-static uint8_t *tb_enc_in_buf[LDPC_AAL_TB_MAX_TBS];
-static size_t tb_enc_in_cap[LDPC_AAL_TB_MAX_TBS];
-static uint8_t *tb_enc_out_buf[LDPC_AAL_TB_MAX_TBS];
-static size_t tb_enc_out_cap[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) uint8_t *tb_enc_in_buf[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) size_t tb_enc_in_cap[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) uint8_t *tb_enc_out_buf[LDPC_AAL_TB_MAX_TBS];
+static __attribute__((unused)) size_t tb_enc_out_cap[LDPC_AAL_TB_MAX_TBS];
 
 static unsigned tb_buf_allocs; /* TEST 2: must stop growing after slot 1 */
 
@@ -134,7 +130,7 @@ static tb_harq_t *tb_harq;
 static int tb_harq_n;
 static uint64_t tb_harq_combined, tb_harq_fresh;
 
-static uint8_t *tb_buf(uint8_t **slot, size_t *cap, size_t need)
+static __attribute__((unused)) uint8_t *tb_buf(uint8_t **slot, size_t *cap, size_t need)
 {
   if (*cap < need) {
     rte_free(*slot);
@@ -149,7 +145,7 @@ static uint8_t *tb_buf(uint8_t **slot, size_t *cap, size_t need)
 }
 
 /* sum(E) over the code blocks of one transport block */
-static size_t tb_llr_bytes(const nrLDPC_TB_decoding_parameters_t *p)
+static __attribute__((unused)) size_t tb_llr_bytes(const nrLDPC_TB_decoding_parameters_t *p)
 {
   size_t total = 0;
 
@@ -270,6 +266,10 @@ static struct thread_params *t_params_persist(unsigned which, uint16_t num_lcore
  * LDPC_AAL_TB_DEC is still accepted so existing scripts keep working. */
 static bool tb_mode(void)
 {
+#ifndef LDPC_AAL_HAVE_LA12XX
+  /* TB mode needs the direct-memory op_data and the per-code-block crc_stat of NXP's DPDK */
+  return false;
+#endif
   static int v = -1;
 
   if (v < 0)
@@ -278,7 +278,7 @@ static bool tb_mode(void)
 }
 
 /* sum(E) over the code blocks of one transport block, in bytes */
-static size_t tb_enc_bytes(const nrLDPC_TB_encoding_parameters_t *p)
+static __attribute__((unused)) size_t tb_enc_bytes(const nrLDPC_TB_encoding_parameters_t *p)
 {
   size_t bits = 0;
 
@@ -350,6 +350,10 @@ static bool tb_enc_ok(const nrLDPC_TB_encoding_parameters_t *p)
  * one slot never mixes the two layouts. */
 static bool tb_enc_mode(const nrLDPC_slot_encoding_parameters_t *sp)
 {
+#ifndef LDPC_AAL_HAVE_LA12XX
+  /* TB mode needs the direct-memory op_data and the per-code-block crc_stat of NXP's DPDK */
+  return false;
+#endif
   if (!tb_mode())
     return false;
   for (int h = 0; h < sp->nb_TBs; ++h)
@@ -425,6 +429,20 @@ static const struct rte_bbdev_op_cap *find_bbdev_cap(const struct rte_bbdev_info
 static bool dev_is_la12xx(const struct rte_bbdev_info *info)
 {
   return info->drv.driver_name && strcmp(info->drv.driver_name, "baseband_la12xx") == 0;
+}
+
+/* Bit order within each byte of the encoder output. Intel ACC100/VRB1 (and NXP's old FECA
+ * on DPDK 19.11) return it reversed with respect to OAI: without the reversal, BLER is 1.0
+ * with a channel BER of 0. NXP's Rev-B FECA on DPDK 25.11 does not: reversing there
+ * corrupts the codeword. LDPC_AAL_FORCE_BITREV=0/1 overrides the per-device default. */
+static bool enc_bitrev(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("LDPC_AAL_FORCE_BITREV");
+    v = e ? atoi(e) != 0 : !dev_is_la12xx(&active_dev.info);
+  }
+  return v != 0;
 }
 
 /* first called once the device is up, so active_dev is known */
@@ -989,6 +1007,7 @@ static int init_op_data_objs_dec(struct rte_bbdev_op_data *bufs,
 {
   int j = 0;
 
+#ifdef LDPC_AAL_HAVE_LA12XX
   if (tb_mode()) {
     /* One buffer per TB holding all C code blocks contiguously. The LLR
      * conversion writes each CB at a LDPC_MAX_CB_SIZE stride, so gather them. */
@@ -1031,6 +1050,7 @@ static int init_op_data_objs_dec(struct rte_bbdev_op_data *bufs,
     }
     return 0;
   }
+#endif
 
   for (int h = 0; h < nrLDPC_slot_decoding_parameters->nb_TBs; ++h) {
     nrLDPC_TB_decoding_parameters_t *p = &nrLDPC_slot_decoding_parameters->TBs[h];
@@ -1068,6 +1088,7 @@ static int init_op_data_objs_enc(struct rte_bbdev_op_data *bufs,
 {
   int j = 0;
 
+#ifdef LDPC_AAL_HAVE_LA12XX
   if (tb_enc_mode(nrLDPC_slot_encoding_parameters)) {
     /* One buffer per TB. No mbuf: a transport block does not fit one (the room
      * is a uint16_t) and pointing an mbuf at foreign memory corrupts the pool
@@ -1099,6 +1120,7 @@ static int init_op_data_objs_enc(struct rte_bbdev_op_data *bufs,
     }
     return 0;
   }
+#endif
 
   for (int h = 0; h < nrLDPC_slot_encoding_parameters->nb_TBs; ++h) {
     for (int i = 0; i < nrLDPC_slot_encoding_parameters->TBs[h].C; ++i) {
@@ -1163,24 +1185,6 @@ static struct rte_bbdev_op_data *persistent_op_data(unsigned which, unsigned typ
   return op_data_buf[which][type];
 }
 
-static int allocate_buffers_on_socket(struct rte_bbdev_op_data **buffers, const int len, const int socket)
-{
-  int i;
-
-  *buffers = rte_zmalloc_socket(NULL, len, 0, socket);
-  if (*buffers == NULL) {
-    printf("WARNING: Failed to allocate op_data on socket %d\n", socket);
-    /* try to allocate memory on other detected sockets */
-    for (i = 0; i < socket; i++) {
-      *buffers = rte_zmalloc_socket(NULL, len, 0, i);
-      if (*buffers != NULL)
-        break;
-    }
-  }
-
-  return (*buffers == NULL) ? -1 : 0;
-}
-
 // DPDK BBDEV copy
 static void free_mempools(struct active_device *ad)
 {
@@ -1221,7 +1225,7 @@ static uint32_t dec_n_cb(const nrLDPC_TB_decoding_parameters_t *p)
  * process, ping-ponged, so the device never reads and writes the same one. */
 /* (tb_harq_t and its globals are declared with the TB-mode buffers above) */
 
-static uint32_t tb_harq_ncb_eff(const nrLDPC_TB_decoding_parameters_t *p, uint32_t n_cb)
+static __attribute__((unused)) uint32_t tb_harq_ncb_eff(const nrLDPC_TB_decoding_parameters_t *p, uint32_t n_cb)
 {
   const uint32_t K = (p->BG == 1 ? 22 : 10) * p->Z;
   const uint32_t filler_end = K - 2 * p->Z;
@@ -1229,8 +1233,9 @@ static uint32_t tb_harq_ncb_eff(const nrLDPC_TB_decoding_parameters_t *p, uint32
   return n_cb > filler_end ? n_cb - p->F : n_cb > filler_start ? filler_start : n_cb;
 }
 
-static void tb_harq_attach(const nrLDPC_TB_decoding_parameters_t *p, struct rte_bbdev_op_ldpc_dec *d)
+static __attribute__((unused)) void tb_harq_attach(const nrLDPC_TB_decoding_parameters_t *p, struct rte_bbdev_op_ldpc_dec *d)
 {
+#ifdef LDPC_AAL_HAVE_LA12XX
   if (!tb_harq || (int)p->harq_unique_pid >= tb_harq_n)
     return;
   tb_harq_t *h = &tb_harq[p->harq_unique_pid];
@@ -1260,6 +1265,10 @@ static void tb_harq_attach(const nrLDPC_TB_decoding_parameters_t *p, struct rte_
   h->C = p->C;
   h->Z = p->Z;
   h->ncb = d->n_cb;
+#else
+  (void)p;
+  (void)d;
+#endif
 }
 
 /* Default on in TB mode on the LA12xx (the only device whose PMD needs it); LDPC_AAL_TB_HARQ=0/1
@@ -1285,6 +1294,7 @@ static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
 {
   int j = 0;
 
+#ifdef LDPC_AAL_HAVE_LA12XX
   if (tb_mode()) {
     for (int h = 0; h < nrLDPC_slot_decoding_parameters->nb_TBs; ++h) {
       nrLDPC_TB_decoding_parameters_t *p = &nrLDPC_slot_decoding_parameters->TBs[h];
@@ -1320,6 +1330,7 @@ static void set_ldpc_dec_op(struct rte_bbdev_dec_op **ops,
     }
     return;
   }
+#endif
   // The T2 only supports CB mode, and does not TB mode special case handling.
   bool special_case_tb_mode = !active_dev.is_t2 && (nrLDPC_slot_decoding_parameters->nb_TBs == 1)
                               && (nb_segments_decoding(nrLDPC_slot_decoding_parameters) == 1);
@@ -1539,6 +1550,7 @@ static int retrieve_ldpc_dec_op(struct rte_bbdev_dec_op **ops, nrLDPC_slot_decod
 {
   int j = 0;
 
+#ifdef LDPC_AAL_HAVE_LA12XX
   if (tb_mode()) {
     for (int h = 0; h < nrLDPC_slot_decoding_parameters->nb_TBs; ++h) {
       nrLDPC_TB_decoding_parameters_t *p = &nrLDPC_slot_decoding_parameters->TBs[h];
@@ -1568,6 +1580,7 @@ static int retrieve_ldpc_dec_op(struct rte_bbdev_dec_op **ops, nrLDPC_slot_decod
     }
     return 0;
   }
+#endif
   for (int h = 0; h < nrLDPC_slot_decoding_parameters->nb_TBs; ++h) {
     nrLDPC_TB_decoding_parameters_t *p = &nrLDPC_slot_decoding_parameters->TBs[h];
     size_t data_off = 0;
@@ -1575,19 +1588,23 @@ static int retrieve_ldpc_dec_op(struct rte_bbdev_dec_op **ops, nrLDPC_slot_decod
       struct rte_bbdev_op_data *hard_output = &ops[j]->ldpc_dec.hard_output;
       uint32_t data_len;
       uint8_t *data;
+#ifdef LDPC_AAL_HAVE_LA12XX
       if (hard_output->is_direct_mem) {
         /* ->mem already points at the data (offset folded in at enqueue) and
          * the PMD wrote the produced size into ->length. Do not touch ->data:
          * it shares the union with ->mem and is no longer an mbuf pointer. */
         data_len = hard_output->length;
         data = (uint8_t *)hard_output->mem;
-      } else {
+      } else
+#endif
+      {
         struct rte_mbuf *m = hard_output->data;
         data_len = rte_pktmbuf_data_len(m) - hard_output->offset;
         data = rte_pktmbuf_mtod_offset(m, uint8_t *, hard_output->offset);
       }
       /* Temporary instrumentation: set LDPC_AAL_DEBUG_DEC to dump what the
        * device actually returned per code block. */
+#ifdef LDPC_AAL_HAVE_LA12XX
       if (getenv("LDPC_AAL_DEBUG_DEC"))
         printf("[aal-dec] TB%d CB%d/%u cbmode=%u hard_len=%u mbuf_data_len=%u off=%u data_len=%u "
                "crc_stat0=0x%02x status=0x%x iter=%u K=%u F=%u E=%u dmem=%u in_dmem=%u first4=%02x%02x%02x%02x\n",
@@ -1597,6 +1614,7 @@ static int retrieve_ldpc_dec_op(struct rte_bbdev_dec_op **ops, nrLDPC_slot_decod
                p->K, p->F, p->E, hard_output->is_direct_mem,
                ops[j]->ldpc_dec.input.is_direct_mem,
                data[0], data[1], data[2], data[3]);
+#endif
       memcpy(p->c + data_off, data, data_len);
 
       uint32_t segment_offset = (p->harq_unique_pid * NR_LDPC_MAX_NUM_CB) + i;
@@ -1623,6 +1641,7 @@ static int retrieve_ldpc_enc_op(struct rte_bbdev_enc_op **ops, nrLDPC_slot_encod
   uint8_t *p_out = NULL;
   int j = 0;
 
+#ifdef LDPC_AAL_HAVE_LA12XX
   if (tb_enc_mode(nrLDPC_slot_encoding_parameters)) {
     /* The device concatenates the rate-matched code blocks itself, so the
      * output is already the G bits OAI wants -- one copy, and none of the
@@ -1637,7 +1656,7 @@ static int retrieve_ldpc_enc_op(struct rte_bbdev_enc_op **ops, nrLDPC_slot_encod
       AssertFatal(data != NULL, "TB-mode encode output has no buffer");
       if (got == 0 || got > want)
         got = (uint32_t)want;
-      if (getenv("LDPC_AAL_FORCE_BITREV"))
+      if (enc_bitrev())
         reverse_bits_u8(data, got, data);
       memcpy(p->output, data, got);
       if (got < want)
@@ -1645,6 +1664,7 @@ static int retrieve_ldpc_enc_op(struct rte_bbdev_enc_op **ops, nrLDPC_slot_encod
     }
     return 0;
   }
+#endif
 
   for (int h = 0; h < nrLDPC_slot_encoding_parameters->nb_TBs; ++h) {
     int E_sum = 0;
@@ -1667,8 +1687,8 @@ static int retrieve_ldpc_enc_op(struct rte_bbdev_enc_op **ops, nrLDPC_slot_encod
        * without a rebuild while the convention of this FECA is established.
        * VERIFIED WRONG on this Rev-B/DPDK25.11 board (2026-09-11): reversing corrupts
        * the codeword -- offload-encode + CPU-decode gives 8/8 neg-CRC with it, 0/8
-       * without. Kept opt-in via LDPC_AAL_FORCE_BITREV for the legacy 19.11 path. */
-      if (getenv("LDPC_AAL_FORCE_BITREV"))
+       * without. The default is per device, see enc_bitrev(). */
+      if (enc_bitrev())
         reverse_bits_u8(data, data_len, data);
       if (bit_offset == 0) {
         memcpy(&p_out[byte_offset], data, data_len);
@@ -1764,6 +1784,7 @@ static int pmd_lcore_ldpc_dec(void *arg)
       for (int i = 0; i < p->C; ++i) {
         bool *status = &p->decodeSuccess[i];
 
+#ifdef LDPC_AAL_HAVE_LA12XX
         if (tb_mode()) {
           /* One op for the whole TB; crc_stat bit i is code block i's CRC
            * result (set = OK), and bit c is the TB-level CRC. */
@@ -1774,6 +1795,7 @@ static int pmd_lcore_ldpc_dec(void *arg)
             *p->processedSegments = *p->processedSegments + 1;
           continue;
         }
+#endif
         tp->iter_count = RTE_MAX(ops_enq[j]->ldpc_dec.iter_count, tp->iter_count);
 
         // Check if CRC is available otherwise rely on ops_enq[j]->status to detect decoding success
@@ -2075,222 +2097,8 @@ static int normalize_dpdk_dev(const char *input, char *output, size_t out_len)
 }
 
 // OAI CODE
-
-/* LDPC_AAL_CPU_REDECODE=1: diagnostic. A sample of the transport blocks (C > 1) the device
- * reports as failed is decoded again by the CPU library (libldpc.so) from the same LLRs, on a
- * background thread so the RX thread only pays for copying them. CPU OK where the device
- * failed means the device returned a wrong result; when the CPU passes no code block either,
- * the LLRs carry no information as interpreted, and other readings of the grant are tried
- * (RV 1-3, MCS +-1/+-2 at the same modulation order) to find what the UE actually sent. The
- * device result is left untouched. libldpc.so is opened with RTLD_DEEPBIND so that its
- * LDPCdecoder() resolves inside it (see the same fallback in nrLDPC_coding_cuda.c).
- * LDPC_AAL_REDEC_MS sets the sampling interval (default 50 ms); a failure that arrives while
- * the worker is still busy is only counted. */
-
-/* PHY/MAC helpers, resolved from nr-softmodem (linked with -rdynamic), used to re-derive a TB
-   for another MCS exactly as nr_ulsch_decoding() does */
-extern uint32_t nr_compute_tbs(uint16_t Qm, uint16_t R, uint16_t nb_rb, uint16_t nb_symb_sch, uint16_t nb_dmrs_prb,
-                               uint16_t nb_rb_oh, uint8_t tb_scaling, uint8_t Nl);
-extern uint32_t nr_get_code_rate_ul(uint8_t Imcs, uint8_t table_idx);
-extern uint8_t nr_get_Qm_ul(uint8_t Imcs, uint8_t table_idx);
-extern uint8_t get_BG(uint32_t A, uint16_t R);
-extern int32_t nr_segmentation(unsigned char *input_buffer, unsigned char **output_buffers, unsigned int B, unsigned int *C,
-                               unsigned int *K, unsigned int *Zout, unsigned int *F, uint8_t BG);
-extern int nr_get_E(uint32_t G, uint8_t C, uint8_t Qm, uint8_t Nl, uint8_t r);
-extern int nr_get_R_ldpc_decoder(int rvidx, int E, int BG, int Z, int *llrLen, int round);
-
-#define REDEC_MAX_LLR (4 * 1024 * 1024)
-static nrLDPC_coding_interface_t redec_cpu;
-static bool redec_on;
-static uint64_t redec_n, redec_cpu_ok, redec_skipped, redec_busy;
-static tpool_t redec_pool; // "n": every task runs inline on the worker
-static sem_t redec_sem;
-static _Atomic int redec_full; // 1 while the mailbox holds a TB for the worker
-static struct {
-  int frame, slot;
-  nrLDPC_TB_decoding_parameters_t tb;
-  uint32_t dev_cbs;
-  short llr[REDEC_MAX_LLR] __attribute__((aligned(64)));
-} redec_box;
-static int16_t redec_d[NR_LDPC_MAX_NUM_CB * 66 * 384] __attribute__((aligned(64)));
-static uint8_t redec_c[NR_LDPC_MAX_NUM_CB * 1056 + 64] __attribute__((aligned(64)));
-
-/* Fill E/E2/first_rE2/R/R2 for the TB in q (rv_index, C, BG, Z, G, Qm, nb_layers set) */
-static void redec_fill_e(nrLDPC_TB_decoding_parameters_t *q)
-{
-  int llr_len;
-  q->E = nr_get_E(q->G, q->C, q->Qm, q->nb_layers, 0);
-  q->first_rE2 = q->C;
-  q->E2 = q->E;
-  q->R = nr_get_R_ldpc_decoder(q->rv_index, q->E, q->BG, q->Z, &llr_len, 0);
-  for (int r = 0; r < (int)q->C; r++) {
-    const int e = nr_get_E(q->G, q->C, q->Qm, q->nb_layers, r);
-    if (e != q->E) {
-      q->E2 = e;
-      q->R2 = nr_get_R_ldpc_decoder(q->rv_index, q->E2, q->BG, q->Z, &llr_len, 0);
-      q->first_rE2 = r;
-      break;
-    }
-  }
-}
-
-/* CPU-decode q on the worker; returns the number of code blocks that passed */
-static uint32_t redec_try(int frame, int slot, nrLDPC_TB_decoding_parameters_t *q)
-{
-  uint32_t processed = 0;
-  decode_abort_t ab;
-  init_abort(&ab);
-  set_abort(&ab, false);
-  q->processedSegments = &processed;
-  q->abort_decode = &ab;
-  q->llr = redec_box.llr;
-  q->c = redec_c;
-  q->d = redec_d;
-  q->d_to_be_cleared = true;
-  q->backend_desegmented = false;
-  for (int r = 0; r < NR_LDPC_MAX_NUM_CB; r++)
-    q->decodeSuccess[r] = false;
-  nrLDPC_slot_decoding_parameters_t qs = {.frame = frame, .slot = slot, .nb_TBs = 1, .threadPool = &redec_pool, .TBs = q};
-  redec_cpu.nrLDPC_coding_decoder(&qs);
-  return processed;
-}
-
-static void redec_analyse(void)
-{
-  static int mcs_table = -1;
-  if (mcs_table < 0) {
-    const char *e = getenv("LDPC_AAL_REDEC_MCS_TABLE");
-    mcs_table = e ? atoi(e) : 1; /* this DU runs the 256QAM table */
-  }
-  const nrLDPC_TB_decoding_parameters_t *p = &redec_box.tb;
-  const int frame = redec_box.frame, slot = redec_box.slot;
-  nrLDPC_TB_decoding_parameters_t q = *p;
-  const uint32_t cpu_cbs = redec_try(frame, slot, &q);
-  const bool ok = cpu_cbs >= p->C;
-  redec_n++;
-  redec_cpu_ok += ok;
-  char alt[96] = "";
-  if (cpu_cbs == 0) {
-    bool found = false;
-    for (int rv = 1; rv < 4 && !found; rv++) {
-      q = *p;
-      q.rv_index = rv;
-      redec_fill_e(&q);
-      const uint32_t n = redec_try(frame, slot, &q);
-      if (n >= q.C || n * 2 > q.C) {
-        snprintf(alt, sizeof(alt), " | alt rv %d: %u/%u CBs", rv, n, q.C);
-        found = true;
-      }
-    }
-    const int dm[4] = {-1, 1, -2, 2};
-    const uint32_t nre = p->G / (p->Qm * p->nb_layers * p->nb_rb);
-    for (int i = 0; i < 4 && !found; i++) {
-      const int m = p->mcs + dm[i];
-      if (m < 0 || m > 27 || nr_get_Qm_ul(m, mcs_table) != p->Qm || nre > 156)
-        continue;
-      const uint16_t R = nr_get_code_rate_ul(m, mcs_table);
-      q = *p;
-      q.mcs = m;
-      q.A = nr_compute_tbs(p->Qm, R, p->nb_rb, 13, 156 - nre, 0, 0, p->nb_layers);
-      q.BG = get_BG(q.A, R);
-      nr_segmentation(NULL, NULL, lenWithCrc(1, q.A), &q.C, &q.K, &q.Z, &q.F, q.BG);
-      if (q.C > NR_LDPC_MAX_NUM_CB)
-        continue;
-      redec_fill_e(&q);
-      const uint32_t n = redec_try(frame, slot, &q);
-      if (n >= q.C || n * 2 > q.C) {
-        snprintf(alt, sizeof(alt), " | alt mcs %d (A %u C %u): %u/%u CBs", m, q.A, q.C, n, q.C);
-        found = true;
-      }
-    }
-    if (!found)
-      snprintf(alt, sizeof(alt), " | no alt (rv 1-3, mcs +-1/2) decodes");
-  }
-  LOG_I(NR_PHY,
-        "%d.%d AAL CRC fail (device %u/%u CBs), CPU re-decode %s (%u/%u CBs): A %u Qm %u mcs %u rb %u rv %u%s (%llu re-decoded, %llu CPU OK, %llu not sampled, %llu worker busy)\n",
-        frame, slot, redec_box.dev_cbs, p->C, ok ? "OK" : "FAIL", cpu_cbs, p->C, p->A, p->Qm, p->mcs, p->nb_rb, p->rv_index, alt,
-        (unsigned long long)redec_n, (unsigned long long)redec_cpu_ok, (unsigned long long)redec_skipped,
-        (unsigned long long)redec_busy);
-}
-
-extern int pthread_setname_np(pthread_t thread, const char *name); // GNU, not declared here without _GNU_SOURCE
-
-static void *redec_thread(void *arg)
-{
-  (void)arg;
-  while (true) {
-    if (sem_wait(&redec_sem) != 0)
-      continue;
-    redec_analyse();
-    atomic_store(&redec_full, 0);
-  }
-  return NULL;
-}
-
-static void redecode_open(int max_num_pxsch)
-{
-  if (!getenv("LDPC_AAL_CPU_REDECODE"))
-    return;
-  void *h = dlopen("libldpc.so", RTLD_NOW | RTLD_DEEPBIND);
-  if (!h) {
-    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot open libldpc.so: %s\n", dlerror());
-    return;
-  }
-  redec_cpu.nrLDPC_coding_init = dlsym(h, "nrLDPC_coding_init");
-  redec_cpu.nrLDPC_coding_decoder = dlsym(h, "nrLDPC_coding_decoder");
-  if (!redec_cpu.nrLDPC_coding_init || !redec_cpu.nrLDPC_coding_decoder || redec_cpu.nrLDPC_coding_init(max_num_pxsch) != 0) {
-    LOG_E(NR_PHY, "LDPC_AAL_CPU_REDECODE: cannot initialise libldpc.so\n");
-    return;
-  }
-  initNamedTpool("n", &redec_pool, false, "redec");
-  sem_init(&redec_sem, 0, 0);
-  /* created from the init path at normal priority: on this board it then runs on the
-     housekeeping cores, never on an isolated RT core */
-  pthread_t t;
-  pthread_create(&t, NULL, redec_thread, NULL);
-  pthread_setname_np(t, "ldpc_redec");
-  redec_on = true;
-  LOG_I(NR_PHY, "LDPC_AAL_CPU_REDECODE: a sample of failed TBs is re-decoded on the CPU, in the background\n");
-}
-
-/* RX thread: hand a sampled failed TB to the worker, copying its LLRs */
-static void redecode_failed(const nrLDPC_slot_decoding_parameters_t *sp)
-{
-  static int interval_ms = -1;
-  if (interval_ms < 0) {
-    const char *e = getenv("LDPC_AAL_REDEC_MS");
-    interval_ms = e ? atoi(e) : 50;
-  }
-  for (int h = 0; h < sp->nb_TBs; h++) {
-    const nrLDPC_TB_decoding_parameters_t *p = &sp->TBs[h];
-    if (p->C < 2 || *p->processedSegments >= p->C)
-      continue;
-    static uint64_t last_ns;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    const uint64_t now = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
-    if (p->mcs < 6 || p->G > REDEC_MAX_LLR || now - last_ns < (uint64_t)interval_ms * 1000000ULL) {
-      redec_skipped++;
-      continue;
-    }
-    if (atomic_load(&redec_full)) {
-      redec_busy++;
-      continue;
-    }
-    last_ns = now;
-    redec_box.frame = sp->frame;
-    redec_box.slot = sp->slot;
-    redec_box.tb = *p;
-    redec_box.dev_cbs = *p->processedSegments;
-    memcpy(redec_box.llr, p->llr, p->G * sizeof(*p->llr));
-    atomic_store(&redec_full, 1);
-    sem_post(&redec_sem);
-  }
-}
-
 int32_t nrLDPC_coding_init(int max_num_pxsch)
 {
-  redecode_open(max_num_pxsch);
   pthread_mutex_init(&encode_mutex, NULL);
   pthread_mutex_init(&decode_mutex, NULL);
 
@@ -2753,8 +2561,6 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *nrLDPC_slot_dec
               (prof_total - prof_conv - prof_gather) / prof_n, prof_total / prof_n);
   }
   pthread_mutex_unlock(&decode_mutex);
-  if (redec_on)
-    redecode_failed(nrLDPC_slot_decoding_parameters);
   return 0;
 }
 
