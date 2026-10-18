@@ -970,6 +970,15 @@ int main(int argc, char **argv)
     int rc_ue_ldpc = load_nrLDPC_coding_interface("", &UE->nrLDPC_coding_interface, 16);
     AssertFatal(rc_ue_ldpc == 0, "failed to load CPU LDPC interface for UE decode\n");
     printf("[dlsim] UE decode = CPU (libldpc.so); gNB encode = offload\n");
+  } else if (getenv("DLSIM_GNB_LDPC_CPU")) {
+    /* The mirror image: the UE decodes on the offload the gNB loaded, and the gNB encodes on
+       the CPU reference. Together with DLSIM_UE_LDPC_CPU and the default (both on the
+       offload) this separates the offload encoder, the offload decoder, and the two
+       sharing one device. */
+    UE->nrLDPC_coding_interface = gNB->nrLDPC_coding_interface;
+    int rc_gnb_ldpc = load_nrLDPC_coding_interface("", &gNB->nrLDPC_coding_interface, 16);
+    AssertFatal(rc_gnb_ldpc == 0, "failed to load CPU LDPC interface for gNB encode\n");
+    printf("[dlsim] UE decode = offload; gNB encode = CPU (libldpc.so)\n");
   } else {
     UE->nrLDPC_coding_interface = gNB->nrLDPC_coding_interface;
   }
