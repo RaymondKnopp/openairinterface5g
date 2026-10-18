@@ -1075,6 +1075,9 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
     for (int i = 0; i < 8; i++)
       tot += gNB->tx_send_margin_hist[i];
     if (tot && output < end) {
+      if (gNB->diag_tb_n + gNB->diag_tb_miss)
+        output += snprintf(output, end - output, "%25s: checked %llu, changed %llu, no first-tx entry %llu\n", "DL retx payload (PHY)",
+                           (unsigned long long)gNB->diag_tb_n, (unsigned long long)gNB->diag_tb_bad, (unsigned long long)gNB->diag_tb_miss);
       output += snprintf(output, end - output, "%25s: (%llu)", "TX send: tx - rx slots", (unsigned long long)tot);
       for (int i = 0; i < 8 && output < end; i++)
         if (gNB->tx_send_margin_hist[i])

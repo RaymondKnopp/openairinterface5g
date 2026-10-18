@@ -604,6 +604,9 @@ typedef struct PHY_VARS_gNB_s {
   time_stats_t tx_grid_wait;
   /* slots between a TX slot and the last RX slot when its RU send finished; see tx_ru_path() */
   uint64_t tx_send_margin_hist[8];
+  /* OAI_DIAG_TB_HASH: DL retransmissions whose payload reached the encoder, and those whose bytes
+   * changed since the first transmission (keyed by the TB buffer, see nr_dlsch_encoding()) */
+  uint64_t diag_tb_n, diag_tb_bad, diag_tb_miss;
   time_stats_t rx_pusch_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;

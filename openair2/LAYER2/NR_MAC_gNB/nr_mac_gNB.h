@@ -580,6 +580,8 @@ typedef struct NR_UE_harq {
   bool start_tci_timer;
   /// round-0 NACK seen on PUCCH F0/F1, for gNB_MAC_INST::harq_fb_pusch: 0 none, else 1 + w * 2 + low_confidence
   uint8_t diag_nack;
+  /// OAI_DIAG_TB_HASH: hash of the TB at its first transmission, see generate_dl_mac_pdu()
+  uint64_t diag_tb_hash;
   /// sched_pdsch keeps information on MCS etc used for the initial transmission
   NR_sched_pdsch_t sched_pdsch;
 } NR_UE_harq_t;
@@ -1394,6 +1396,8 @@ typedef struct gNB_MAC_INST_s {
   /* the same round-0 NACKs by [PUSCH in the NACK slot][PUSCH in the slot of the feedback for the
    * retransmission]: failures only in the second column point at feedback, not at decoding */
   uint64_t harq_retx_n[2][2], harq_retx_ack[2][2];
+  /// OAI_DIAG_TB_HASH: DL retransmissions checked, and those whose TB bytes changed since the first transmission
+  uint64_t diag_tb_n, diag_tb_bad;
   /// F1-C/U network configuration (addresses and ports)
   f1ap_net_config_t net_config;
   /// Nvipc parameters for FAPI interface with Aerial

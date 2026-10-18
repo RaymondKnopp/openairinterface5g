@@ -20,6 +20,28 @@
 #include "executables/softmodem-common.h"
 #include "../../../nfapi/oai_integration/vendor_ext.h"
 
+/* OAI_DIAG_TB_HASH: fast 64-bit hash of a TB payload, to check that a HARQ retransmission
+ * carries the same bytes as the first transmission (rotate-xor-multiply over 8-byte words). */
+static inline uint64_t diag_tb_hash(const uint8_t *p, size_t n)
+{
+  uint64_t h = 0x9e3779b97f4a7c15ULL ^ n, w;
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    memcpy(&w, p + i, 8);
+    h = (((h << 7) | (h >> 57)) ^ w) * 0x100000001b3ULL;
+  }
+  for (; i < n; i++)
+    h = (h ^ p[i]) * 0x100000001b3ULL;
+  return h;
+}
+static inline bool diag_tb_hash_on(void)
+{
+  static int v = -1;
+  if (v < 0)
+    v = getenv("OAI_DIAG_TB_HASH") != NULL;
+  return v != 0;
+}
+
 ////////////////////////////////////////////////////////
 /////* DLSCH MAC PDU generation (6.1.2 TS 38.321) */////
 ////////////////////////////////////////////////////////
@@ -1060,6 +1082,15 @@ static void generate_dl_mac_pdu(gNB_MAC_INST *mac,
       T_BUFFER(harq->transportBlock.buf, TBS));
     UE->mac_stats.dl.total_rbs_retx += sched_pdsch->rbSize;
     mac->mac_stats.dl.used_prb_aggregate += sched_pdsch->rbSize;
+    if (diag_tb_hash_on()) {
+      mac->diag_tb_n++;
+      if (diag_tb_hash(harq->transportBlock.buf, TBS) != harq->diag_tb_hash) {
+        mac->diag_tb_bad++;
+        if (mac->diag_tb_bad <= 20)
+          LOG_W(NR_MAC, "%d.%d UE %04x HARQ %d round %d: TB bytes differ from the first transmission\n", frame, slot, rnti,
+                current_harq_pid, harq->round);
+      }
+    }
   } else { /* initial transmission */
     LOG_D(NR_MAC, "Initial HARQ transmission in %d.%d\n", frame, slot);
     // Flag HARQ process to start TCI timer at ACK
@@ -1185,6 +1216,8 @@ static void generate_dl_mac_pdu(gNB_MAC_INST *mac,
       T_INT(current_harq_pid),
       T_BUFFER(harq->transportBlock.buf, TBS));
     T(T_GNB_MAC_DL, T_INT(rnti), T_INT(frame), T_INT(slot), T_INT(sched_pdsch->mcs), T_INT(TBS));
+    if (diag_tb_hash_on())
+      harq->diag_tb_hash = diag_tb_hash(harq->transportBlock.buf, TBS);
   }
 }
 

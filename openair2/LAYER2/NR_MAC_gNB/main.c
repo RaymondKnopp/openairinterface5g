@@ -260,6 +260,9 @@ void *nrmac_stats_thread(void *arg) {
                     (unsigned long long)h->retx_ack[0], (unsigned long long)h->retx_n[0],
                     (unsigned long long)h->retx_ack[1], (unsigned long long)h->retx_n[1]);
     }
+    if (gNB->diag_tb_n)
+      p += snprintf(p, end - p, "DL retx TB bytes vs first transmission (MAC): checked %llu, changed %llu\n",
+                    (unsigned long long)gNB->diag_tb_n, (unsigned long long)gNB->diag_tb_bad);
     if (gNB->harq_retx_n[0][0] + gNB->harq_retx_n[0][1] + gNB->harq_retx_n[1][0] + gNB->harq_retx_n[1][1])
       p += snprintf(p, end - p,
                     "round-0 NACK -> retx ACK by PUSCH in [NACK slot][retx feedback slot]: "

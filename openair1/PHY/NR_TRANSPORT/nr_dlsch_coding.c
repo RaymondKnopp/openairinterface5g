@@ -8,6 +8,35 @@
 
 #include "PHY/defs_gNB.h"
 #include "PHY/CODING/coding_extern.h"
+
+/* OAI_DIAG_TB_HASH: fast 64-bit hash of a TB payload, to check that a HARQ retransmission
+ * carries the same bytes as the first transmission (rotate-xor-multiply over 8-byte words). */
+static inline uint64_t diag_tb_hash(const uint8_t *p, size_t n)
+{
+  uint64_t h = 0x9e3779b97f4a7c15ULL ^ n, w;
+  size_t i = 0;
+  for (; i + 8 <= n; i += 8) {
+    memcpy(&w, p + i, 8);
+    h = (((h << 7) | (h >> 57)) ^ w) * 0x100000001b3ULL;
+  }
+  for (; i < n; i++)
+    h = (h ^ p[i]) * 0x100000001b3ULL;
+  return h;
+}
+static inline bool diag_tb_hash_on(void)
+{
+  static int v = -1;
+  if (v < 0)
+    v = getenv("OAI_DIAG_TB_HASH") != NULL;
+  return v != 0;
+}
+
+/* first-transmission hash per TB buffer: the TX_req payload is the MAC HARQ process buffer */
+static struct {
+  const uint8_t *a;
+  uint32_t A;
+  uint64_t h;
+} diag_tb_tbl[64];
 #include "PHY/CODING/coding_defs.h"
 #include "PHY/CODING/nrLDPC_coding/nrLDPC_coding_interface.h"
 #include "PHY/CODING/nrLDPC_extern.h"
@@ -204,6 +233,22 @@ int nr_dlsch_encoding(PHY_VARS_gNB *gNB,
     }
 
     stop_meas(dlsch_crc_stats);
+    if (diag_tb_hash_on()) {
+      const uint64_t hh = diag_tb_hash(a, A >> 3);
+      const unsigned k = ((uintptr_t)a >> 6) % 64;
+      if (rel15->rvIndex[0] == 0) {
+        diag_tb_tbl[k].a = a;
+        diag_tb_tbl[k].A = A;
+        diag_tb_tbl[k].h = hh;
+      } else if (diag_tb_tbl[k].a == a && diag_tb_tbl[k].A == A) {
+        gNB->diag_tb_n++;
+        if (hh != diag_tb_tbl[k].h && ++gNB->diag_tb_bad <= 20)
+          LOG_W(PHY, "%d.%d rnti %04x rv %d: TB payload at the encoder differs from the first transmission\n", frame, slot,
+                rel15->rnti, rel15->rvIndex[0]);
+      } else {
+        gNB->diag_tb_miss++;
+      }
+    }
     nrLDPC_TB_encoding_parameters_t *TB_parameters = &TBs[i];
 
     // The harq_pid is not unique among the active HARQ processes in the instance so we use i instead
