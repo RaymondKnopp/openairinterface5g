@@ -24,6 +24,13 @@ if (ENABLE_LDPC_AAL)
   # librte_baseband_la12xx.so; the old 19.11 fork used librte_pmd_bbdev_la12xx.a.
   find_library(PMD_LA12XX NAMES rte_baseband_la12xx rte_pmd_bbdev_la12xx
                HINTS ${LIBDPDK_AAL_LIBRARY_DIRS})
+  # A DPDK build can ship the LA12xx PMD library without installing its vendor header
+  # (seen with 22.11 on x86); the LA12xx code needs both.
+  find_path(LA12XX_INCLUDE_DIR rte_pmd_bbdev_la12xx.h HINTS ${LIBDPDK_AAL_INCLUDE_DIRS})
+  if (PMD_LA12XX AND NOT LA12XX_INCLUDE_DIR)
+    message(STATUS "NXP LA12xx PMD library found but not rte_pmd_bbdev_la12xx.h: building without LA12xx support")
+    set(PMD_LA12XX "")
+  endif()
   if (PMD_LA12XX)
     message(STATUS "found poll-mode driver for NXP LA12xx LDPC/FECA offload (${PMD_LA12XX})")
   endif()
