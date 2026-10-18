@@ -1446,6 +1446,18 @@ void nr_schedule_ue_spec(gNB_MAC_INST *gNB_mac,
   nfapi_nr_dl_tti_request_body_t *dl_req = &DL_req->dl_tti_request_body;
   post_process_pdsch_t pdsch = { frame, slot, dl_req, TX_req };
 
+  /* OAI_DL_SLOT_MASK: diagnostic, schedule UE-specific DL (new transmissions and
+   * retransmissions) only in the slots of the frame whose bit is set */
+  static long dl_slot_mask = -2;
+  if (dl_slot_mask == -2) {
+    const char *e = getenv("OAI_DL_SLOT_MASK");
+    dl_slot_mask = e ? strtol(e, NULL, 0) : -1;
+    if (dl_slot_mask >= 0)
+      LOG_W(NR_MAC, "OAI_DL_SLOT_MASK 0x%lx: UE-specific DL only in the slots set\n", dl_slot_mask);
+  }
+  if (dl_slot_mask >= 0 && !((dl_slot_mask >> (slot % cell->frame_structure.numb_slots_frame)) & 1))
+    return;
+
   /* PREPROCESSOR */
   gNB_mac->pre_processor_dl(gNB_mac, cell, &pdsch);
 }
