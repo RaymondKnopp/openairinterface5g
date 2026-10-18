@@ -5,6 +5,7 @@
 #include "PHY/defs_gNB.h"
 #include "PHY/impl_defs_nr.h"
 #include "phy_ofdm_mod.h"
+#include "nr_modulation.h"
 #include "common/utils/LOG/log.h"
 //#define DEBUG_OFDM_MOD
 
