@@ -999,7 +999,13 @@ void handle_nr_uci_pucch_0_1(module_id_t mod_id, int cell_id, frame_t frame, slo
       hs->lowconf += fb_kind == 2;
       if (harq->round == 0) {
         harq->diag_nack = fb_kind ? 1 + w_pusch * 2 + (fb_kind - 1) : 0;
+        const int ud = nr_ul_dci_sent_in(harq->diag_pdsch_frame, harq->diag_pdsch_slot);
+        harq->diag_uldci = ud;
+        nrmac->uldci_bits[ud]++;
+        nrmac->uldci_nack[ud] += fb_kind != 0;
       } else if (harq->round == 1 && harq->diag_nack) {
+        nrmac->uldci_retx_n[harq->diag_uldci]++;
+        nrmac->uldci_retx_ack[harq->diag_uldci] += fb_kind == 0;
         const int b = harq->diag_nack - 1;
         nrmac->harq_fb_pusch[b / 2].retx_n[b % 2]++;
         nrmac->harq_fb_pusch[b / 2].retx_ack[b % 2] += fb_kind == 0;

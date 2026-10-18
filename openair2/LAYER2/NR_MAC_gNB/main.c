@@ -260,6 +260,11 @@ void *nrmac_stats_thread(void *arg) {
                     (unsigned long long)h->retx_ack[0], (unsigned long long)h->retx_n[0],
                     (unsigned long long)h->retx_ack[1], (unsigned long long)h->retx_n[1]);
     }
+    for (int ud = 0; ud < 2 && p < end; ud++)
+      if (gNB->uldci_bits[ud])
+        p += snprintf(p, end - p, "DL round 0 in slots %s UL DCI: bits %llu NACK %.2f%% | retx ACK %llu/%llu\n", ud ? "with   " : "without",
+                      (unsigned long long)gNB->uldci_bits[ud], 100.0 * gNB->uldci_nack[ud] / gNB->uldci_bits[ud],
+                      (unsigned long long)gNB->uldci_retx_ack[ud], (unsigned long long)gNB->uldci_retx_n[ud]);
     if (gNB->diag_tb_n)
       p += snprintf(p, end - p, "DL retx TB bytes vs first transmission (MAC): checked %llu, changed %llu\n",
                     (unsigned long long)gNB->diag_tb_n, (unsigned long long)gNB->diag_tb_bad);

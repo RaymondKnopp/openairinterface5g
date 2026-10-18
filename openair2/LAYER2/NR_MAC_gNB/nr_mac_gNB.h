@@ -582,6 +582,9 @@ typedef struct NR_UE_harq {
   uint8_t diag_nack;
   /// OAI_DIAG_TB_HASH: hash of the TB at its first transmission, see generate_dl_mac_pdu()
   uint64_t diag_tb_hash;
+  /// frame.slot of the last PDSCH of this process, and whether a UL DCI went out in the slot of its first transmission
+  uint16_t diag_pdsch_frame, diag_pdsch_slot;
+  uint8_t diag_uldci;
   /// sched_pdsch keeps information on MCS etc used for the initial transmission
   NR_sched_pdsch_t sched_pdsch;
 } NR_UE_harq_t;
@@ -1398,6 +1401,9 @@ typedef struct gNB_MAC_INST_s {
   uint64_t harq_retx_n[2][2], harq_retx_ack[2][2];
   /// OAI_DIAG_TB_HASH: DL retransmissions checked, and those whose TB bytes changed since the first transmission
   uint64_t diag_tb_n, diag_tb_bad;
+  /* round-0 HARQ feedback of DL TBs by [UL DCI sent in the slot of the PDSCH]: bits, NACKs (incl. low
+   * confidence), and the first retransmission of those NACKs */
+  uint64_t uldci_bits[2], uldci_nack[2], uldci_retx_n[2], uldci_retx_ack[2];
   /// F1-C/U network configuration (addresses and ports)
   f1ap_net_config_t net_config;
   /// Nvipc parameters for FAPI interface with Aerial

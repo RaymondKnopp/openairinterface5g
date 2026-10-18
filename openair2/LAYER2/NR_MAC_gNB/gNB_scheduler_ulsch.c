@@ -715,6 +715,17 @@ static void ul_dci_outcome(int f, int s, rnti_t rnti, char o)
   }
 }
 
+/* Was any UL DCI sent in frame.slot?  Under sched_lock. */
+bool nr_ul_dci_sent_in(int f, int s)
+{
+  for (unsigned i = 1; i <= 64 && i <= ul_dci_n; i++) {
+    const ul_dci_rec_t *r = &ul_dci_ring[(ul_dci_n - i) % UL_DCI_RING];
+    if (r->df == f && r->ds == s)
+      return true;
+  }
+  return false;
+}
+
 /* Was a PUSCH of this UE scheduled in frame.slot?  Under sched_lock. */
 bool nr_ul_dci_targets(int f, int s, rnti_t rnti)
 {

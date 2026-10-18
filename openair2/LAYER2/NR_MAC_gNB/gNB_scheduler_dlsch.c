@@ -1047,6 +1047,8 @@ static void generate_dl_mac_pdu(gNB_MAC_INST *mac,
   const rnti_t rnti = UE->rnti;
   NR_UE_sched_ctrl_t *sched_ctrl = &UE->UE_sched_ctrl;
   const int8_t current_harq_pid = sched_pdsch->dl_harq_pid;
+  harq->diag_pdsch_frame = frame;
+  harq->diag_pdsch_slot = slot;
   const uint32_t TBS = sched_pdsch->tb_size;
 
   if (harq->round != 0) { /* retransmission */
