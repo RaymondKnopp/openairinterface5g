@@ -39,6 +39,13 @@ if(xran_FOUND)
       message(FATAL_ERROR "We require min DPDK version 20.11, but found ${dpdk_VERSION}")
     endif()
     target_compile_definitions(oran_fhlib_5g PRIVATE K_RELEASE)
+    # NXP's o-du-phy fork inserts the 802.1Q tag in software from per-plane fields
+    # (the DPAA2 PMD has no VLAN offload); upstream xran leaves tagging to the NIC/VF.
+    file(STRINGS "${xran_INCLUDE_DIR}/xran_fh_o_du.h" _xran_vlan_fields REGEX "cp_vlan_tag")
+    if(_xran_vlan_fields)
+      target_compile_definitions(oran_fhlib_5g PRIVATE XRAN_HAS_CP_UP_VLAN_TAG)
+      message(STATUS "xran has per-plane VLAN tags: software VLAN insertion from vlan_tag")
+    endif()
   else()
     message(FATAL_ERROR "Found xran version ${xran_VERSION} but needed ${K_VERSION} (K release)")
   endif()

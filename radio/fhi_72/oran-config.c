@@ -1038,6 +1038,7 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
   fh_config->puschMaskEnable = 0; // enable PUSCH mask; only used if id = O_RU
   fh_config->puschMaskSlot = 0; // specific which slot PUSCH channel masked; only used if id = O_RU
   fh_config->csirsEnable = 0; // enable CSI-RS (Cat B specific)
+#ifdef XRAN_HAS_CP_UP_VLAN_TAG
   {
     /* DPAA2 software VLAN: the o-du-phy fork inserts the 802.1Q tag in software
      * from these fields (the DPAA2 PMD does not offload VLAN insert/strip).
@@ -1055,6 +1056,7 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
     fh_config->cp_vlan_tag = tci;
     fh_config->up_vlan_tag = tci;
   }
+#endif
   fh_config->debugStop = 0; // enable auto stop; only used if id = O_RU
   fh_config->debugStopCount = 0; // enable auto stop after number of Tx packets; not used in xran
   fh_config->DynamicSectionEna = 0; // enable dynamic C-Plane section allocation
