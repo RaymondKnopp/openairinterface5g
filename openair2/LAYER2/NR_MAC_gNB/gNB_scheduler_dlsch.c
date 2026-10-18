@@ -860,6 +860,18 @@ static void nr_dl_schedule(gNB_MAC_INST *mac,
       sched_pdsch.dl_harq_pid = sched_ctrl->available_dl_harq.head;
       sched_pdsch.dmrs_parms = dmrs;
 
+      /* OAI_DL_MAX_RB: diagnostic cap on the RBs of a new transmission (retransmissions keep
+       * their first size), e.g. to keep a serial PDSCH generation within the TX budget */
+      static int dl_max_rb = -2;
+      if (dl_max_rb == -2) {
+        const char *e = getenv("OAI_DL_MAX_RB");
+        dl_max_rb = e ? atoi(e) : -1;
+        if (dl_max_rb > 0)
+          LOG_W(NR_MAC, "OAI_DL_MAX_RB %d: DL new transmissions limited to %d RBs\n", dl_max_rb, dl_max_rb);
+      }
+      if (dl_max_rb > 0 && sched_pdsch.rbSize > dl_max_rb)
+        sched_pdsch.rbSize = dl_max_rb;
+
       /* Compute actual TBS (policy allocated max rbSize, nr_find_nb_rb gives actual) */
       const int oh = 3 * 4 + (sched_ctrl->ta_apply ? 2 : 0);
       nr_find_nb_rb(Qm,
