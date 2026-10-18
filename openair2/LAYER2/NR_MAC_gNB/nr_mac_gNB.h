@@ -585,6 +585,7 @@ typedef struct NR_UE_harq {
   /// frame.slot of the last PDSCH of this process, and whether a UL DCI went out in the slot of its first transmission
   uint16_t diag_pdsch_frame, diag_pdsch_slot;
   uint8_t diag_uldci;
+  uint8_t diag_r0_slot; // slot of the first transmission
   /// sched_pdsch keeps information on MCS etc used for the initial transmission
   NR_sched_pdsch_t sched_pdsch;
 } NR_UE_harq_t;
@@ -1404,6 +1405,8 @@ typedef struct gNB_MAC_INST_s {
   /* round-0 HARQ feedback of DL TBs by [UL DCI sent in the slot of the PDSCH]: bits, NACKs (incl. low
    * confidence), and the first retransmission of those NACKs */
   uint64_t uldci_bits[2], uldci_nack[2], uldci_retx_n[2], uldci_retx_ack[2];
+  /* per slot of the first transmission, reset every stats dump (1 s) and logged as [slot-harq] */
+  uint32_t slot_r0_bits[20], slot_r0_nack[20], slot_retx_n[20], slot_retx_ack[20];
   /// F1-C/U network configuration (addresses and ports)
   f1ap_net_config_t net_config;
   /// Nvipc parameters for FAPI interface with Aerial

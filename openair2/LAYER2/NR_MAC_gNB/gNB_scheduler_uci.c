@@ -1003,9 +1003,15 @@ void handle_nr_uci_pucch_0_1(module_id_t mod_id, int cell_id, frame_t frame, slo
         harq->diag_uldci = ud;
         nrmac->uldci_bits[ud]++;
         nrmac->uldci_nack[ud] += fb_kind != 0;
+        const int s0 = harq->diag_pdsch_slot % 20;
+        harq->diag_r0_slot = s0;
+        nrmac->slot_r0_bits[s0]++;
+        nrmac->slot_r0_nack[s0] += fb_kind != 0;
       } else if (harq->round == 1 && harq->diag_nack) {
         nrmac->uldci_retx_n[harq->diag_uldci]++;
         nrmac->uldci_retx_ack[harq->diag_uldci] += fb_kind == 0;
+        nrmac->slot_retx_n[harq->diag_r0_slot % 20]++;
+        nrmac->slot_retx_ack[harq->diag_r0_slot % 20] += fb_kind == 0;
         const int b = harq->diag_nack - 1;
         nrmac->harq_fb_pusch[b / 2].retx_n[b % 2]++;
         nrmac->harq_fb_pusch[b / 2].retx_ack[b % 2] += fb_kind == 0;

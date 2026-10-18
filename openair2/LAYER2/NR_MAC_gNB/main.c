@@ -260,6 +260,21 @@ void *nrmac_stats_thread(void *arg) {
                     (unsigned long long)h->retx_ack[0], (unsigned long long)h->retx_n[0],
                     (unsigned long long)h->retx_ack[1], (unsigned long long)h->retx_n[1]);
     }
+    {
+      /* one log line per second: slot: round-0 NACK/bits, first-retx ACK/retx */
+      char l[1024];
+      int n = 0;
+      for (int s = 0; s < 20 && n < (int)sizeof(l) - 40; s++)
+        if (gNB->slot_r0_bits[s])
+          n += snprintf(l + n, sizeof(l) - n, " %d:%u/%u,%u/%u", s, gNB->slot_r0_nack[s], gNB->slot_r0_bits[s], gNB->slot_retx_ack[s],
+                        gNB->slot_retx_n[s]);
+      if (n)
+        LOG_I(NR_MAC, "[slot-harq]%s\n", l);
+      memset(gNB->slot_r0_bits, 0, sizeof(gNB->slot_r0_bits));
+      memset(gNB->slot_r0_nack, 0, sizeof(gNB->slot_r0_nack));
+      memset(gNB->slot_retx_n, 0, sizeof(gNB->slot_retx_n));
+      memset(gNB->slot_retx_ack, 0, sizeof(gNB->slot_retx_ack));
+    }
     for (int ud = 0; ud < 2 && p < end; ud++)
       if (gNB->uldci_bits[ud])
         p += snprintf(p, end - p, "DL round 0 in slots %s UL DCI: bits %llu NACK %.2f%% | retx ACK %llu/%llu\n", ud ? "with   " : "without",
