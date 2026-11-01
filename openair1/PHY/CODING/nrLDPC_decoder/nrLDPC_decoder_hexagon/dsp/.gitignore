@@ -1,0 +1,6 @@
+# Build outputs. gen/ is regenerated from inc/ldpc_hexagon.idl by the SDK's qaic,
+# and the skel is compiled from it -- see the header of dsp/Makefile for why this
+# is a hand-written Makefile rather than the SDK's CMake path.
+gen/
+*.o
+*.so
