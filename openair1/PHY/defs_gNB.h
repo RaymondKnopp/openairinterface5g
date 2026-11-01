@@ -591,11 +591,11 @@ typedef struct processingData_L1 {
   openair0_timestamp_t timestamp_tx;
   PHY_VARS_gNB *gNB;
   notifiedFIFO_elt_t *elt;
-  uint64_t t_dispatch;   /* rdtsc when queued to the RX pool; measures how long the
+  uint64_t t_dispatch;   /* clock_gettime_oai() ns when queued to the RX pool; measures how long the
                           * job waits for a worker.  The rxdataF ring slot is only
                           * released when this job COMPLETES, so this wait is on the
                           * critical path for ring reuse. */
-  uint64_t t_release;    /* rdtsc at the moment L1 pushed this slot onto L1_rx_out, i.e.
+  uint64_t t_release;    /* clock_gettime_oai() ns at the moment L1 pushed this slot onto L1_rx_out, i.e.
                           * when it really stopped needing rxdataF.  Stamped by L1 rather
                           * than read when ru_thread drains, so the hold time is not
                           * inflated by ru_thread's own drain period (one UL slot). */

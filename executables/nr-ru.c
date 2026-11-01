@@ -661,7 +661,7 @@ bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_SLOT_DEP
     while ((res = pollNotifiedFIFO(L1_rx_out)) != NULL) { /* non-blocking */
       processingData_L1_t *info = NotifiedFifoData(res);
       const int ridx = info->slot_rx % RU_RX_SLOT_DEPTH;
-      const uint64_t t_now = rdtsc_oai();
+      const uint64_t t_now = (uint64_t)clock_gettime_oai();
       g_ru_releases++;
       if (g_rx_tti_t_busy[ridx] && info->t_release > g_rx_tti_t_busy[ridx])
         rt_hist_add(&g_ru_hold, info->t_release - g_rx_tti_t_busy[ridx], info->frame_rx, info->slot_rx);
@@ -681,7 +681,7 @@ bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_SLOT_DEP
       static uint64_t overwrites = 0;
       overwrites++;
       if (g_rx_tti_t_busy[idx])
-        rt_hist_add(&g_ru_owage, rdtsc_oai() - g_rx_tti_t_busy[idx], frame_rx, slot_rx);
+        rt_hist_add(&g_ru_owage, (uint64_t)clock_gettime_oai() - g_rx_tti_t_busy[idx], frame_rx, slot_rx);
       /* rate limited, prime modulus: see the TX overrun alarm for why not 100 */
       /* Deferred: this runs on ru_thread, which drives fronthaul timing. LOG_W there does a
          blocking write(2) and has been measured stalling the DU for seconds. */
@@ -694,7 +694,7 @@ bool wait_free_rx_tti(notifiedFIFO_t *L1_rx_out, bool rx_tti_busy[RU_RX_SLOT_DEP
                      (unsigned long long)overwrites);
     }
     rx_tti_busy[idx] = true;
-    g_rx_tti_t_busy[idx] = rdtsc_oai();
+    g_rx_tti_t_busy[idx] = (uint64_t)clock_gettime_oai();
     g_ru_busy_marks++;
     return true; /* proceed regardless: never stall the fronthaul */
   }
@@ -824,15 +824,15 @@ void *ru_thread(void *param)
 
     {
       static uint64_t t_prev;
-      const uint64_t t_now = rdtsc_oai();
+      const uint64_t t_now = (uint64_t)clock_gettime_oai();
       if (t_prev) rt_hist_add(&g_ru_loop, t_now - t_prev, frame, slot);
       t_prev = t_now;
     }
 
     AssertFatal(ru->fh_south_in, "No fronthaul interface at south port");
-    const uint64_t t_fh0 = rdtsc_oai();
+    const uint64_t t_fh0 = (uint64_t)clock_gettime_oai();
     ru->fh_south_in(ru, &frame, &slot);
-    rt_hist_add(&g_ru_fhin, rdtsc_oai() - t_fh0, frame, slot);
+    rt_hist_add(&g_ru_fhin, (uint64_t)clock_gettime_oai() - t_fh0, frame, slot);
 
     proc->timestamp_tx = proc->timestamp_rx;
     for (int i = proc->tti_rx; i < proc->tti_rx + ru->sl_ahead; i++)
@@ -859,9 +859,9 @@ void *ru_thread(void *param)
     if (slot_type == NR_UPLINK_SLOT || slot_type == NR_MIXED_SLOT) {
       if (!wait_free_rx_tti(&gNB->L1_rx_out, rx_tti_busy, proc->frame_rx, proc->tti_rx))
         break; // nothing to wait for: we have to stop
-      const uint64_t t_fep0 = rdtsc_oai();
+      const uint64_t t_fep0 = (uint64_t)clock_gettime_oai();
       ru_rx_slot(ru, gNB, proc->frame_rx, proc->tti_rx);
-      rt_hist_add(&g_ru_fep, rdtsc_oai() - t_fep0, proc->frame_rx, proc->tti_rx);
+      rt_hist_add(&g_ru_fep, (uint64_t)clock_gettime_oai() - t_fep0, proc->frame_rx, proc->tti_rx);
     }
 
     ru_push_tx_job(gNB, proc->frame_tx, proc->tti_tx, proc->frame_rx, proc->tti_rx, proc->timestamp_tx);
