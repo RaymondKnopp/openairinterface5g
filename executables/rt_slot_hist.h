@@ -15,38 +15,35 @@
 
 typedef struct {
   uint64_t n;
-  uint64_t sum_ticks;
-  uint64_t max_ticks;
+  uint64_t sum_ns;
+  uint64_t max_ns;
   uint32_t max_frame, max_slot;
   uint64_t over[4];          /* > 0.5 / 1 / 5 / 10 ms */
 } rt_hist_t;
 
-static inline void rt_hist_add(rt_hist_t *h, uint64_t ticks, int frame, int slot)
+/* Nanoseconds from clock_gettime_oai(), not TSC ticks: upstream dropped the
+ * calibrated-frequency helper, and a wall clock also removes the assumption that
+ * the counter ticks at one rate across the A78 and A55 clusters. */
+static inline void rt_hist_add(rt_hist_t *h, uint64_t ns, int frame, int slot)
 {
   h->n++;
-  h->sum_ticks += ticks;
-  if (ticks > h->max_ticks) { h->max_ticks = ticks; h->max_frame = frame; h->max_slot = slot; }
-  static uint64_t th[4];
-  if (th[0] == 0) {
-    const double tps_us = cpu_freq_GHz * 1000.0;
-    th[0] = (uint64_t)(500.0 * tps_us);   th[1] = (uint64_t)(1000.0 * tps_us);
-    th[2] = (uint64_t)(5000.0 * tps_us);  th[3] = (uint64_t)(10000.0 * tps_us);
-  }
+  h->sum_ns += ns;
+  if (ns > h->max_ns) { h->max_ns = ns; h->max_frame = frame; h->max_slot = slot; }
+  static const uint64_t th[4] = {500000ull, 1000000ull, 5000000ull, 10000000ull};
   for (int i = 0; i < 4; i++)
-    if (ticks > th[i]) h->over[i]++;
+    if (ns > th[i]) h->over[i]++;
 }
 
 static inline size_t rt_hist_one(char *o, size_t n, const char *tag, const rt_hist_t *h)
 {
-  const double tps_us = cpu_freq_GHz * 1000.0;
-  if (h->n == 0 || tps_us <= 0.0)
+  if (h->n == 0)
     return snprintf(o, n, "  %-10s : no samples\n", tag);
   return snprintf(o, n,
                   "  %-10s : n=%-8llu avg=%7.1f us  max=%9.1f us @%u.%u"
                   "  >0.5ms=%llu >1ms=%llu >5ms=%llu >10ms=%llu\n",
                   tag, (unsigned long long)h->n,
-                  (double)h->sum_ticks / h->n / tps_us,
-                  (double)h->max_ticks / tps_us, h->max_frame, h->max_slot,
+                  (double)h->sum_ns / h->n / 1000.0,
+                  (double)h->max_ns / 1000.0, h->max_frame, h->max_slot,
                   (unsigned long long)h->over[0], (unsigned long long)h->over[1],
                   (unsigned long long)h->over[2], (unsigned long long)h->over[3]);
 }

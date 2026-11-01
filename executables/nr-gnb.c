@@ -123,7 +123,7 @@ static void tx_func(processingData_L1tx_t *info)
      * every 16384 trials, so an outlier is visible but its cause is not.  Report the
      * configuration that produced the overrun instead. */
     if (gNB->tx_overrun_us > 0 && cpu_meas_enabled) {
-      const double us = (double)gNB->phy_proc_tx.p_time / (1000.0 * get_cpu_freq_GHz());
+      const double us = (double)gNB->phy_proc_tx.p_time / 1000.0;
       if (us > gNB->tx_overrun_us) {
         gNB->tx_overrun_count++;
         /* Rate limit: the first 10, then one in 100.  An overrun storm must not add
@@ -265,8 +265,8 @@ typedef struct {
  * path.  Drained by the 1 Hz stats thread via defer_hist_dump(). */
 typedef struct {
   uint64_t n;
-  uint64_t sum_ticks;
-  uint64_t max_ticks;
+  uint64_t sum_ns;
+  uint64_t max_ns;
   uint32_t max_frame, max_slot;
   uint64_t over[4];         /* > 0.5 / 1 / 5 / 10 ms */
 } defer_hist_t;
@@ -282,35 +282,26 @@ static defer_hist_t g_h_disp;     /* RX job queued -> a pool worker starts it */
  * i.e. ~2000/s, which is far finer than the 1 Hz stats file. */
 static size_t g_prach_hwm, g_pucch_hwm, g_prach_cap, g_pucch_cap;
 
-static inline void defer_hist_add(defer_hist_t *h, uint64_t ticks, int frame, int slot)
+static inline void defer_hist_add(defer_hist_t *h, uint64_t ns, int frame, int slot)
 {
   h->n++;
-  h->sum_ticks += ticks;
-  if (ticks > h->max_ticks) { h->max_ticks = ticks; h->max_frame = frame; h->max_slot = slot; }
-  /* thresholds in ticks, computed once from the calibrated TSC frequency */
-  static uint64_t th[4];
-  if (th[0] == 0) {
-    const double tps_us = cpu_freq_GHz * 1000.0;   /* ticks per us */
-    th[0] = (uint64_t)(500.0 * tps_us);
-    th[1] = (uint64_t)(1000.0 * tps_us);
-    th[2] = (uint64_t)(5000.0 * tps_us);
-    th[3] = (uint64_t)(10000.0 * tps_us);
-  }
+  h->sum_ns += ns;
+  if (ns > h->max_ns) { h->max_ns = ns; h->max_frame = frame; h->max_slot = slot; }
+  static const uint64_t th[4] = {500000ull, 1000000ull, 5000000ull, 10000000ull};
   for (int i = 0; i < 4; i++)
-    if (ticks > th[i]) h->over[i]++;
+    if (ns > th[i]) h->over[i]++;
 }
 
 static size_t defer_hist_one(char *o, size_t n, const char *tag, const defer_hist_t *h)
 {
-  const double tps_us = cpu_freq_GHz * 1000.0;
-  if (h->n == 0 || tps_us <= 0.0)
+  if (h->n == 0)
     return snprintf(o, n, "  %-10s : no samples\n", tag);
   return snprintf(o, n,
                   "  %-10s : n=%-8llu avg=%7.1f us  max=%9.1f us @%u.%u"
                   "  >0.5ms=%llu >1ms=%llu >5ms=%llu >10ms=%llu\n",
                   tag, (unsigned long long)h->n,
-                  (double)h->sum_ticks / h->n / tps_us,
-                  (double)h->max_ticks / tps_us, h->max_frame, h->max_slot,
+                  (double)h->sum_ns / h->n / 1000.0,
+                  (double)h->max_ns / 1000.0, h->max_frame, h->max_slot,
                   (unsigned long long)h->over[0], (unsigned long long)h->over[1],
                   (unsigned long long)h->over[2], (unsigned long long)h->over[3]);
 }
@@ -347,11 +338,11 @@ static void *defer_back_half_thread(void *arg)
     /* Name the slot for any back half that blew the ring's reuse window, so it can
      * be matched against the "RX slot overwrite" lines, which print frame.slot too.
      * RT_LOG_DEFER claims a slot lock-free; LOG_* here would block this thread. */
-    if ((double)(t_done - t_pop) > 2000.0 * cpu_freq_GHz * 1000.0)
+    if (t_done - t_pop > 2000000ull)
       RT_LOG_DEFER("L1_rx_back LATE %u.%u: %.0f us (qlat %.0f us)",
                    m->job.frame, m->job.slot,
-                   (double)(t_done - t_pop) / (cpu_freq_GHz * 1000.0),
-                   (double)(t_pop - m->t_push) / (cpu_freq_GHz * 1000.0));
+                   (double)(t_done - t_pop) / 1000.0,
+                   (double)(t_pop - m->t_push) / 1000.0);
     delNotifiedFIFO_elt(res);
     sem_post(&g_defer_slots);
   }
