@@ -83,6 +83,21 @@ else()
 endif()
 set_target_properties(oran_fhlib_5g PROPERTIES COMPILE_FLAGS "-fvisibility=hidden ${_fhi72_march}")
 target_link_libraries(oran_fhlib_5g PRIVATE xran::xran PkgConfig::dpdk_fh pthread dl rt m numa)
+
+# DPDK's pkg-config Cflags carry a baseline -march (armv8-a+crc on aarch64), and it
+# lands after our -mcpu on the command line. When both are given GCC lets -march win
+# the ISA selection and demotes -mcpu to a tuning hint -- it says so with a warning --
+# so this target would silently build for armv8.0 without +crypto, losing PMULL, the
+# LSE atomics and everything else armv8.2-a implies on a Cortex-A78. Drop the -march
+# from the interface we consume here; the imported target is directory-scoped, so no
+# other consumer of DPDK is affected.
+if(_fhi72_march MATCHES "^-mcpu=")
+  get_target_property(_dpdk_cflags PkgConfig::dpdk_fh INTERFACE_COMPILE_OPTIONS)
+  if(_dpdk_cflags)
+    list(FILTER _dpdk_cflags EXCLUDE REGEX "^-march=")
+    set_target_properties(PkgConfig::dpdk_fh PROPERTIES INTERFACE_COMPILE_OPTIONS "${_dpdk_cflags}")
+  endif()
+endif()
 target_link_libraries(oran_fhlib_5g PRIVATE log_headers)
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
   find_package(armral REQUIRED)
