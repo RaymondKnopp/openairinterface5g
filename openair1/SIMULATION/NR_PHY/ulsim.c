@@ -1491,12 +1491,14 @@ int main(int argc, char *argv[])
         for (int i = 0; i < NR_SYMBOLS_PER_SLOT; i++) {
           was_symbol_used[i] = true;
         }
+        // the gNB reads this slot from its index in the rxdataF ring, as the RU writes it
+        const int slot_offsetF = (slot % RU_RX_SLOT_DEPTH) * gNB->frame_parms.symbols_per_slot * gNB->frame_parms.ofdm_symbol_size;
         nr_ofdm_demod_and_rx_rotation(rxdata,
                                       gNB->common_vars.rxdataF,
                                       &gNB->frame_parms,
                                       gNB->frame_parms.nb_antennas_rx,
                                       slot,
-                                      0,
+                                      slot_offsetF,
                                       link_type_ul,
                                       was_symbol_used);
 
@@ -1504,15 +1506,15 @@ int main(int argc, char *argv[])
 
         if (n_trials == 1 && round == 0) {
           LOG_M("rxsig0.m", "rx0", &rxdata[0][slot_offset], slot_length, 1, 1 | log_format);
-          LOG_M("rxsigF0.m", "rxsF0", gNB->common_vars.rxdataF[0], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
+          LOG_M("rxsigF0.m", "rxsF0", &gNB->common_vars.rxdataF[0][slot_offsetF], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
           if (precod_nbr_layers > 1) {
             LOG_M("rxsig1.m", "rx1", &rxdata[1][slot_offset], slot_length, 1, 1);
-            LOG_M("rxsigF1.m", "rxsF1", gNB->common_vars.rxdataF[1], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
+            LOG_M("rxsigF1.m", "rxsF1", &gNB->common_vars.rxdataF[1][slot_offsetF], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
             if (precod_nbr_layers == 4) {
               LOG_M("rxsig2.m", "rx2", &rxdata[2][slot_offset], slot_length, 1, 1);
               LOG_M("rxsig3.m", "rx3", &rxdata[3][slot_offset], slot_length, 1, 1);
-              LOG_M("rxsigF2.m", "rxsF2", gNB->common_vars.rxdataF[2], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
-              LOG_M("rxsigF3.m", "rxsF3", gNB->common_vars.rxdataF[3], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
+              LOG_M("rxsigF2.m", "rxsF2", &gNB->common_vars.rxdataF[2][slot_offsetF], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
+              LOG_M("rxsigF3.m", "rxsF3", &gNB->common_vars.rxdataF[3][slot_offsetF], 14 * gNB->frame_parms.ofdm_symbol_size, 1, 1 | log_format);
             }
           }
         }
