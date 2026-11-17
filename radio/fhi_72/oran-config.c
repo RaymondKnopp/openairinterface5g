@@ -987,6 +987,9 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
     return false;
   }
   paramdef_t *fhp = FH_ConfigList.paramarray[ru_idx];
+  // libxran's software VLAN; read before the memset below, applied after it
+  const paramdef_t *vlan_pd = gpd(fhp, nfh, ORAN_CONFIG_VLAN_TAG);
+  const uint16_t vlan_tag = vlan_pd->iptr ? *vlan_pd->iptr : 0;
 
   paramdef_t rup[] = ORAN_RU_DESC;
   int nru = sizeofArray(rup);
@@ -1029,6 +1032,10 @@ static bool set_fh_config(void *mplane_api, int ru_idx, int num_rus, enum xran_c
   fh_config->puschMaskEnable = 0; // enable PUSCH mask; only used if id = O_RU
   fh_config->puschMaskSlot = 0; // specific which slot PUSCH channel masked; only used if id = O_RU
   fh_config->csirsEnable = 0; // enable CSI-RS (Cat B specific)
+  // software VLAN in libxran: tag inserted on TX and stripped on RX when non-zero, for
+  // NICs without VLAN offload. Must come after the memset, which would wipe it.
+  fh_config->cp_vlan_tag = vlan_tag;
+  fh_config->up_vlan_tag = vlan_tag;
   fh_config->debugStop = 0; // enable auto stop; only used if id = O_RU
   fh_config->debugStopCount = 0; // enable auto stop after number of Tx packets; not used in xran
   fh_config->DynamicSectionEna = 0; // enable dynamic C-Plane section allocation
