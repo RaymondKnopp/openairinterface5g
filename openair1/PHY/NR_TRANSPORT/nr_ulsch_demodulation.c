@@ -717,7 +717,7 @@ static void nr_pusch_symbol_processing(void *arg)
     int16_t *llr_cw = NULL;
     const int16_t *scramble = NULL;
     if (rdata->group_size == 1 && map0->d_ack[symbol] == 0 && map0->d_csi1[symbol] == 0 && map0->d_csi2[symbol] == 0) {
-      llr_cw = &rdata->pusch_vars_group[0]->ulsch_llrs[map0->ulsch_offset[symbol]];
+      llr_cw = &nr_pusch_llr_buf(rdata->pusch_vars_group[0], rdata->slot)[map0->ulsch_offset[symbol]];
       scramble = rdata->scrambling_sequences[0] + pusch_vars->llr_offset[symbol] * rdata->rel15_ul_group[0]->nrOfLayers;
     }
 
@@ -1492,7 +1492,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                                       joint_pv,
                                       &joint_pdu,
                                       &map_uci[0],
-                                      pusch_vars_group[0]->ulsch_llrs,
+                                      nr_pusch_llr_buf(pusch_vars_group[0], slot),
                                       slot,
                                       ant_port_start,
                                       ptrs_info.ptrs_symbols,
