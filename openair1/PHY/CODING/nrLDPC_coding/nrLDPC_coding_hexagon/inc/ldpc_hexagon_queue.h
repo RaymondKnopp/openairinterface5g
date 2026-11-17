@@ -104,6 +104,10 @@ typedef struct __attribute__((packed)) {
    * balances dynamically WITHIN one. */
   uint16_t seg_first;
   uint16_t seg_count;
+  /* nrLDPC_TB_decoding_parameters_t::llr_shift, for prep_on_dsp: arithmetic
+   * right shift of the combined int16 LLRs before they saturate to int8, filler
+   * bits excluded. Last, so that no other field moves. */
+  uint8_t llr_shift;
 } ldpc_q_batch_req_t;
 
 typedef struct __attribute__((packed)) {

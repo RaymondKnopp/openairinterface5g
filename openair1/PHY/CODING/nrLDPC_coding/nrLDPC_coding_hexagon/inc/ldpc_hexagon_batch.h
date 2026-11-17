@@ -46,6 +46,11 @@ typedef struct {
   uint8_t Qm;
   uint8_t rv_index;
   uint8_t d_clear; /* nrLDPC_TB_decoding_parameters_t::d_to_be_cleared */
+  /* nrLDPC_TB_decoding_parameters_t::llr_shift: arithmetic right shift of the
+   * combined int16 LLRs before they saturate to the decoder's int8 (filler bits
+   * excluded). It fills what was a padding byte, so the layout is unchanged and
+   * a skel built before it reads 0, no shift. */
+  uint8_t llr_shift;
   uint32_t E; /* rate-matched length for segments r < first_rE2 */
   uint32_t E2; /* ... and for the rest */
   uint32_t F; /* filler bits */

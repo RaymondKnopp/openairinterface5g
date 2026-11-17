@@ -103,18 +103,20 @@ static bool prep_segment(const nrLDPC_TB_decoding_parameters_t *tb, int r, uint8
     return false;
   }
 
-  /* Same assembly as the reference: zero the first 2Z, filler bits to 127, coded
-   * bits either side of the filler, then saturate int16 -> int8. */
+  /* Same assembly as the reference: zero the first 2Z, coded bits either side of
+   * the filler, then shift by llr_shift and saturate int16 -> int8. The filler
+   * bits are set to 127 after the pack, so the shift does not shrink them. */
   int16_t z[68 * 384 + 16] __attribute__((aligned(16)));
   memset(z, 0, 2 * Z * sizeof(*z));
-  memset(z + Kprime, 127, tb->F * sizeof(*z));
   memcpy(z + 2 * Z, d, (Kprime - 2 * Z) * sizeof(*z));
   memcpy(z + K, d + (K - 2 * Z), (Kc * Z - K) * sizeof(*z));
 
   simde__m128i *pv = (simde__m128i *)&z;
   simde__m128i *pl = (simde__m128i *)dst;
+  const simde__m128i sh = simde_mm_cvtsi32_si128(tb->llr_shift);
   for (int i = 0, j = 0; j < ((Kc * Z) >> 4) + 1; i += 2, j++)
-    pl[j] = simde_mm_packs_epi16(pv[i], pv[i + 1]);
+    pl[j] = simde_mm_packs_epi16(simde_mm_sra_epi16(pv[i], sh), simde_mm_sra_epi16(pv[i + 1], sh));
+  memset(dst + Kprime, 127, tb->F);
   return true;
 }
 
@@ -331,6 +333,7 @@ int32_t nrLDPC_coding_decoder(nrLDPC_slot_decoding_parameters_t *slot)
         .Kprime = (uint16_t)lenWithCrc(tb->C, tb->A),
         .K = (uint16_t)tb->K,
         .crc_type = (uint8_t)crcType(tb->C, tb->A),
+        .llr_shift = tb->llr_shift,
     };
     /* ---- prep: on the DSP if we can, else here ----
      *

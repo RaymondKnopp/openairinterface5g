@@ -2391,16 +2391,16 @@ static inline void ldpc_rm_acc(int16_t *d, const int16_t *si, uint32_t n)
 /* int16 -> int8 saturating pack. Q6_Vb_vpack_VhVh_sat takes the LOW half from its
  * SECOND operand (verified under hexagon-sim; guessing this wrong is the same
  * class of bug that cost a day on the CRC bit-packer). */
-static void ldpc_prep_saturate(int8_t *out, const int16_t *in, uint32_t n)
+static void ldpc_prep_saturate(int8_t *out, const int16_t *in, uint32_t n, uint32_t shift)
 {
   uint32_t i = 0;
   for (; i + 128u <= n; i += 128u) {
-    const HVX_Vector lo = *(const HVX_UVector *)(in + i);
-    const HVX_Vector hi = *(const HVX_UVector *)(in + i + 64u);
+    const HVX_Vector lo = Q6_Vh_vasr_VhR(*(const HVX_UVector *)(in + i), shift);
+    const HVX_Vector hi = Q6_Vh_vasr_VhR(*(const HVX_UVector *)(in + i + 64u), shift);
     *(HVX_UVector *)(out + i) = Q6_Vb_vpack_VhVh_sat(hi, lo);
   }
   for (; i < n; i++) {
-    const int16_t v = in[i];
+    const int16_t v = (int16_t)(in[i] >> shift);
     out[i] = (int8_t)(v > 127 ? 127 : (v < -128 ? -128 : v));
   }
 }
@@ -2514,13 +2514,15 @@ static int ldpc_batch_prep(ldpc_worker_t *w,
     return -1;
 
   memset(w->prep_z, 0, 2u * br->Z * sizeof(int16_t));
-  memset(w->prep_z + Kprime_z, 127, (size_t)br->F * sizeof(int16_t));
   memcpy(w->prep_z + 2u * br->Z, d, (Kprime_z - 2u * br->Z) * sizeof(int16_t));
   memcpy(w->prep_z + br->K, d + (br->K - 2u * br->Z), (Kc_Z - br->K) * sizeof(int16_t));
 
-  /* int16 -> int8 saturating, over Kc_Z only -- the reference packed the full
-   * 68Z regardless of rate, which at R=2/3 is nearly twice the work. */
-  ldpc_prep_saturate(out, w->prep_z, Kc_Z);
+  /* int16 -> int8 shifted by llr_shift and saturated, over Kc_Z only -- the
+   * reference packed the full 68Z regardless of rate, which at R=2/3 is nearly
+   * twice the work. The filler bits are set after the pack, so the shift does
+   * not shrink them (they overwrite whatever prep_z held there). */
+  ldpc_prep_saturate(out, w->prep_z, Kc_Z, br->llr_shift);
+  memset(out + Kprime_z, 127, br->F);
   return 0;
 }
 

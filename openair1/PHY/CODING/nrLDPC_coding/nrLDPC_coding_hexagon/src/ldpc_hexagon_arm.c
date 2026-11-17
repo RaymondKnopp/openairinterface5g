@@ -1344,6 +1344,7 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
   req.Qm = b->Qm;
   req.rv_index = b->rv_index;
   req.d_clear = b->d_clear;
+  req.llr_shift = b->llr_shift;
   req.E = b->E;
   req.E2 = b->E2;
   req.F = b->F;
