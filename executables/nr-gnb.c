@@ -265,12 +265,29 @@ void *L1_tx_thread(void *arg) {
  * Known cosmetic aliasing: the back half also reads pusch->ulsch_power[] and
  * ulsch_noise_power[], which the next slot's front half overwrites, so reported
  * power can be one slot stale. Those feed statistics only, so they are not
- * double-buffered. */
+ * double-buffered.
+ *
+ * PIPELINED (OAI_L1_RX_PIPE, default on with the deferral): the back half is two
+ * stages on two threads. L1_rx_irx runs the inner-RX batches the front half left
+ * pending (nr_pusch_irx_finish, the Adreno), then hands the slot on to L1_rx_back,
+ * which decodes and indicates. Slot N+1's GPU run then overlaps slot N's decode, so
+ * a PUSCH slot costs max(GPU, decode) instead of their sum: at MCS 18, 273 PRB,
+ * ~410 us GPU + ~470-550 us decode serial reached 2.5 ms whenever failing blocks
+ * ran to max iterations, and the depth-1 credit backed that up into the front half.
+ * Two stages need TWO outstanding slots, which the parity buffers still cover: N
+ * (decode) and N+1 (GPU) have different parities, and the front half of N+2 takes
+ * a credit only once N has fully indicated. Both FIFOs are single-consumer and
+ * FIFO, so rx_data/CRC still leave in slot order. Once stage 1 has run a slot's
+ * batch, the nr_pusch_irx_finish calls in nr_pusch_decode_and_indicate are no-ops
+ * (ctx is NULL). */
 static NR_UL_IND_t    g_defer_ul[2];
 static notifiedFIFO_t g_defer_fifo;
 static pthread_t      g_defer_thread;
 static sem_t          g_defer_slots;
 static int            g_defer_up;
+static notifiedFIFO_t g_irx_fifo;
+static pthread_t      g_irx_thread;
+static int            g_pipe_up;
 
 typedef struct {
   PHY_VARS_gNB *gNB;
@@ -295,6 +312,7 @@ static defer_hist_t g_h_semwait;  /* front half blocked handing the slot over */
 static defer_hist_t g_h_qlat;     /* push -> pop                              */
 static defer_hist_t g_h_work;     /* pop  -> NR_UL_indication returned        */
 static defer_hist_t g_h_disp;     /* RX job queued -> a pool worker starts it */
+static defer_hist_t g_h_irx;      /* pipelined stage 1: pop -> inner-RX batches done */
 
 /* High-water marks on the two queues that are demonstrably FULL when the DU dies:
  * prach_l1rx_queue (xran_fh_rx_prach_read_slot DevAsserts on it) and pucch_queue
@@ -328,8 +346,10 @@ static size_t defer_hist_one(char *o, size_t n, const char *tag, const defer_his
 
 static size_t defer_hist_dump(char *o, size_t n)
 {
-  size_t k = snprintf(o, n, "L1 RX deferral (depth 1), per-slot:\n");
+  size_t k = snprintf(o, n, "L1 RX deferral (%s), per-slot:\n", g_pipe_up ? "pipelined, depth 2" : "depth 1");
   k += defer_hist_one(o + k, n - k, "sem_wait", &g_h_semwait);
+  if (g_pipe_up)
+    k += defer_hist_one(o + k, n - k, "irx_stage", &g_h_irx);
   k += defer_hist_one(o + k, n - k, "queue_lat", &g_h_qlat);
   k += defer_hist_one(o + k, n - k, "back_half", &g_h_work);
   k += defer_hist_one(o + k, n - k, "pool_wait", &g_h_disp);
@@ -369,20 +389,71 @@ static void *defer_back_half_thread(void *arg)
   return NULL;
 }
 
+/* Pipelined stage 1: run the slot's pending inner-RX batches, then pass the slot on
+ * to the decode stage. The element is re-pushed as is; pull detached it. */
+static void *defer_irx_stage_thread(void *arg)
+{
+  (void)arg;
+  while (oai_exit == 0) {
+    notifiedFIFO_elt_t *res = pullNotifiedFIFO(&g_irx_fifo);
+    if (res == NULL)
+      break;
+    defer_msg_t *m = (defer_msg_t *)NotifiedFifoData(res);
+    const uint64_t t0 = (uint64_t)clock_gettime_oai();
+    for (int i = 0; i < m->job.num_pusch; i++)
+      nr_pusch_irx_finish(m->gNB, &m->gNB->pusch_vars[m->job.ulsch_idx[i]], m->job.frame, m->job.slot, true);
+    const uint64_t t1 = (uint64_t)clock_gettime_oai();
+    defer_hist_add(&g_h_irx, t1 - t0, m->job.frame, m->job.slot);
+    m->t_push = t1; /* queue_lat of the decode stage = wait between the stages */
+    pushNotifiedFIFO(&g_defer_fifo, res);
+  }
+  return NULL;
+}
+
+static int l1_rx_pipe_enabled(void)
+{
+  const char *e = getenv("OAI_L1_RX_PIPE");
+  return !(e && e[0] == '0');
+}
+
 static void defer_back_half_start(void)
 {
   if (g_defer_up)
     return;
   initNotifiedFIFO(&g_defer_fifo);
-  /* one credit == one outstanding slot */
-  sem_init(&g_defer_slots, 0, 1);
+  const int pipe = l1_rx_pipe_enabled();
+  /* one credit == one outstanding slot; the pipeline holds one per stage */
+  sem_init(&g_defer_slots, 0, pipe ? 2 : 1);
   if (pthread_create(&g_defer_thread, NULL, defer_back_half_thread, NULL) != 0) {
     LOG_E(NR_PHY, "L1 RX defer: pthread_create failed, staying synchronous\n");
     return;
   }
   pthread_setname_np(g_defer_thread, "L1_rx_back");
+  if (pipe) {
+    initNotifiedFIFO(&g_irx_fifo);
+    if (pthread_create(&g_irx_thread, NULL, defer_irx_stage_thread, NULL) == 0) {
+      pthread_setname_np(g_irx_thread, "L1_rx_irx");
+      /* Inherits L1_rx_thread's RT priority and core; both stages mostly sleep (GPU
+       * completion, CDSP sleep-then-poll), so sharing is the default. OAI_L1_RX_IRX_CORE
+       * moves the GPU stage, for experiments. */
+      const char *c = getenv("OAI_L1_RX_IRX_CORE");
+      if (c && c[0]) {
+        cpu_set_t cs;
+        CPU_ZERO(&cs);
+        CPU_SET(atoi(c), &cs);
+        if (pthread_setaffinity_np(g_irx_thread, sizeof(cs), &cs) != 0)
+          LOG_E(NR_PHY, "L1 RX pipeline: cannot pin L1_rx_irx to core %s\n", c);
+      }
+      g_pipe_up = 1;
+    } else {
+      /* Fall back to one stage. The second credit has to go, or two slots would share
+       * the decode thread with nothing to keep their parity buffers apart. */
+      LOG_E(NR_PHY, "L1 RX pipeline: pthread_create failed, one back-half stage (depth 1)\n");
+      sem_wait(&g_defer_slots);
+    }
+  }
   g_defer_up = 1;
-  LOG_I(NR_PHY, "L1 RX back half DEFERRED onto its own thread (depth 1)\n");
+  LOG_I(NR_PHY, "L1 RX back half DEFERRED onto its own thread%s\n", g_pipe_up ? "s (pipelined: inner RX, then decode; depth 2)" : " (depth 1)");
 }
 
 static void rx_func(processingData_L1_t *info)
@@ -480,7 +551,7 @@ static void rx_func(processingData_L1_t *info)
       m->gNB = gNB;
       m->job = job;
       m->t_push = (uint64_t)clock_gettime_oai();
-      pushNotifiedFIFO(&g_defer_fifo, e);
+      pushNotifiedFIFO(g_pipe_up ? &g_irx_fifo : &g_defer_fifo, e);
     } else {
       // Call the scheduler
       START_MEAS_FULL_SLOT(&gNB->ul_indication_stats, rx_slot_type, NR_UPLINK_SLOT);
