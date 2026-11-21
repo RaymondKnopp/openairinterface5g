@@ -34,6 +34,8 @@
 #include <pthread.h>
 #include <sched.h>
 #include <unistd.h>
+#include <time.h> // clock_nanosleep
+#include <errno.h>
 
 // OAI LDPC interface
 #include "PHY/CODING/nrLDPC_decoder/nrLDPCdecoder_defs.h"
@@ -148,6 +150,12 @@ static uint64_t g_claims_total[4];
  * the write and its cache maintenance on the shared buffers, the wake, and response
  * handling -- and only the wait is time the RX deferral can hide. */
 static uint64_t g_disp_write_us, g_disp_wait_us, g_disp_post_us;
+/* Sleep-then-poll batch wait (OAI_LDPC_SLEEP unset or 2). Per device, an EWMA of the DSP
+ * wall per code block, in 1/16 us; the ARM spin after waking; and how often the response
+ * was already there at the first poll (= we slept past it, so the fraction is too high). */
+static uint32_t g_cb_us16[2];
+static uint64_t g_hyb_poll_us;
+static uint32_t g_hyb_ready, g_hyb_reads;
 static uint32_t g_batch_wall_min_us = 0xffffffffu;
 static uint32_t g_batch_wall_max_us;
 
@@ -537,6 +545,13 @@ static void print_phase_profile(void)
             (unsigned long long)(g_disp_wait_us / g_batch_count),
             (unsigned long long)(g_disp_post_us / g_batch_count));
     fprintf(stderr, "  %-10s %5u..%u us (min..max batch wall)\n", "spread", g_batch_wall_min_us, g_batch_wall_max_us);
+    if (g_hyb_reads)
+      fprintf(stderr,
+              "  %-10s ARM spin %llu us per read after the sleep, ready at first poll %u/%u reads\n",
+              "sleeppoll",
+              (unsigned long long)(g_hyb_poll_us / g_hyb_reads),
+              g_hyb_ready,
+              g_hyb_reads);
     if (cl)
       fprintf(stderr,
               "  %-10s %llu/%llu/%llu/%llu blocks (%.0f/%.0f/%.0f/%.0f%% of %llu, steady state)\n",
@@ -562,6 +577,8 @@ static void print_phase_profile(void)
   g_batch_wall_min_us = 0xffffffffu;
   g_batch_wall_max_us = 0;
   g_disp_write_us = g_disp_wait_us = g_disp_post_us = 0;
+  g_hyb_poll_us = 0;
+  g_hyb_ready = g_hyb_reads = 0;
 }
 
 static void __attribute__((destructor)) ldpc_hexagon_profile_destructor(void)
@@ -1410,10 +1427,28 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
    * turnaround rather than compute, and only measuring both tells us how much of that a
    * wake costs.  Sleeping stays the DEFAULT -- polling holds the ARM core for the DSP's
    * entire compute, which defeats the point of offloading on a DU. */
+  /* OAI_LDPC_SLEEP picks how the ARM waits:
+   *   unset or 2  sleep on our own clock for OAI_LDPC_SLEEP_FRAC percent (default 90) of
+   *               the expected DSP time, then poll -- the default
+   *   1           blocking dspqueue_read
+   *   0           poll from the start
+   * Why not the blocking read: it has the DSP signal the response through libcdsprpc's
+   * dspqueue signal thread, which re-invokes FastRPC once per batch, and the vendor fastrpc
+   * driver busy-polls every user-PD invoke for up to 10 ms (FASTRPC_POLL_MAX_TIMEOUT_US)
+   * before it sleeps. With a batch every 2.5 ms each invoke completes inside that window,
+   * so the signal thread never sleeps and holds a whole core in kernel time (measured: 91%
+   * of the DU's system_core). Sleeping on our own clock and then polling never asks the DSP
+   * to signal, so that thread stays parked, and the ARM still sleeps through most of the
+   * decode. The estimate is the DSP's own per-batch wall, so oversleeping cannot bias it. */
   static int batch_sleep = -1;
+  static int sleep_pct = 90;
   if (batch_sleep < 0) {
     const char *e = getenv("OAI_LDPC_SLEEP");
-    batch_sleep = (e && e[0] == '0') ? 0 : 1;
+    batch_sleep = (e && e[0] == '0') ? 0 : (e && e[0] == '1') ? 1 : 2;
+    const char *f = getenv("OAI_LDPC_SLEEP_FRAC");
+    if (f && atoi(f) >= 0 && atoi(f) <= 100)
+      sleep_pct = atoi(f);
+    fprintf(stderr, "ldpc_hexagon: batch wait = %s\n", batch_sleep == 2 ? "sleep-then-poll" : batch_sleep ? "blocking read" : "poll");
   }
   /* Read every device. Sequential reads, but they were both posted above and are
    * running concurrently, so this costs max(A,B). */
@@ -1422,7 +1457,40 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
   for (int d = 0; d < ndev; d++) {
     memset(&rmsg, 0, sizeof rmsg);
     rflags = rlen = rnbufs = 0;
-    if (batch_sleep) {
+    if (batch_sleep == 2) {
+      /* Both devices were posted at t_w0 and run concurrently, so device d's deadline is
+       * measured from there, not from the end of the previous read. */
+      const uint64_t sleep_ns = (uint64_t)g_cb_us16[d] * segn[d] * (uint64_t)sleep_pct * 10u / 16u;
+      struct timespec dl = t_w0;
+      dl.tv_sec += (time_t)(sleep_ns / 1000000000u);
+      dl.tv_nsec += (long)(sleep_ns % 1000000000u);
+      if (dl.tv_nsec >= 1000000000L) {
+        dl.tv_sec++;
+        dl.tv_nsec -= 1000000000L;
+      }
+      if (sleep_ns)
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL) == EINTR)
+          ;
+      struct timespec p0, pn;
+      clock_gettime(CLOCK_MONOTONIC, &p0);
+      uint32_t spins = 0;
+      for (;;) {
+        qerr = dspqueue_read_noblock(dev_queue(d), &rflags, 8, &rnbufs, rbufs, sizeof rmsg, &rlen, (uint8_t *)&rmsg);
+        if (qerr != AEE_EWOULDBLOCK)
+          break;
+        /* Same 1 s bound as the blocking read, so a dead PD is an error and not a hang. */
+        if ((++spins & 1023u) == 0) {
+          clock_gettime(CLOCK_MONOTONIC, &pn);
+          if (pn.tv_sec - p0.tv_sec >= 2 || (pn.tv_sec - p0.tv_sec) * 1000000000L + (pn.tv_nsec - p0.tv_nsec) > 1000000000L)
+            break;
+        }
+      }
+      clock_gettime(CLOCK_MONOTONIC, &pn);
+      g_hyb_poll_us += (uint64_t)((pn.tv_sec - p0.tv_sec) * 1000000L + (pn.tv_nsec - p0.tv_nsec) / 1000);
+      g_hyb_reads++;
+      if (spins == 0)
+        g_hyb_ready++;
+    } else if (batch_sleep) {
       qerr = dspqueue_read(dev_queue(d),
                            &rflags,
                            8,
@@ -1482,6 +1550,16 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
     }
   }
   clock_gettime(CLOCK_MONOTONIC, &t_r1);
+  /* Per-device DSP wall per code block, EWMA 1/8, for the sleep-then-poll deadline. The
+   * first batch is skipped: it carries first-touch allocation on the DSP and is several
+   * times the steady state, which would make the next few waits oversleep. */
+  if (g_batch_count > 0) {
+    for (int d = 0; d < ndev; d++) {
+      const int32_t cb = (int32_t)((resp_d[d].batch_us * 16u) / segn[d]);
+      const int32_t old = (int32_t)g_cb_us16[d];
+      g_cb_us16[d] = old ? (uint32_t)(old + (cb - old) / 8) : (uint32_t)cb;
+    }
+  }
   /* Report against device 0 for the stats below, but take the batch wall from whichever
    * device finished last -- that, not the average, is what the slot actually waited. */
   resp = resp_d[0];
