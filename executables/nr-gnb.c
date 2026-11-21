@@ -533,6 +533,7 @@ static void nrL1_stats_init_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru, unsigned in
   init_sorted_list_meas(&gNB->ul_indication_stats, size);
   init_sorted_list_meas(&gNB->slot_indication_stats, size);
   init_sorted_list_meas(&gNB->rx_pusch_stats, size);
+  init_sorted_list_meas(&gNB->rx_pusch_irx_deferred_stats, size);
   init_sorted_list_meas(&gNB->rx_prach, size);
   if (gNB->fhi72_transport) {
     init_sorted_list_meas(&gNB->fhi72_transport->s7cfg.prec_bf, size);
@@ -570,6 +571,7 @@ static void nrL1_stats_free_sorted_list(PHY_VARS_gNB *gNB, RU_t *ru)
   free_sorted_list_meas(&gNB->ul_indication_stats);
   free_sorted_list_meas(&gNB->slot_indication_stats);
   free_sorted_list_meas(&gNB->rx_pusch_stats);
+  free_sorted_list_meas(&gNB->rx_pusch_irx_deferred_stats);
   free_sorted_list_meas(&gNB->rx_prach);
   if (gNB->fhi72_transport) {
     free_sorted_list_meas(&gNB->fhi72_transport->s7cfg.prec_bf);
@@ -609,6 +611,7 @@ static void nrL1_stats_reset(PHY_VARS_gNB *gNB, RU_t *ru)
   reset_meas(&gNB->ul_indication_stats);
   reset_meas(&gNB->slot_indication_stats);
   reset_meas(&gNB->rx_pusch_stats);
+  reset_meas(&gNB->rx_pusch_irx_deferred_stats);
   reset_meas(&gNB->rx_prach);
   if (gNB->fhi72_transport) {
     reset_meas(&gNB->fhi72_transport->s7cfg.prec_bf);
@@ -656,6 +659,7 @@ static size_t dump_L1_meas_stats(PHY_VARS_gNB *gNB, RU_t *ru, char *output, size
   output += print_meas_log(&gNB->ul_indication_stats, "UL Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->slot_indication_stats, "Slot Indication", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_pusch_stats, "PUSCH inner-receiver", NULL, NULL, output, end - output);
+  output += print_meas_log(&gNB->rx_pusch_irx_deferred_stats, "PUSCH inner-RX offload (back half)", NULL, NULL, output, end - output);
   output += print_meas_log(&gNB->rx_prach, "PRACH RX", NULL, NULL, output, end - output);
 
   if (gNB->fhi72_transport) {

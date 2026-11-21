@@ -278,6 +278,17 @@ typedef struct {
   uint32_t ulsch_power_tot_d[2];
   uint32_t ulsch_noise_power_tot_d[2];
   bool pwr_d_valid;
+  /* Inner-RX offload batch prepared by the front half and run by the back half
+   * (OAI_L1_RX_DEFER): the context stays acquired, its staging filled, until
+   * nr_pusch_irx_finish() runs or drops it. Parity-indexed like llr_alt, since
+   * slot N+1's front half prepares while slot N's back half has not run yet. */
+  struct {
+    nr_irx_ctx_t *ctx;
+    nr_irx_sym_t sym[NR_IRX_MAX_SYM];
+    int nsym;
+    nr_irx_params_t p;
+    int frame, slot;
+  } irx_pend[2];
   /// \brief Total RE count after DMRS/PTRS RE's are extracted from respective symbol.
   /// - first index: ? [0...14] smybol per slot
   int16_t *ul_valid_re_per_slot;
@@ -479,6 +490,7 @@ typedef struct PHY_VARS_gNB_s {
 
   time_stats_t dci_generation_stats;
   time_stats_t rx_pusch_stats;
+  time_stats_t rx_pusch_irx_deferred_stats;
   time_stats_t rx_pusch_init_stats;
   time_stats_t rx_pusch_symbol_processing_stats;
   time_stats_t ul_indication_stats;

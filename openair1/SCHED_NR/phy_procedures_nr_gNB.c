@@ -1406,6 +1406,10 @@ void nr_pusch_decode_and_indicate(PHY_VARS_gNB *gNB,
    * start_meas(). Recomputing it keeps w38's per-slot-type measurement correct
    * for both the inline and the deferred caller. */
   const int slot_type = nr_slot_select(&gNB->gNB_config, frame_rx, slot_rx);
+  /* With the back half deferred, the inner-RX offload of these PUSCHs was only prepared by the front half: run it now,
+   * before the decode reads its LLRs (no-op for a PUSCH whose inner RX the front half ran itself). */
+  for (int i = 0; i < num_pusch; i++)
+    nr_pusch_irx_finish(gNB, &gNB->pusch_vars[ulsch_idx_to_decode[i]], frame_rx, slot_rx, true);
   START_MEAS_FULL_SLOT(&gNB->ulsch_decoding_stats, slot_type, NR_UPLINK_SLOT);
   if (num_pusch > 0) {
     int ret = nr_ulsch_procedures(gNB, frame_rx, slot_rx, (int *)ulsch_idx_to_decode, num_pusch, UL_INFO);
@@ -1531,6 +1535,7 @@ int phy_procedures_gNB_uespec_RX_defer(PHY_VARS_gNB *gNB,
       if (pusch_signal_detected(gNB, pusch_vars, ulsch) || get_softmodem_params()->phy_test) {
         ulsch_idx_to_decode[num_pusch++] = ULSCH_id;
       } else {
+        nr_pusch_irx_finish(gNB, pusch_vars, frame_rx, slot_rx, false); // DTX: no decode, drop a pending inner RX
         AssertFatal(ulsch->harq_process != NULL, "harq_pid %d is not allocated\n", ulsch->harq_pid);
         const nfapi_nr_pusch_pdu_t *pdu = &ulsch->harq_process->ulsch_pdu;
         NR_gNB_PHY_STATS_t *stats = get_phy_stats(gNB, ulsch->rnti);

@@ -929,9 +929,14 @@ static int pusch_irx_offload(PHY_VARS_gNB *gNB,
                              const c16_t *cpe,
                              uint32_t nvar,
                              int output_shift,
-                             c16_t *rxFext_slot)
+                             c16_t *rxFext_slot,
+                             nr_irx_sym_t *defer_sym,
+                             int *defer_nsym,
+                             nr_irx_params_t *defer_p)
 {
   const nr_irx_interface_t *irx = &gNB->irx;
+  if (defer_nsym)
+    *defer_nsym = 0;
   const int nl = rel15_ul->nrOfLayers, qm = rel15_ul->qam_mod_order;
   const int nb_rx = rel15_ul->param_v4.numSpatialStreamIndices;
   const int nb_re = NR_NB_SC_PER_RB * rel15_ul->rb_size;
@@ -1037,7 +1042,57 @@ static int pusch_irx_offload(PHY_VARS_gNB *gNB,
                              .detector = irx_detector(nr_mimo_rx_resolve(gNB->pusch_mimo_rx, qm, nb_rx)),
                              .output_shift = output_shift,
                              .lambda = nr_2layer_seed_lambda(nvar, output_shift)};
+  if (defer_nsym) { // the back half runs it (nr_pusch_irx_finish): everything it reads is staged in ctx by now
+    memcpy(defer_sym, sym, sizeof(*sym) * n);
+    *defer_nsym = n;
+    *defer_p = p;
+    return 0;
+  }
   return irx->run(ctx, sym, n, &p);
+}
+
+/* Inner-RX offload threshold: a batch of fewer data REs than OAI_IRX_MIN_RE stays on the CPU. The module pays a fixed
+ * dispatch and synchronisation cost per batch that a small allocation cannot amortise, while the CPU path splits the
+ * same work across the thread pool: the 4-symbol PUSCH of a special slot and the few-PRB allocations of an idle or
+ * control-plane UE are faster there. Default 12000 REs: a full-band U slot (~33000 data REs with 3 DMRS) goes to the
+ * module, a full-band special slot (3 data symbols, ~9800 REs) and anything under ~90 PRB x 11 symbols does not. */
+static int irx_min_re(void)
+{
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("OAI_IRX_MIN_RE");
+    v = e ? atoi(e) : 12000;
+    if (v < 0)
+      v = 0;
+  }
+  return v;
+}
+
+/* Run (or, with run == false, drop) the inner-RX batch the front half of `slot` left pending on pusch_vars. Called by
+ * the back half before the decode of a detected PUSCH, and by the front half for a PUSCH found to be DTX. A no-op when
+ * nothing is pending, i.e. whenever the front half ran the batch itself. If the module fails, the batch's LLRs are
+ * zeroed so that the decode fails its CRC and HARQ retransmits: the CPU fallback of the synchronous path needs front
+ * half buffers that no longer hold this slot. */
+void nr_pusch_irx_finish(PHY_VARS_gNB *gNB, NR_gNB_PUSCH *pusch_vars, int frame, int slot, bool run)
+{
+  typeof(pusch_vars->irx_pend[0]) *pend = &pusch_vars->irx_pend[slot & 1];
+  if (pend->ctx == NULL)
+    return;
+  if (pend->frame != frame || pend->slot != slot)
+    LOG_E(PHY, "%d.%d inner RX offload: pending batch belongs to %d.%d\n", frame, slot, pend->frame, pend->slot);
+  if (run && pend->nsym > 0) {
+    start_meas(&gNB->rx_pusch_irx_deferred_stats);
+    const int ret = gNB->irx.run(pend->ctx, pend->sym, pend->nsym, &pend->p);
+    stop_meas(&gNB->rx_pusch_irx_deferred_stats);
+    if (ret != 0) {
+      LOG_E(PHY, "%d.%d deferred inner RX offload failed (%d): LLRs of %d symbols zeroed\n", frame, slot, ret, pend->nsym);
+      for (int k = 0; k < pend->nsym; k++)
+        memset(pend->sym[k].llr_cw, 0, sizeof(int16_t) * pend->sym[k].length * pend->p.nb_layers * pend->p.mod_order);
+    }
+  }
+  gNB->irx.release(pend->ctx);
+  pend->ctx = NULL;
+  pend->nsym = 0;
 }
 
 int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
@@ -1415,8 +1470,17 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                             rel15_ul_ref->qam_mod_order,
                             irx_detector(nr_mimo_rx_resolve(gNB->pusch_mimo_rx, rel15_ul_ref->qam_mod_order, nb_rx_ref)))
       && (irx_ctx = gNB->irx.acquire())) {
-    for (int s = rel15_ul_ref->start_symbol_index; s < end_symbol; s++)
+    int off_re = 0;
+    for (int s = rel15_ul_ref->start_symbol_index; s < end_symbol; s++) {
       irx_off[s] = joint_pv->ul_valid_re_per_slot[s] && !map_uci[0].d_ack[s] && !map_uci[0].d_csi1[s] && !map_uci[0].d_csi2[s];
+      if (irx_off[s])
+        off_re += joint_pv->ul_valid_re_per_slot[s];
+    }
+    if (off_re < irx_min_re()) { // too small to pay the module's fixed cost: all on the CPU
+      memset(irx_off, 0, sizeof(irx_off));
+      gNB->irx.release(irx_ctx);
+      irx_ctx = NULL;
+    }
   }
   int numSymbols = gNB->num_pusch_symbols_per_thread;
   int total_res = 0;
@@ -1485,6 +1549,14 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   } // symbol loop
 
   if (irx_ctx) {
+    /* With the back half deferred, only prepare the batch here: its run is the longest wait of the front half, and the
+     * back half (L1_rx_back) is where it overlaps the next slot's front end. Group size 1, so pusch_vars_group[0]. */
+    typeof(pusch_vars_group[0]->irx_pend[0]) *pend = nr_l1_rx_defer_enabled() ? &pusch_vars_group[0]->irx_pend[slot & 1] : NULL;
+    if (pend && pend->ctx) { // never collected (cannot happen with depth 1): drop it rather than leak the context
+      LOG_E(PHY, "%d.%d inner RX offload: batch of %d.%d still pending, dropped\n", frame, slot, pend->frame, pend->slot);
+      gNB->irx.release(pend->ctx);
+      pend->ctx = NULL;
+    }
     const int ret = pusch_irx_offload(gNB,
                                       irx_ctx,
                                       irx_off,
@@ -1499,8 +1571,17 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                                       cpe,
                                       nvar,
                                       joint_pv->log2_maxh + layers_attenuation,
-                                      rxFext_slot_mem);
-    gNB->irx.release(irx_ctx);
+                                      rxFext_slot_mem,
+                                      pend ? pend->sym : NULL,
+                                      pend ? &pend->nsym : NULL,
+                                      pend ? &pend->p : NULL);
+    if (pend && ret == 0) {
+      pend->ctx = irx_ctx; // released by nr_pusch_irx_finish
+      pend->frame = frame;
+      pend->slot = slot;
+    } else {
+      gNB->irx.release(irx_ctx);
+    }
     if (ret != 0) { // the offloaded symbols on the CPU after all
       LOG_E(PHY, "%d.%d inner RX offload failed (%d), symbols processed on the CPU\n", frame, slot, ret);
       bool cpu_only[NR_SYMBOLS_PER_SLOT];

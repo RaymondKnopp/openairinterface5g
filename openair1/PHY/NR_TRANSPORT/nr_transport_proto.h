@@ -104,6 +104,10 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
                          uint32_t frame,
                          uint8_t slot);
 
+/// Runs (run == true) or drops the inner-RX offload batch that nr_rx_pusch_group_tp left pending for the back half of
+/// `slot` (OAI_L1_RX_DEFER), and releases its context; a no-op when none is pending.
+void nr_pusch_irx_finish(PHY_VARS_gNB *gNB, NR_gNB_PUSCH *pusch_vars, int frame, int slot, bool run);
+
 /*!
 \brief This function implements the idft transform precoding in PUSCH
 \param z Pointer to input in frequnecy domain, and it is also the output in time domain
