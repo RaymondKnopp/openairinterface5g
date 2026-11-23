@@ -274,16 +274,23 @@ void *L1_tx_thread(void *arg) {
  * a PUSCH slot costs max(GPU, decode) instead of their sum: at MCS 18, 273 PRB,
  * ~410 us GPU + ~470-550 us decode serial reached 2.5 ms whenever failing blocks
  * ran to max iterations, and the depth-1 credit backed that up into the front half.
- * Two stages need TWO outstanding slots, which the parity buffers still cover: N
- * (decode) and N+1 (GPU) have different parities, and the front half of N+2 takes
- * a credit only once N has fully indicated. Both FIFOs are single-consumer and
+ * Two stages need TWO outstanding slots. The parity buffers keep them apart only
+ * if the two have different slot parities, and consecutive JOBS need not: every
+ * slot with UL symbols is a job, so in DDDSU the special slot is one too (3, 4, 8,
+ * 9, 13, ...), and 9 and 13 share parity 1. With one 2-credit semaphore, slot 13's
+ * front half cleared g_defer_ul[1] while slot 9 was still indicating, and slot 9's
+ * CRC was lost ("HARQ feedback is in the past", ~500 per run on the board). So a
+ * slot also takes its parity's own credit (g_defer_par, one each): two outstanding
+ * slots of different parity overlap, two of the same parity serialise, whatever
+ * the TDD pattern. Both FIFOs are single-consumer and
  * FIFO, so rx_data/CRC still leave in slot order. Once stage 1 has run a slot's
  * batch, the nr_pusch_irx_finish calls in nr_pusch_decode_and_indicate are no-ops
  * (ctx is NULL). */
 static NR_UL_IND_t    g_defer_ul[2];
 static notifiedFIFO_t g_defer_fifo;
 static pthread_t      g_defer_thread;
-static sem_t          g_defer_slots;
+static sem_t          g_defer_slots;  /* depth: 2 pipelined, 1 otherwise */
+static sem_t          g_defer_par[2]; /* one per slot parity: guards g_defer_ul[], the LLR and irx_pend buffers */
 static int            g_defer_up;
 static notifiedFIFO_t g_irx_fifo;
 static pthread_t      g_irx_thread;
@@ -383,7 +390,9 @@ static void *defer_back_half_thread(void *arg)
                    m->job.frame, m->job.slot,
                    (double)(t_done - t_pop) / 1000.0,
                    (double)(t_pop - m->t_push) / 1000.0);
+    const int par = m->job.slot & 1;
     delNotifiedFIFO_elt(res);
+    sem_post(&g_defer_par[par]);
     sem_post(&g_defer_slots);
   }
   return NULL;
@@ -424,6 +433,8 @@ static void defer_back_half_start(void)
   const int pipe = l1_rx_pipe_enabled();
   /* one credit == one outstanding slot; the pipeline holds one per stage */
   sem_init(&g_defer_slots, 0, pipe ? 2 : 1);
+  sem_init(&g_defer_par[0], 0, 1);
+  sem_init(&g_defer_par[1], 0, 1);
   if (pthread_create(&g_defer_thread, NULL, defer_back_half_thread, NULL) != 0) {
     LOG_E(NR_PHY, "L1 RX defer: pthread_create failed, staying synchronous\n");
     return;
@@ -486,7 +497,7 @@ static void rx_func(processingData_L1_t *info)
     if (defer)
       defer_back_half_start();
     /* Deferred, UL_INFO must outlive this call, so it lives in the parity ring.
-     * Wait for a credit first: with one outstanding slot, that guarantees the
+     * Wait for a credit first, then for this parity's credit: that guarantees the
      * back half has finished with this parity's UL_INFO and LLR buffer. */
     NR_UL_IND_t UL_INFO_local;
     NR_UL_IND_t *ULI;
@@ -495,6 +506,7 @@ static void rx_func(processingData_L1_t *info)
        * releasing rxdataF ring slots, so the fronthaul writer laps it. */
       const uint64_t t_w0 = (uint64_t)clock_gettime_oai();
       sem_wait(&g_defer_slots);
+      sem_wait(&g_defer_par[slot_rx & 1]); /* always after g_defer_slots: one order, no deadlock */
       defer_hist_add(&g_h_semwait, (uint64_t)clock_gettime_oai() - t_w0, frame_rx, slot_rx);
       ULI = &g_defer_ul[slot_rx & 1];
     } else {
