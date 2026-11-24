@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #undef MALLOC //there are two conflicting definitions, so we better make sure we don't use it at all
 
+#include <stdatomic.h>
 #include <fcntl.h> // for SEEK_SET
 #include <pthread.h> // for pthread_join
 #include <stdint.h>
@@ -141,6 +142,36 @@ static void tx_overrun_alarm(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_request_t 
   }
 }
 
+/* RX job dispatch.
+ *
+ * The RX job for a slot used to be pushed from tx_func, right after the MAC slot
+ * indication. That puts every RX dispatch behind the TX queue: L1_tx_thread gets a
+ * job every slot, and once the DL slots average more than a slot's time (607 us at
+ * 400 Mbps DL against a 500 us cadence) it falls behind, every RX job starts late,
+ * the rxdataF ring is lapped, and the lost PUCCH ACK/NACKs drive DL MCS to 0. The
+ * delay was invisible because pool_wait started its clock at the (already late) push.
+ *
+ * What the RX job actually needs from tx_func is the UL config for its slot, which
+ * nr_save_ul_tti_req() stores when tx_func runs for slot_tx == slot_rx, i.e. sl_ahead
+ * slots BEFORE the slot is even received. So with split 7.2, split7_thread pushes the
+ * job as soon as the slot is unpacked, and rx_func only waits if that config is not
+ * stored yet (rx_wait_ul_cfg), which takes a TX backlog of more than sl_ahead slots.
+ * Split 8 keeps pushing from tx_func. */
+static _Atomic int g_ul_cfg_abs = -1; /* absolute slot of the newest stored UL_tti_req */
+
+void nr_push_rx_job(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, uint64_t timestamp_tx)
+{
+  notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->resp_L1, NULL);
+  processingData_L1_t *syncMsg = NotifiedFifoData(res);
+  syncMsg->gNB = gNB;
+  syncMsg->frame_rx = frame_rx;
+  syncMsg->slot_rx = slot_rx;
+  syncMsg->timestamp_tx = timestamp_tx;
+  syncMsg->t_dispatch = (uint64_t)clock_gettime_oai();
+  res->key = slot_rx;
+  pushNotifiedFIFO(&gNB->resp_L1, res);
+}
+
 static void tx_func(processingData_L1tx_t *info)
 {
   int frame_tx = info->frame;
@@ -175,16 +206,11 @@ static void tx_func(processingData_L1tx_t *info)
   // At this point, MAC scheduler just ran, including scheduling
   // PRACH/PUCCH/PUSCH, so trigger RX chain processing
   nr_save_ul_tti_req(gNB, &sched_response.UL_tti_req);
-  LOG_D(NR_PHY, "Trigger RX for %d.%d\n", frame_rx, slot_rx);
-  notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->resp_L1, NULL);
-  processingData_L1_t *syncMsg = NotifiedFifoData(res);
-  syncMsg->gNB = gNB;
-  syncMsg->frame_rx = frame_rx;
-  syncMsg->slot_rx = slot_rx;
-  syncMsg->timestamp_tx = info->timestamp_tx;
-  syncMsg->t_dispatch = (uint64_t)clock_gettime_oai();
-  res->key = slot_rx;
-  pushNotifiedFIFO(&gNB->resp_L1, res);
+  atomic_store(&g_ul_cfg_abs, frame_tx * gNB->frame_parms.slots_per_frame + slot_tx);
+  if (!gNB->fhi72_transport) { /* split 7.2 pushes from split7_thread: see nr_push_rx_job */
+    LOG_D(NR_PHY, "Trigger RX for %d.%d\n", frame_rx, slot_rx);
+    nr_push_rx_job(gNB, frame_rx, slot_rx, info->timestamp_tx);
+  }
 
   int tx_slot_type = nr_slot_select(cfg, frame_tx, slot_tx);
   if (tx_slot_type & NR_DOWNLINK_SLOT) { // also covers NR_MIXED_SLOT
@@ -323,6 +349,9 @@ static defer_hist_t g_h_qlat;     /* push -> pop                              */
 static defer_hist_t g_h_work;     /* pop  -> NR_UL_indication returned        */
 static defer_hist_t g_h_disp;     /* RX job queued -> a pool worker starts it */
 static defer_hist_t g_h_irx;      /* pipelined stage 1: pop -> inner-RX batches done */
+static defer_hist_t g_h_cfgwait;  /* split 7.2: RX job waiting for tx_func to store its UL config */
+static uint64_t g_cfgwait_timeouts;
+
 
 /* High-water marks on the two queues that are demonstrably FULL when the DU dies:
  * prach_l1rx_queue (xran_fh_rx_prach_read_slot DevAsserts on it) and pucch_queue
@@ -363,6 +392,9 @@ static size_t defer_hist_dump(char *o, size_t n)
   k += defer_hist_one(o + k, n - k, "queue_lat", &g_h_qlat);
   k += defer_hist_one(o + k, n - k, "back_half", &g_h_work);
   k += defer_hist_one(o + k, n - k, "pool_wait", &g_h_disp);
+  k += defer_hist_one(o + k, n - k, "ul_cfg_wait", &g_h_cfgwait);
+  if (g_cfgwait_timeouts)
+    k += snprintf(o + k, n - k, "  ul_cfg_wait timed out %llu times\n", (unsigned long long)g_cfgwait_timeouts);
   k += snprintf(o + k, n - k,
                 "  queue_hwm  : prach %zu/%zu   pucch %zu/%zu  (full => the DU dies)\n",
                 g_prach_hwm, g_prach_cap, g_pucch_hwm, g_pucch_cap);
@@ -470,6 +502,29 @@ static void defer_back_half_start(void)
   LOG_I(NR_PHY, "L1 RX back half DEFERRED onto its own thread%s\n", g_pipe_up ? "s (pipelined: inner RX, then decode; depth 2)" : " (depth 1)");
 }
 
+/* Split 7.2 only (see nr_push_rx_job): wait until tx_func has stored the UL config for
+ * (frame, slot). Normally already true by sl_ahead slots. Bounded: past the bound the
+ * slot is processed with whatever is stored (its PUSCH/PUCCH then read as DTX), since
+ * holding the ring longer would only destroy the following slots too. */
+static void rx_wait_ul_cfg(PHY_VARS_gNB *gNB, int frame, int slot)
+{
+  const int spf = gNB->frame_parms.slots_per_frame;
+  const int mod = 1024 * spf;
+  const int want = frame * spf + slot;
+  const uint64_t t0 = (uint64_t)clock_gettime_oai();
+  for (;;) {
+    const int have = atomic_load(&g_ul_cfg_abs);
+    if (have >= 0 && (((have - want) % mod) + mod) % mod < mod / 2)
+      break;
+    if ((uint64_t)clock_gettime_oai() - t0 > 2000000ull) {
+      g_cfgwait_timeouts++;
+      break;
+    }
+    usleep(20);
+  }
+  defer_hist_add(&g_h_cfgwait, (uint64_t)clock_gettime_oai() - t0, frame, slot);
+}
+
 static void rx_func(processingData_L1_t *info)
 {
   PHY_VARS_gNB *gNB = info->gNB;
@@ -479,6 +534,8 @@ static void rx_func(processingData_L1_t *info)
 
   if (info->t_dispatch)
     defer_hist_add(&g_h_disp, (uint64_t)clock_gettime_oai() - info->t_dispatch, frame_rx, slot_rx);
+  if (gNB->fhi72_transport)
+    rx_wait_ul_cfg(gNB, frame_rx, slot_rx);
   {
     const size_t pc = spsc_q_count(&gNB->prach_l1rx_queue);
     const size_t uc = spsc_q_count(&gNB->pucch_queue);

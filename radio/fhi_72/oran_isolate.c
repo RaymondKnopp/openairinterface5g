@@ -477,6 +477,11 @@ static void *split7_thread(void *param)
     int frame_tx = (slot > s7cfg->slots_per_frame - 1 - s7cfg->sl_ahead) ? (frame + 1) & 1023 : frame;
     int slot_tx = (slot + s7cfg->sl_ahead) % s7cfg->slots_per_frame;
 
+    /* The RX job goes out here, as soon as the slot is unpacked, not from tx_func:
+     * behind a TX backlog every RX job started late and the rxdataF ring was lapped
+     * (see nr_push_rx_job in nr-gnb.c). */
+    nr_push_rx_job(gNB, frame, slot, 0);
+
     // no timestamp as 7.2 is a frequency domain interface
     ru_push_tx_job(gNB, frame_tx, slot_tx, frame, slot, 0);
   }
