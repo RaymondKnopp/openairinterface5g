@@ -1364,6 +1364,26 @@ int nr_l1_rx_defer_enabled(void)
   return on;
 }
 
+/* Which of the two deferral buffer sets (LLRs, inner-RX batch, power snapshot, UL_INFO)
+ * an RX slot uses. They ALTERNATE BY RX JOB, not by slot parity: in DDDSU the S slot is
+ * an RX job too, so the jobs are 3,4,8,9,13,... and slot parity would put 9 and 13 in the
+ * same buffer back to back. Alternating by job, a buffer's next user is two jobs later,
+ * and the depth-2 credit already guarantees that job has finished: the irx and back-half
+ * stages are single threads that complete jobs in order. The front half assigns the
+ * buffer when the job starts (nr_l1_rx_buf_assign); later stages look it up by slot, which
+ * is unique among the jobs in flight. Unassigned slots (deferral off, the simulators) get
+ * buffer 0, i.e. the original single buffer. */
+static uint8_t g_rx_buf_of_slot[160];
+void nr_l1_rx_buf_assign(int slot)
+{
+  static unsigned seq;
+  g_rx_buf_of_slot[slot] = (uint8_t)(seq++ & 1);
+}
+int nr_l1_rx_buf(int slot)
+{
+  return g_rx_buf_of_slot[slot];
+}
+
 /* The PUSCH "back half": everything after the per-symbol front end -- the LDPC
  * decode and the rx_data/CRC indications that depend on it.
  *

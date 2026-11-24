@@ -1075,7 +1075,7 @@ static int irx_min_re(void)
  * half buffers that no longer hold this slot. */
 void nr_pusch_irx_finish(PHY_VARS_gNB *gNB, NR_gNB_PUSCH *pusch_vars, int frame, int slot, bool run)
 {
-  typeof(pusch_vars->irx_pend[0]) *pend = &pusch_vars->irx_pend[slot & 1];
+  typeof(pusch_vars->irx_pend[0]) *pend = &pusch_vars->irx_pend[nr_l1_rx_buf(slot)];
   if (pend->ctx == NULL)
     return;
   if (pend->frame != frame || pend->slot != slot)
@@ -1551,7 +1551,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
   if (irx_ctx) {
     /* With the back half deferred, only prepare the batch here: its run is the longest wait of the front half, and the
      * back half (L1_rx_back) is where it overlaps the next slot's front end. Group size 1, so pusch_vars_group[0]. */
-    typeof(pusch_vars_group[0]->irx_pend[0]) *pend = nr_l1_rx_defer_enabled() ? &pusch_vars_group[0]->irx_pend[slot & 1] : NULL;
+    typeof(pusch_vars_group[0]->irx_pend[0]) *pend = nr_l1_rx_defer_enabled() ? &pusch_vars_group[0]->irx_pend[nr_l1_rx_buf(slot)] : NULL;
     if (pend && pend->ctx) { // never collected (cannot happen with depth 1): drop it rather than leak the context
       LOG_E(PHY, "%d.%d inner RX offload: batch of %d.%d still pending, dropped\n", frame, slot, pend->frame, pend->slot);
       gNB->irx.release(pend->ctx);
@@ -1656,7 +1656,7 @@ int nr_rx_pusch_group_tp(PHY_VARS_gNB *gNB,
      * into ul_cqi and RSSI for the MAC, and with the back half deferred the next
      * slot's front end would otherwise have overwritten them first. */
     if (nr_l1_rx_defer_enabled()) {
-      const int par = slot & 1;
+      const int par = nr_l1_rx_buf(slot);
       for (int aarx = 0; aarx < num_sp_streams; aarx++) {
         pv->ulsch_power_d[par][aarx] = pv->ulsch_power[aarx];
         pv->ulsch_noise_power_d[par][aarx] = pv->ulsch_noise_power[aarx];
