@@ -81,7 +81,8 @@ typedef struct split7_config {
 typedef struct fhi72_transport_s {
   split7_config_t s7cfg;
   pthread_t pthread;
-  void (*prec_bf)(struct PHY_VARS_gNB_s *gNB, int frame, int slot);
+  /* txdataF: the grid of THIS slot (with the TX pipeline, not necessarily gNB->common_vars.txdataF) */
+  void (*prec_bf)(struct PHY_VARS_gNB_s *gNB, c16_t **txdataF, int frame, int slot);
   void (*dl_up)(split7_config_t *s7cfg, int frame, int slot);
   void (*cp)(split7_config_t *s7cfg, uint16_t **beam_id, int frame, int slot);
 } fhi72_transport_t;

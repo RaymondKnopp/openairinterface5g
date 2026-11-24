@@ -225,6 +225,9 @@ typedef struct {
   /// - first index: tx antenna [0..16) where 16 is the total supported antenna ports.
   /// - second index: sample [0..ofdm_symbol_size*symbols_per_frame)
   c16_t **txdataF;
+  /* L1 TX pipeline (OAI_L1_TX_PIPE): txdataF alternates between these two grids, so the
+   * next slot can be generated while this one is precoded and sent. [0] is the original. */
+  c16_t **txdataF_set[2];
   /// \brief Analogue beam ID for each [symbol, antenna] pair
   /// - first index: symbol [slot * fp->symbols_per_slot + sym_idx]
   /// - second index: logical antenna [0..nb_rx/nb_tx]

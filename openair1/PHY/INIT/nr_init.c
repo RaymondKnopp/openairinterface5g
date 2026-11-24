@@ -163,9 +163,12 @@ void phy_init_nr_gNB(PHY_VARS_gNB *gNB)
       common_vars->beam_id[i] = (uint16_t *)malloc16_clear(num_antenna_ports * sizeof(**common_vars->beam_id));
   }
 
-  common_vars->txdataF = (c16_t **)malloc16_clear(Ptx * sizeof(*common_vars->txdataF));
-  for (int j = 0; j < Ptx; j++)
-    common_vars->txdataF[j] = (c16_t *)malloc16_clear(fp->samples_per_slot_wCP * sizeof(**common_vars->txdataF));
+  for (int s = 0; s < 2; s++) {
+    common_vars->txdataF_set[s] = (c16_t **)malloc16_clear(Ptx * sizeof(*common_vars->txdataF));
+    for (int j = 0; j < Ptx; j++)
+      common_vars->txdataF_set[s][j] = (c16_t *)malloc16_clear(fp->samples_per_slot_wCP * sizeof(**common_vars->txdataF));
+  }
+  common_vars->txdataF = common_vars->txdataF_set[0];
 
   // PRACH
   init_nr_prach(gNB);
@@ -236,10 +239,13 @@ void phy_free_nr_gNB(PHY_VARS_gNB *gNB)
   }
   free_and_zero(common_vars->beam_id);
 
-  for (int i = 0; i < gNB->frame_parms.nb_antennas_tx; i++) {
-    free_and_zero(common_vars->txdataF[i]);
+  /* free both grids through txdataF_set: txdataF may point at either */
+  for (int s = 0; s < 2; s++) {
+    for (int i = 0; i < gNB->frame_parms.nb_antennas_tx; i++)
+      free_and_zero(common_vars->txdataF_set[s][i]);
+    free_and_zero(common_vars->txdataF_set[s]);
   }
-  free_and_zero(common_vars->txdataF);
+  common_vars->txdataF = NULL;
 
   /* Do NOT free per-antenna txdataF/rxdataF: the gNB gets a pointer to the
    * RU's txdataF/rxdataF, and the RU will free that */

@@ -54,13 +54,16 @@
 static void rx_func(processingData_L1_t *param);
 
 /* split 7.2: precoding and BF, C-plane and DL U-plane through the fhi_72 library */
-static void tx_split72(PHY_VARS_gNB *gNB, int slot_type, int frame_tx, int slot_tx)
+/* own_meas: false when the TX pipeline runs this on L1_tx_send, where phy_proc_tx was
+ * already stopped at the hand-off (it is not safe to stop it from a second thread). */
+static void tx_split72(PHY_VARS_gNB *gNB, int slot_type, int frame_tx, int slot_tx, c16_t **txdataF, bool own_meas)
 {
   const bool dl_slot = slot_type & NR_DOWNLINK_SLOT;
   fhi72_transport_t *t = gNB->fhi72_transport;
   if (dl_slot) {
-    t->prec_bf(gNB, frame_tx, slot_tx);
-    STOP_MEAS_FULL_SLOT(&gNB->phy_proc_tx, slot_type, NR_DOWNLINK_SLOT);
+    t->prec_bf(gNB, txdataF, frame_tx, slot_tx);
+    if (own_meas)
+      STOP_MEAS_FULL_SLOT(&gNB->phy_proc_tx, slot_type, NR_DOWNLINK_SLOT);
   }
   // beam API - fill TX and/or RX beam IDs
   if (gNB->common_vars.analog_bf)
@@ -159,6 +162,20 @@ static void tx_overrun_alarm(PHY_VARS_gNB *gNB, const nfapi_nr_dl_tti_request_t 
  * Split 8 keeps pushing from tx_func. */
 static _Atomic int g_ul_cfg_abs = -1; /* absolute slot of the newest stored UL_tti_req */
 
+/* L1 TX pipeline, split 7.2 only, OAI_L1_TX_PIPE=1 (core OAI_L1_TX_PIPE_CORE, default 0).
+ * tx_func is MAC indication + grid generation (~330 us at 300 Mbps DL) and then
+ * tx_split72, precoding/copy + BFP compression + send (~185 us). Serially that was 607
+ * us per DL slot at 400 Mbps against a 500 us cadence. With the pipeline, tx_func hands
+ * tx_split72 to L1_tx_send and goes on to generate the next slot, so a slot costs
+ * max(generate, send) instead of their sum. The grid (txdataF) alternates between two
+ * sets so the next slot never writes the one being sent; a set is taken back only once
+ * L1_tx_send has finished with it (g_txset_free). L1_tx_send is one thread, so slots
+ * still leave in order. Off: tx_func is exactly as before. */
+static int g_txp_on = -1;
+static void tx_pipe_init(PHY_VARS_gNB *gNB);
+static int tx_pipe_take_set(PHY_VARS_gNB *gNB, int frame, int slot);
+static void tx_pipe_handoff(PHY_VARS_gNB *gNB, int slot_type, int frame, int slot, int set, uint64_t t_start);
+
 void nr_push_rx_job(PHY_VARS_gNB *gNB, int frame_rx, int slot_rx, uint64_t timestamp_tx)
 {
   notifiedFIFO_elt_t *res = newNotifiedFIFO_elt(sizeof(processingData_L1_t), 0, &gNB->resp_L1, NULL);
@@ -180,6 +197,10 @@ static void tx_func(processingData_L1tx_t *info)
   int slot_rx = info->slot_rx;
   LOG_D(NR_PHY, "%d.%d running tx_func\n", frame_tx, slot_tx);
   PHY_VARS_gNB *gNB = info->gNB;
+  const uint64_t t_tx0 = (uint64_t)clock_gettime_oai();
+  if (g_txp_on < 0)
+    tx_pipe_init(gNB);
+  const int tx_set = g_txp_on ? tx_pipe_take_set(gNB, frame_tx, slot_tx) : 0;
   NR_IF_Module_t *ifi = gNB->if_inst;
   nfapi_nr_config_request_scf_t *cfg = &gNB->gNB_config;
 
@@ -220,9 +241,15 @@ static void tx_func(processingData_L1tx_t *info)
     STOP_MEAS_FULL_SLOT(&gNB->gnb_tx_procedures_stats, tx_slot_type, NR_DOWNLINK_SLOT);
   }
 
-  if (gNB->fhi72_transport)
-    tx_split72(gNB, tx_slot_type, frame_tx, slot_tx);
-  else
+  if (gNB->fhi72_transport) {
+    if (g_txp_on) {
+      if (tx_slot_type & NR_DOWNLINK_SLOT)
+        STOP_MEAS_FULL_SLOT(&gNB->phy_proc_tx, tx_slot_type, NR_DOWNLINK_SLOT); /* generate only */
+      tx_pipe_handoff(gNB, tx_slot_type, frame_tx, slot_tx, tx_set, t_tx0);
+    } else {
+      tx_split72(gNB, tx_slot_type, frame_tx, slot_tx, gNB->common_vars.txdataF, true);
+    }
+  } else
     tx_split8(gNB, tx_slot_type, frame_tx, slot_tx, info->timestamp_tx);
   if (tx_slot_type & NR_DOWNLINK_SLOT)
     tx_overrun_alarm(gNB, &sched_response.DL_req, frame_tx, slot_tx);
@@ -351,6 +378,10 @@ static defer_hist_t g_h_disp;     /* RX job queued -> a pool worker starts it */
 static defer_hist_t g_h_irx;      /* pipelined stage 1: pop -> inner-RX batches done */
 static defer_hist_t g_h_cfgwait;  /* split 7.2: RX job waiting for tx_func to store its UL config */
 static uint64_t g_cfgwait_timeouts;
+static defer_hist_t g_h_txset;  /* tx_func waiting for a free grid set (send stage behind) */
+static defer_hist_t g_h_txq;    /* hand-off -> L1_tx_send starts the slot */
+static defer_hist_t g_h_txsend; /* copy + C-plane + BFP compression + send */
+static defer_hist_t g_h_txe2e;  /* tx_func start -> slot sent */
 
 
 /* High-water marks on the two queues that are demonstrably FULL when the DU dies:
@@ -393,6 +424,13 @@ static size_t defer_hist_dump(char *o, size_t n)
   k += defer_hist_one(o + k, n - k, "back_half", &g_h_work);
   k += defer_hist_one(o + k, n - k, "pool_wait", &g_h_disp);
   k += defer_hist_one(o + k, n - k, "ul_cfg_wait", &g_h_cfgwait);
+  if (g_txp_on > 0) {
+    k += snprintf(o + k, n - k, "L1 TX pipeline, per-slot:\n");
+    k += defer_hist_one(o + k, n - k, "tx_set_wait", &g_h_txset);
+    k += defer_hist_one(o + k, n - k, "tx_send_q", &g_h_txq);
+    k += defer_hist_one(o + k, n - k, "tx_send", &g_h_txsend);
+    k += defer_hist_one(o + k, n - k, "tx_e2e", &g_h_txe2e);
+  }
   if (g_cfgwait_timeouts)
     k += snprintf(o + k, n - k, "  ul_cfg_wait timed out %llu times\n", (unsigned long long)g_cfgwait_timeouts);
   k += snprintf(o + k, n - k,
@@ -500,6 +538,74 @@ static void defer_back_half_start(void)
   }
   g_defer_up = 1;
   LOG_I(NR_PHY, "L1 RX back half DEFERRED onto its own thread%s\n", g_pipe_up ? "s (pipelined: inner RX, then decode; depth 2)" : " (depth 1)");
+}
+
+/* ---- L1 TX pipeline (see g_txp_on) ---- */
+typedef struct {
+  PHY_VARS_gNB *gNB;
+  int slot_type, frame, slot, set;
+  uint64_t t_start, t_push; /* tx_func start, hand-off */
+} tx_send_msg_t;
+static notifiedFIFO_t g_tx_send_fifo;
+static sem_t g_txset_free[2];
+static pthread_t g_tx_send_thread;
+
+static void *tx_send_thread(void *arg)
+{
+  (void)arg;
+  /* No oai_exit check: tx_func may be parked on g_txset_free, so this must keep
+   * draining until the process goes. */
+  for (;;) {
+    notifiedFIFO_elt_t *res = pullNotifiedFIFO(&g_tx_send_fifo);
+    if (res == NULL)
+      break;
+    tx_send_msg_t *m = (tx_send_msg_t *)NotifiedFifoData(res);
+    const uint64_t t0 = (uint64_t)clock_gettime_oai();
+    defer_hist_add(&g_h_txq, t0 - m->t_push, m->frame, m->slot);
+    tx_split72(m->gNB, m->slot_type, m->frame, m->slot, m->gNB->common_vars.txdataF_set[m->set], false);
+    const uint64_t t1 = (uint64_t)clock_gettime_oai();
+    defer_hist_add(&g_h_txsend, t1 - t0, m->frame, m->slot);
+    defer_hist_add(&g_h_txe2e, t1 - m->t_start, m->frame, m->slot);
+    const int set = m->set;
+    delNotifiedFIFO_elt(res);
+    sem_post(&g_txset_free[set]);
+  }
+  return NULL;
+}
+
+static void tx_pipe_init(PHY_VARS_gNB *gNB)
+{
+  const char *e = getenv("OAI_L1_TX_PIPE");
+  g_txp_on = (e && e[0] && e[0] != '0' && gNB->fhi72_transport) ? 1 : 0;
+  if (!g_txp_on)
+    return;
+  initNotifiedFIFO(&g_tx_send_fifo);
+  sem_init(&g_txset_free[0], 0, 1);
+  sem_init(&g_txset_free[1], 0, 1);
+  const char *c = getenv("OAI_L1_TX_PIPE_CORE");
+  const int core = (c && c[0]) ? atoi(c) : 0;
+  threadCreate(&g_tx_send_thread, tx_send_thread, NULL, "L1_tx_send", core, OAI_PRIORITY_RT_MAX);
+  LOG_I(NR_PHY, "L1 TX pipeline ON: generate on L1_tx_thread, copy+compress+send on L1_tx_send (core %d)\n", core);
+}
+
+static int tx_pipe_take_set(PHY_VARS_gNB *gNB, int frame, int slot)
+{
+  static unsigned seq;
+  const int set = seq++ & 1;
+  const uint64_t t0 = (uint64_t)clock_gettime_oai();
+  sem_wait(&g_txset_free[set]);
+  defer_hist_add(&g_h_txset, (uint64_t)clock_gettime_oai() - t0, frame, slot);
+  gNB->common_vars.txdataF = gNB->common_vars.txdataF_set[set]; /* everything that generates reads this */
+  return set;
+}
+
+static void tx_pipe_handoff(PHY_VARS_gNB *gNB, int slot_type, int frame, int slot, int set, uint64_t t_start)
+{
+  notifiedFIFO_elt_t *e = newNotifiedFIFO_elt(sizeof(tx_send_msg_t), 0, &g_tx_send_fifo, NULL);
+  tx_send_msg_t *m = (tx_send_msg_t *)NotifiedFifoData(e);
+  *m = (tx_send_msg_t){.gNB = gNB, .slot_type = slot_type, .frame = frame, .slot = slot, .set = set,
+                       .t_start = t_start, .t_push = (uint64_t)clock_gettime_oai()};
+  pushNotifiedFIFO(&g_tx_send_fifo, e);
 }
 
 /* Split 7.2 only (see nr_push_rx_job): wait until tx_func has stored the UL config for
