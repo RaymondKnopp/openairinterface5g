@@ -157,6 +157,19 @@ static uint32_t g_cb_us16[2];
 static uint64_t g_hyb_poll_us;
 static uint32_t g_hyb_ready, g_hyb_reads;
 static uint32_t g_batch_wall_min_us = 0xffffffffu;
+/* Bounded batch wait. A live DU cannot wait seconds for the DSP: on 2026-11-23 cdsp0 sat
+ * on one batch for ~5 s (a ~4 s sleep from the estimate, then the 1 s poll bound), the
+ * L1 RX front half blocked behind it, the PRACH queue filled and the DU asserted. Now every
+ * wait ends OAI_LDPC_TIMEOUT_US after the post (default 5 ms) and the TB fails its CRC,
+ * which HARQ retransmits.
+ * An abandoned batch is still running on the DSP, writing into the device's ONE set of
+ * llr/out/meta buffers, and its response will arrive later with nothing to say which batch
+ * it belongs to. So the device owes a response: g_dev_owed[d]. Before the next post the
+ * owed responses are drained without blocking; while any is still outstanding the batch
+ * fails at once without touching the buffers, so a stale result is never read as a new one. */
+static uint32_t g_wait_timeout_us;
+static uint32_t g_dev_owed[2];
+static uint32_t g_batch_timeouts, g_batch_skipped_owed;
 static uint32_t g_batch_wall_max_us;
 
 /* ---- TB-level batch buffers -------------------------------------------------
@@ -536,6 +549,9 @@ static void print_phase_profile(void)
             "batch",
             (unsigned long long)(g_batch_wall_us_total / g_batch_count),
             g_batch_count);
+  if (g_batch_timeouts || g_batch_skipped_owed)
+    fprintf(stderr, "  %-10s %u batches timed out, %u skipped while a device still owed a response\n",
+            "timeouts", g_batch_timeouts, g_batch_skipped_owed);
   if (g_batch_count) {
     const uint64_t cl = g_claims_total[0] + g_claims_total[1] + g_claims_total[2] + g_claims_total[3];
     fprintf(stderr,
@@ -1282,6 +1298,30 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
   if (b->C == 0 || b->C > LDPC_HEX_BATCH_CB)
     return -1;
 
+  if (!g_wait_timeout_us) {
+    const char *e = getenv("OAI_LDPC_TIMEOUT_US");
+    g_wait_timeout_us = (e && atoi(e) > 0) ? (uint32_t)atoi(e) : 5000u;
+    fprintf(stderr, "ldpc_hexagon: batch wait bounded at %u us\n", g_wait_timeout_us);
+  }
+  /* Collect responses still owed by batches we gave up on (see g_dev_owed). */
+  for (int d = 0; d < g_ndev; d++) {
+    while (g_dev_owed[d]) {
+      union {
+        ldpc_q_batch_resp_t r;
+        uint8_t raw[256];
+      } junk;
+      struct dspqueue_buffer jbufs[8];
+      uint32_t jflags = 0, jlen = 0, jnbufs = 0;
+      if (dspqueue_read_noblock(dev_queue(d), &jflags, 8, &jnbufs, jbufs, sizeof junk, &jlen, (uint8_t *)&junk) != 0)
+        break;
+      g_dev_owed[d]--;
+    }
+    if (g_dev_owed[d]) {
+      g_batch_skipped_owed++;
+      return -1;
+    }
+  }
+
   /* The DSP writes C entries; clear only those, not all 144. */
   for (int d = 0; d < g_ndev; d++)
     memset(dev_meta(d), 0, b->C);
@@ -1391,6 +1431,13 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
 
   struct timespec t_w0, t_w1, t_r1, t_p1;
   clock_gettime(CLOCK_MONOTONIC, &t_w0);
+  struct timespec t_dl = t_w0; /* hard deadline for every read below */
+  t_dl.tv_sec += (time_t)(g_wait_timeout_us / 1000000u);
+  t_dl.tv_nsec += (long)(g_wait_timeout_us % 1000000u) * 1000L;
+  if (t_dl.tv_nsec >= 1000000000L) {
+    t_dl.tv_sec++;
+    t_dl.tv_nsec -= 1000000000L;
+  }
   /* Post to BOTH devices before reading either: the writes are non-blocking, so the two
    * DSPs run concurrently and the wait below is max(A,B) rather than A+B. */
   for (int d = 0; d < ndev; d++) {
@@ -1401,6 +1448,8 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
     int werr = dspqueue_write_noblock(dev_queue(d), 0, 3, bufs, sizeof req, (const uint8_t *)&req);
     if (werr) {
       fprintf(stderr, "ldpc_hexagon: batch write_noblock dev%d failed: 0x%08x\n", d, (unsigned)werr);
+      for (int e = 0; e < d; e++)
+        g_dev_owed[e]++;
       return -1;
     }
   }
@@ -1468,6 +1517,8 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
         dl.tv_sec++;
         dl.tv_nsec -= 1000000000L;
       }
+      if (dl.tv_sec > t_dl.tv_sec || (dl.tv_sec == t_dl.tv_sec && dl.tv_nsec > t_dl.tv_nsec))
+        dl = t_dl;
       if (sleep_ns)
         while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &dl, NULL) == EINTR)
           ;
@@ -1478,10 +1529,10 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
         qerr = dspqueue_read_noblock(dev_queue(d), &rflags, 8, &rnbufs, rbufs, sizeof rmsg, &rlen, (uint8_t *)&rmsg);
         if (qerr != AEE_EWOULDBLOCK)
           break;
-        /* Same 1 s bound as the blocking read, so a dead PD is an error and not a hang. */
-        if ((++spins & 1023u) == 0) {
+        /* Bounded by the batch deadline, so a stalled DSP costs one TB and not the DU. */
+        if ((++spins & 63u) == 0) {
           clock_gettime(CLOCK_MONOTONIC, &pn);
-          if (pn.tv_sec - p0.tv_sec >= 2 || (pn.tv_sec - p0.tv_sec) * 1000000000L + (pn.tv_nsec - p0.tv_nsec) > 1000000000L)
+          if (pn.tv_sec > t_dl.tv_sec || (pn.tv_sec == t_dl.tv_sec && pn.tv_nsec >= t_dl.tv_nsec))
             break;
         }
       }
@@ -1491,6 +1542,9 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
       if (spins == 0)
         g_hyb_ready++;
     } else if (batch_sleep) {
+      struct timespec now;
+      clock_gettime(CLOCK_MONOTONIC, &now);
+      const int64_t left_us = (int64_t)(t_dl.tv_sec - now.tv_sec) * 1000000 + (t_dl.tv_nsec - now.tv_nsec) / 1000;
       qerr = dspqueue_read(dev_queue(d),
                            &rflags,
                            8,
@@ -1499,13 +1553,28 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
                            sizeof rmsg,
                            &rlen,
                            (uint8_t *)&rmsg,
-                           1000000 /* us; bounded so a dead PD is not fatal */);
+                           left_us > 0 ? (uint32_t)left_us : 1u);
     } else {
-      for (;;) {
+      for (uint32_t spins = 1;; spins++) {
         qerr = dspqueue_read_noblock(dev_queue(d), &rflags, 8, &rnbufs, rbufs, sizeof rmsg, &rlen, (uint8_t *)&rmsg);
         if (qerr != AEE_EWOULDBLOCK)
           break;
+        if ((spins & 63u) == 0) {
+          struct timespec pn;
+          clock_gettime(CLOCK_MONOTONIC, &pn);
+          if (pn.tv_sec > t_dl.tv_sec || (pn.tv_sec == t_dl.tv_sec && pn.tv_nsec >= t_dl.tv_nsec))
+            break;
+        }
       }
+    }
+    if (qerr == AEE_EWOULDBLOCK || qerr == AEE_EEXPIRED) {
+      /* Timed out: this device and every one not yet read still owe a response. */
+      for (int e = d; e < ndev; e++)
+        g_dev_owed[e]++;
+      if (g_batch_timeouts++ < 8)
+        fprintf(stderr, "ldpc_hexagon: dev%d batch (C=%u) not back after %u us: TB fails CRC, device drained before reuse\n",
+                d, (unsigned)segn[d], g_wait_timeout_us);
+      return -1;
     }
     static int shape_logged = 0;
     if (!shape_logged) {
@@ -1555,6 +1624,8 @@ int ldpc_hex_batch_run(const ldpc_hex_batch_t *b, uint8_t *iters)
    * times the steady state, which would make the next few waits oversleep. */
   if (g_batch_count > 0) {
     for (int d = 0; d < ndev; d++) {
+      if (resp_d[d].batch_us > g_wait_timeout_us)
+        continue; /* one stalled batch must not stretch every later sleep */
       const int32_t cb = (int32_t)((resp_d[d].batch_us * 16u) / segn[d]);
       const int32_t old = (int32_t)g_cb_us16[d];
       g_cb_us16[d] = old ? (uint32_t)(old + (cb - old) / 8) : (uint32_t)cb;
